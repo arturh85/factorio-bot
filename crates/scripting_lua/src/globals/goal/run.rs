@@ -493,7 +493,28 @@ impl LuaUserData for RunValue {
     }
 }
 
-/// Hands this run's [`Replay`] to `sink`, serialised, exactly once.
+/// Hands this run's [`Replay`], serialised, to each destination that exists,
+/// exactly once.
+///
+/// # Two destinations, and neither implies the other
+///
+/// `sink` is the browser's copy: the job's SSE stream, present only when a
+/// script runs under the server. `live` is the run's own directory, present
+/// whenever a run is being recorded. **They are independent**, and the pairing
+/// that matters is the one the tests used not to cover: every CLI path
+/// (`factorio-bot lua`, the REPL) records a run and has no sink at all, so a
+/// guard that returned early on a missing sink left `replay.json` unwritten for
+/// every run made outside the viewer — silently, and invisibly to a test suite
+/// that always supplied a sink. Returning early therefore requires *both* to be
+/// absent, which is the planning-only interpreter and nothing else.
+///
+/// The sink is served **first**: it is the destination something is waiting on
+/// (a browser attached to the stream), while the file is read afterwards by
+/// whoever opens the run. Writing the file first would put a filesystem write
+/// on the path of a live reader for no gain.
+///
+/// The document is serialised **once** and both destinations receive that same
+/// string, so the file and the stream cannot disagree about what the run did.
 ///
 /// # When, and why there
 ///
@@ -542,27 +563,42 @@ impl LuaUserData for RunValue {
 /// costs the run nothing: [`Replay`] carries `Position`s, and serde_json
 /// refuses a non-finite float, so this is reachable rather than theoretical. A
 /// run that reached the end is not failed retroactively over its report, so the
-/// failure goes out on the run's own error stream and the run stands.
+/// failure goes out on the run's own error stream and the run stands. With no
+/// sink there is no such stream, so it goes to `tracing` instead — a diagnostic
+/// for whoever debugs it later, which is exactly what this file's logging split
+/// reserves `tracing` for.
 fn emit_replay(
     sink: Option<&dyn OutputSink>,
     sched: &Schedule,
     log: &Mutex<ExecutionLog>,
     refused: Option<String>,
+    live: Option<&LiveRecord>,
 ) {
-    let Some(sink) = sink else {
+    if sink.is_none() && live.is_none() {
         return;
-    };
+    }
     // The log's guard is a temporary of this statement, so it is released
     // before the sink is called: `replay` is an implementation this crate does
     // not control, and holding the run's log across it would let a slow one
     // block a concurrent `:progress()`.
     let replay = Replay::new(sched, &lock(log), refused);
     match factorio_bot_core::serde_json::to_string(&replay) {
-        Ok(json) => sink.replay(&json),
-        Err(err) => sink.line(
-            factorio_bot_scripting::Stream::Stderr,
-            &format!("the run finished, but its replay could not be serialised: {err}"),
-        ),
+        Ok(json) => {
+            if let Some(sink) = sink {
+                sink.replay(&json);
+            }
+            if let Some(live) = live {
+                live.write_replay(&json);
+            }
+        }
+        Err(err) => {
+            let message =
+                format!("the run finished, but its replay could not be serialised: {err}");
+            match sink {
+                Some(sink) => sink.line(factorio_bot_scripting::Stream::Stderr, &message),
+                None => factorio_bot_core::tracing::error!("{message}"),
+            }
+        }
     }
 }
 
@@ -962,6 +998,11 @@ fn spawn(
         // no second registration, and nothing left beating over a run that is
         // over. A missing recorder means no heartbeat at all rather than a
         // task that wakes up to discover it has nowhere to write.
+        //
+        // Cloned before the move below: `emit_replay` needs its own handle to
+        // persist the replay once the run ends, and the heartbeat spawn takes
+        // the original by value.
+        let replay_live = live.clone();
         let beat = live.map(|live| {
             factorio_bot_core::tokio::spawn(beat_batch_progress(
                 live, beat_net, beat_sched, beat_log, beat_act, beat_rx,
@@ -981,7 +1022,13 @@ fn spawn(
         if let Some(err) = &refused {
             *lock(&task_error) = Some(err.clone());
         }
-        emit_replay(sink.as_deref(), &sched, &task_log, refused);
+        emit_replay(
+            sink.as_deref(),
+            &sched,
+            &task_log,
+            refused,
+            replay_live.as_ref(),
+        );
         // No receiver is an ordinary outcome, not a failure: it just means
         // nothing (`:wait()`, `PendingWork`'s drain) is waiting on this run.
         let _ = finished_tx.send(true);
@@ -2857,6 +2904,64 @@ mod tests {
             .expect("recorder starts");
         let run_dir = recorder.dir().to_path_buf();
         (LiveRecord::for_tests(recorder), tmp, run_dir)
+    }
+
+    /// Runs the smallest fixture the neighbouring replay tests build --
+    /// `mining_plan()` against a never-failing stub actuator -- to completion,
+    /// with `sink` and `live` passed straight through to [`spawn`] exactly as
+    /// the heartbeat tests above pass `live`. Exists so a test that cares only
+    /// about what reaches `sink` and `live` does not have to restate the
+    /// fixture setup those tests already have.
+    async fn run_one_step_with(sink: Option<Arc<dyn OutputSink>>, live: Option<LiveRecord>) {
+        let (net, sched) = mining_plan();
+        let (_run, join) = spawn(
+            Arc::new(StubActuator::new(Failure::Never)),
+            sched,
+            net,
+            ExecutionLog::default(),
+            None,
+            sink,
+            live,
+        );
+        join.await.expect("the run's task finished");
+    }
+
+    #[tokio::test]
+    async fn the_replay_is_written_beside_the_events() {
+        let (live, _tmp, run_dir) = live_record();
+        // Reuse the smallest run fixture the neighbouring replay tests build
+        // (a one-step schedule against the stub actuator); pass `Some(live)`
+        // as the run's `live` argument exactly as the heartbeat tests do.
+        let sink = RecordingSink::default();
+        run_one_step_with(Some(Arc::new(sink.clone())), Some(live)).await;
+        let on_disk =
+            std::fs::read_to_string(run_dir.join("replay.json")).expect("replay.json written");
+        let on_wire = only_replay(&sink);
+        let parsed: Value = serde_json::from_str(&on_disk).unwrap();
+        assert_eq!(
+            parsed, on_wire,
+            "the file is the document the sink received, byte for byte in meaning"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_with_a_recorder_and_no_sink_still_writes_its_replay() {
+        // Every CLI path is exactly this shape: `factorio-bot lua` and the
+        // REPL both pass `None` for the sink, because there is no browser on
+        // the other end of anything -- and both record a run. A guard that
+        // returned early on a missing sink made `replay.json` unreachable for
+        // all of them while the file's own tests, which always pass a sink,
+        // stayed green.
+        let (live, _tmp, run_dir) = live_record();
+        run_one_step_with(None, Some(live)).await;
+        let on_disk =
+            std::fs::read_to_string(run_dir.join("replay.json")).expect("replay.json written");
+        let parsed: Value =
+            serde_json::from_str(&on_disk).expect("what was written is a JSON document");
+        assert!(
+            parsed.get("steps").and_then(Value::as_array).is_some(),
+            "and it is the replay document, not an empty file: {parsed}"
+        );
     }
 
     /// Every `batch_progress` line in a run directory, in the order written.

@@ -965,7 +965,7 @@ git commit -F /tmp/msg -- app/src/components/run/CursorBar.vue app/src/component
 
 ---
 
-### Task 10: Gate, browser check, note
+### Task 10: Gate, browser check, note (run LAST, after Task 11)
 
 **Files:**
 - Create: `docs/superpowers/notes/2026-09-09-run-anatomy-phase-2.md`
@@ -1023,6 +1023,70 @@ git commit -F /tmp/msg -- docs/superpowers/notes/2026-09-09-run-anatomy-phase-2.
 
 ---
 
+### Task 11: An abandoned step is a lane, not a dropped settle
+
+**Files:**
+- Modify: `crates/core/src/record/lanes.rs` (+ its `#[cfg(test)] mod tests`), `app/src/components/run/LaneBand.vue`, `LaneBand.spec.ts`, `app/src/lib/runIdle.ts`
+
+**Interfaces:**
+- Produces: `derive_lanes` emits, for an `ActionSettled` whose `status == "abandoned"` and which matches no open dispatch, a `Lane { bot, id: Some(id), action: <the error text, or "abandoned">, from_tick: tick, to_tick: Some(tick), status: Some("abandoned"), error }` — a zero-length lane at the settle tick. A settle with no dispatch and any other status stays dropped (that is a genuinely broken record, and `run_analysis.py` reports it). `laneSegments` gives such a lane `verb: 'other'` and `instant: true`; `LaneBand` draws `status === 'abandoned'` as a hollow 1.6-wide mark (`fill="none"`, `stroke="var(--color-ink-muted)"`, `stroke-dasharray="1 1"`) with a title prefixed `never dispatched: `, and `idleIntervals` does NOT count it as work.
+
+- [ ] **Step 1: Write the failing tests**
+
+Rust, in `lanes.rs`'s tests module (copy the neighbouring test's way of building an `Event`):
+```rust
+    #[test]
+    fn an_abandoned_settle_without_a_dispatch_becomes_a_zero_length_lane() {
+        let events = vec![Event {
+            tick: 500,
+            kind: EventKind::ActionSettled {
+                id: 7, bot: 1, status: "abandoned".into(), elapsed_ticks: None,
+                error: Some("abandoned: predecessor 5 failed".into()), failure: None,
+            },
+        }];
+        let lanes = derive_lanes(&events);
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].from_tick, 500);
+        assert_eq!(lanes[0].to_tick, Some(500));
+        assert_eq!(lanes[0].status.as_deref(), Some("abandoned"));
+        assert_eq!(lanes[0].id, Some(7));
+    }
+
+    #[test]
+    fn a_non_abandoned_settle_without_a_dispatch_is_still_dropped() {
+        let events = vec![Event {
+            tick: 500,
+            kind: EventKind::ActionSettled {
+                id: 7, bot: 1, status: "success".into(), elapsed_ticks: Some(3), error: None, failure: None,
+            },
+        }];
+        assert!(derive_lanes(&events).is_empty());
+    }
+```
+TS, in `LaneBand.spec.ts`:
+```ts
+    it('draws an abandoned step as a hollow mark that does not count as work', () => {
+        const lanes = [{bot: 1, id: 9, action: 'abandoned: predecessor 5 failed', from_tick: 5000, to_tick: 5000, status: 'abandoned', error: 'abandoned: predecessor 5 failed'}];
+        const w = mount(LaneBand, {props: {scale, clock: scale, cursor: run.lo, lanes, events: []}});
+        const seg = w.get('rect.segment');
+        expect(seg.attributes('fill')).toBe('none');
+        expect(seg.find('title').text()).toContain('never dispatched');
+        expect(w.text()).toContain('idle 100%');
+    });
+```
+
+- [ ] **Step 2: Run to verify failure** — `nix develop -c cargo test -p factorio-bot-core --lib lanes` and `cd app && pnpm vitest run src/components/run/LaneBand.spec.ts` — Expected: FAIL (0 lanes; segment filled).
+
+- [ ] **Step 3: Implement** — in `derive_lanes`'s `ActionSettled` arm, when the `find` returns `None` and `status == "abandoned"`, push `Lane { bot: *bot, id: Some(*id), action: error.clone().unwrap_or_else(|| "abandoned".into()), from_tick: event.tick, to_tick: Some(event.tick), status: Some(status.clone()), error: error.clone() }`, with a doc comment: an abandoned step settles without dispatching, by design (the executor writes the tail of a plan that never ran), so it is a real record and not a broken join. In `runIdle.ts`'s `idleIntervals`, exclude lanes with `status === 'abandoned'` from `busy` (they are not work). In `LaneBand.vue`, branch the segment's `fill`/`stroke`/`stroke-dasharray` on `s.status === 'abandoned'` and prefix its title with `never dispatched: `.
+
+- [ ] **Step 4: Run to verify pass** — both commands, plus `pnpm vitest run src/lib/runIdle.spec.ts` (the fixture's 85 gaps and 6,984 ticks must be unchanged — it has no abandoned lanes) and `pnpm lint`.
+
+- [ ] **Step 5: Commit**
+
+Format with `rustfmt --edition 2024 crates/core/src/record/lanes.rs`; message (quoted-heredoc file, `git commit -F`): subject `feat(record): an abandoned step is a zero-length lane, drawn as "never dispatched"`, body: an abandoned step settles without a dispatch by design; `derive_lanes` dropped it as a broken join, so the tail of a truncated plan was invisible in the lanes exactly as it had been in the events before `abandoned` existed. Paths: `crates/core/src/record/lanes.rs app/src/components/run/LaneBand.vue app/src/components/run/LaneBand.spec.ts app/src/lib/runIdle.ts`.
+
+---
+
 ## Self-review
 
 - **Spec §2.2 table**: provenance route → T1; RunSummary fields → T2; slices → T3; persisted replay + route → T4; savepoints → T5; seam → T6 (every task regenerates the snapshot so the TS side goes red until T6 mirrors it — deliberate).
@@ -1031,3 +1095,27 @@ git commit -F /tmp/msg -- docs/superpowers/notes/2026-09-09-run-anatomy-phase-2.
 - **Parked Phase 1 items**: CursorBar clock and LaneBand denominator → T9; evidence per lane and the analysis fold-in are named as Phase 3 with the reason.
 - **Type consistency**: `Provenance`/`Savepoint` field names identical in Rust (T1/T5), TS (T6), store (T7), chips (T8); `replayCounts` shape identical in T7 and T8; `clock: TickScale` matches Phase 1's prop name.
 - **Constraint check**: no new files under `crates/*/tests/`; all cargo under `nix develop -c`; every wire change goes through the snapshot.
+
+---
+
+## Addenda landed during execution
+
+Deviations from the plan above, each ruled by the controller during the whole-branch
+review rather than planned here. Listed so the plan and the branch agree about what
+shipped.
+
+- **`MilestoneRibbon` reasons, and the stuck-reason line.** A segment carries why the
+  milestone is where it is, and `RunPage` shows the last planner refusal under the
+  headline — the fact that made `run-1788926478-07032`'s stuck milestone readable.
+- **Verdict denominators.** A verdict carries the count it was computed over, so
+  `roster-fed` is quotable rather than merely displayed.
+- **`refusedReplans` → the `planning-unanswered` marker.** The label retracts from
+  `replan refused` to `no plan recorded after planning`: the record cannot separate a
+  refusal from a log that ended there, and 9 of 24 archived runs end that way.
+- **The replay and savepoint error chips.** A `/replay` or `/savepoints` fetch that
+  failed is drawn with its reason, exactly as provenance's already was, instead of
+  rendering as "this run planned nothing" / "this run saved nothing".
+- **The replay-without-sink fix.** `emit_replay` returned early on a missing sink, so
+  `write_replay` was unreachable from every CLI path — which are precisely the paths
+  that record a run. T4 persisted the replay; this is what made the persistence
+  reachable outside the viewer.

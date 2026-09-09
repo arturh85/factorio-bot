@@ -17,11 +17,14 @@ use axum::Json;
 use axum::extract::{Path, Query, Request, State};
 use axum::response::Response;
 use factorio_bot_core::record::map::{MapRecord, read_map};
+use factorio_bot_core::record::provenance::{Provenance, read_provenance};
+use factorio_bot_core::record::savepoint::{SAVEPOINTS_DIR, Savepoint};
 use factorio_bot_core::record::video::{
     TICKS_FILE, VIDEO_DIR, VideoManifest, clock::read_tick_samples, read_video_dir,
 };
 use factorio_bot_core::record::{
-    Event, Lane, Manifest, Sample, Split, derive_lanes, derive_splits, read_events, read_samples,
+    Event, Lane, Manifest, Sample, SampleKind, Split, derive_lanes, derive_splits, read_events,
+    read_samples,
 };
 use factorio_bot_core::scripts::resolve_script_path;
 use serde::{Deserialize, Serialize};
@@ -46,6 +49,21 @@ pub struct RunSummary {
     pub elapsed_ticks: Option<u64>,
     pub events: Option<usize>,
     pub splits: Option<usize>,
+    // `Some(0)` has a THIRD meaning the published description below does not
+    // name, and the description is left byte-identical because it is in
+    // `openapi.snapshot.json` and nothing on the wire changed:
+    // `Manifest::samples` is `#[serde(default)]`, so a manifest written before
+    // that field existed parses as `0` as well. `Some(0)` therefore reads "no
+    // samples file OR a pre-field manifest", and only `None` is unambiguous.
+    // Same for `map`, which carries `#[serde(default)]` for the same reason.
+    /// Archived sample lines. `None` for an unfinished run; `Some(0)` for a
+    /// finished run with no samples file.
+    pub samples: Option<usize>,
+    /// Lines in `map.jsonl`, same convention.
+    pub map: Option<usize>,
+    /// Ticks of the run's span the samples do NOT cover (see `Manifest`).
+    /// `None` when the run has no samples at all or never finished.
+    pub samples_lag_ticks: Option<u64>,
 }
 
 impl RunSummary {
@@ -59,6 +77,9 @@ impl RunSummary {
             elapsed_ticks: None,
             events: None,
             splits: None,
+            samples: None,
+            map: None,
+            samples_lag_ticks: None,
         }
     }
 
@@ -72,6 +93,9 @@ impl RunSummary {
             elapsed_ticks: manifest.elapsed_ticks,
             events: Some(manifest.events),
             splits: Some(manifest.splits),
+            samples: Some(manifest.samples),
+            map: Some(manifest.map),
+            samples_lag_ticks: manifest.samples_lag_ticks,
         }
     }
 }
@@ -133,6 +157,46 @@ pub struct RunMapResponse {
 pub struct EventFilter {
     /// Return only events of this `kind`.
     pub kind: Option<String>,
+}
+
+/// Narrows a stream to a tick window. Both bounds inclusive; either may be
+/// absent. The whole file is still read -- the record is line-oriented and
+/// has no index -- so this saves the wire and the browser, not the disk.
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+pub struct TickWindow {
+    /// First tick to include.
+    pub from: Option<u64>,
+    /// Last tick to include.
+    pub to: Option<u64>,
+}
+
+impl TickWindow {
+    fn contains(&self, tick: u64) -> bool {
+        self.from.is_none_or(|f| tick >= f) && self.to.is_none_or(|t| tick <= t)
+    }
+}
+
+/// `TickWindow` plus the sample `kind` (`bots`, `force`, `machines`).
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+pub struct SampleFilter {
+    /// First tick to include.
+    pub from: Option<u64>,
+    /// Last tick to include.
+    pub to: Option<u64>,
+    /// Return only samples of this `kind`.
+    pub kind: Option<String>,
+}
+
+/// The wire name of a sample's kind, without a second serialisation: the
+/// enum's `#[serde(tag = "kind")]` is the contract, and matching the variants
+/// here keeps this in step with it at compile time.
+fn sample_kind(sample: &Sample) -> &'static str {
+    match sample.kind {
+        SampleKind::Bots { .. } => "bots",
+        SampleKind::Force { .. } => "force",
+        SampleKind::Machines { .. } => "machines",
+        SampleKind::Unknown => "unknown",
+    }
 }
 
 async fn runs_root(state: &AppState) -> Result<PathBuf, ErrorResponse> {
@@ -251,6 +315,150 @@ pub async fn get_run(
     Ok(Json(RunDetail { summary, splits }))
 }
 
+/// What a run was launched with -- the fields that decide whether two runs
+/// may be compared at all.
+///
+/// A 404, not an empty object, when `provenance.json` is missing: the file is
+/// written at run *start* since 2026-09-06, so its absence means an older run
+/// and the client must show "not captured", never a default.
+#[utoipa::path(
+    get,
+    path = "/api/v1/runs/{id}/provenance",
+    tag = "Runs",
+    params(("id" = String, Path, description = "the run id")),
+    responses(
+        (status = 200, body = Provenance),
+        (status = 400, body = crate::error::ErrorResponse),
+        (status = 404, body = crate::error::ErrorResponse),
+    )
+)]
+pub async fn get_run_provenance(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Provenance>, ErrorResponse> {
+    let dir = run_dir(&runs_root(&state).await?, &id)?;
+    read_provenance(&dir)
+        .map(Json)
+        .ok_or_else(|| ErrorResponse::not_found(format!("run {id} recorded no provenance")))
+}
+
+/// `GET /api/v1/runs/{id}/savepoints` response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct RunSavepointsResponse {
+    /// Ascending by milestone index. Each names its `.zip` relative to the
+    /// run's `savepoints/` directory; `--resume-from <run>:<index>` is the
+    /// command that uses one. Excludes any milestone whose metadata parsed
+    /// but whose `.zip` is missing -- see `missing_zip`.
+    pub savepoints: Vec<Savepoint>,
+    // "did not parse" below is the published description and is deliberately
+    // left byte-identical -- it is in `openapi.snapshot.json`, and editing it
+    // costs a snapshot regeneration for no change in meaning on the wire. What
+    // it counts is slightly wider than its wording: a file that could not be
+    // READ (permissions, a file that vanished between the listing and the read,
+    // a directory of that name) is counted here too, because both failures
+    // leave the caller without that milestone's metadata and neither must read
+    // the same as "this milestone was never saved". See `get_run_savepoints`.
+    /// Metadata files that did not parse -- in practice a truncated or
+    /// corrupt `milestone-N.json`. Reported rather than swallowed, matching
+    /// the sibling responses' `skipped`: a corrupt file must not read the
+    /// same as "this milestone was never saved".
+    pub skipped: usize,
+    /// Milestone indices whose metadata parsed but whose `file` is not on
+    /// disk. Named here and NOT listed in `savepoints`, because listing them
+    /// would offer a resume that cannot happen.
+    pub missing_zip: Vec<u32>,
+}
+
+/// The milestone savepoints a run wrote.
+#[utoipa::path(
+    get,
+    path = "/api/v1/runs/{id}/savepoints",
+    tag = "Runs",
+    params(("id" = String, Path, description = "the run id")),
+    responses(
+        (status = 200, body = RunSavepointsResponse),
+        (status = 400, body = crate::error::ErrorResponse),
+        (status = 404, body = crate::error::ErrorResponse),
+    )
+)]
+pub async fn get_run_savepoints(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<RunSavepointsResponse>, ErrorResponse> {
+    let dir = run_dir(&runs_root(&state).await?, &id)?.join(SAVEPOINTS_DIR);
+    let mut skipped = 0usize;
+    let mut missing_zip = Vec::new();
+    let mut savepoints: Vec<Savepoint> = std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                // Read and parse in ONE fallible expression on purpose. They
+                // were two stages, and the read's failure was dropped before
+                // the counter -- so an unreadable `milestone-N.json` (a
+                // permission failure, a file that vanished between the listing
+                // and the read, a directory of that name) came back as
+                // `skipped: 0`, indistinguishable from a milestone that was
+                // never saved. Both failures are the same fact to a reader:
+                // this milestone's metadata did not arrive.
+                .filter_map(|e| {
+                    let parsed = std::fs::read(e.path())
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<Savepoint>(&bytes).ok());
+                    if parsed.is_none() {
+                        skipped += 1;
+                    }
+                    parsed
+                })
+                .filter(|savepoint| {
+                    if dir.join(&savepoint.file).is_file() {
+                        true
+                    } else {
+                        missing_zip.push(savepoint.milestone_index);
+                        false
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    savepoints.sort_by_key(|s| s.milestone_index);
+    missing_zip.sort_unstable();
+    Ok(Json(RunSavepointsResponse {
+        savepoints,
+        skipped,
+        missing_zip,
+    }))
+}
+
+/// The executor's replay -- planned against observed per step, with evidence.
+///
+/// Written by the run at its end since Phase 2 of Run Anatomy; a run archived
+/// before that, or one that never ran a plan, has none, and that is a 404
+/// rather than an empty document: an empty replay would read as a run that
+/// planned nothing.
+#[utoipa::path(
+    get,
+    path = "/api/v1/runs/{id}/replay",
+    tag = "Runs",
+    params(("id" = String, Path, description = "the run id")),
+    responses(
+        (status = 200, body = serde_json::Value, description = "the replay document, as the executor serialised it"),
+        (status = 400, body = crate::error::ErrorResponse),
+        (status = 404, body = crate::error::ErrorResponse),
+    )
+)]
+pub async fn get_run_replay(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ErrorResponse> {
+    let dir = run_dir(&runs_root(&state).await?, &id)?;
+    let bytes = std::fs::read(dir.join(factorio_bot_core::record::REPLAY_FILE))
+        .map_err(|_| ErrorResponse::not_found(format!("run {id} has no replay")))?;
+    serde_json::from_slice(&bytes)
+        .map(Json)
+        .map_err(|err| ErrorResponse::internal(format!("replay.json is not valid JSON: {err}")))
+}
+
 /// A run's event log.
 #[utoipa::path(
     get,
@@ -321,7 +529,7 @@ pub async fn get_run_lanes(
     get,
     path = "/api/v1/runs/{id}/samples",
     tag = "Runs",
-    params(("id" = String, Path, description = "the run id")),
+    params(("id" = String, Path, description = "the run id"), SampleFilter),
     responses(
         (status = 200, body = RunSamplesResponse),
         (status = 400, body = crate::error::ErrorResponse),
@@ -331,6 +539,7 @@ pub async fn get_run_lanes(
 pub async fn get_run_samples(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(filter): Query<SampleFilter>,
 ) -> Result<Json<RunSamplesResponse>, ErrorResponse> {
     let dir = run_dir(&runs_root(&state).await?, &id)?;
     let path = dir.join("samples.jsonl");
@@ -344,8 +553,18 @@ pub async fn get_run_samples(
     }
     let read = read_samples(&path)
         .map_err(|err| ErrorResponse::internal(format!("failed to read samples: {err}")))?;
+    let window = TickWindow {
+        from: filter.from,
+        to: filter.to,
+    };
+    let samples = read
+        .samples
+        .into_iter()
+        .filter(|s| window.contains(s.tick))
+        .filter(|s| filter.kind.as_deref().is_none_or(|k| sample_kind(s) == k))
+        .collect();
     Ok(Json(RunSamplesResponse {
-        samples: read.samples,
+        samples,
         skipped: read.skipped,
     }))
 }
@@ -355,7 +574,7 @@ pub async fn get_run_samples(
     get,
     path = "/api/v1/runs/{id}/map",
     tag = "Runs",
-    params(("id" = String, Path, description = "the run id")),
+    params(("id" = String, Path, description = "the run id"), TickWindow),
     responses(
         (status = 200, body = RunMapResponse),
         (status = 400, body = crate::error::ErrorResponse),
@@ -365,6 +584,7 @@ pub async fn get_run_samples(
 pub async fn get_run_map(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(window): Query<TickWindow>,
 ) -> Result<Json<RunMapResponse>, ErrorResponse> {
     let dir = run_dir(&runs_root(&state).await?, &id)?;
     let path = dir.join("map.jsonl");
@@ -378,8 +598,13 @@ pub async fn get_run_map(
     }
     let read = read_map(&path)
         .map_err(|err| ErrorResponse::internal(format!("failed to read map: {err}")))?;
+    let map = read
+        .records
+        .into_iter()
+        .filter(|r| window.contains(r.tick))
+        .collect();
     Ok(Json(RunMapResponse {
-        map: read.records,
+        map,
         skipped: read.skipped,
     }))
 }
@@ -469,6 +694,9 @@ pub fn router() -> utoipa_axum::router::OpenApiRouter<AppState> {
     utoipa_axum::router::OpenApiRouter::new()
         .routes(routes!(list_runs))
         .routes(routes!(get_run))
+        .routes(routes!(get_run_provenance))
+        .routes(routes!(get_run_savepoints))
+        .routes(routes!(get_run_replay))
         .routes(routes!(get_run_events))
         .routes(routes!(get_run_lanes))
         .routes(routes!(get_run_samples))

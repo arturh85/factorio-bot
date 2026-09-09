@@ -22,4 +22,15 @@ describe('MilestoneRibbon', () => {
         const w = mount(MilestoneRibbon, {props: {scale: {from: 3242 + 175, to: 30000}, clock: {from: 3242, to: 30000}, splits, cursor: 10000}});
         expect(w.findAll('.seg')[0].text()).toContain('satisfied at 6:06');
     });
+
+    it('names the refusal on a stuck split, and marks it', () => {
+        const stuckSplits = [
+            {index: 1, goal: 'sustain iron-plate', started_tick: 3242, ended_tick: 25216, outcome: 'stuck', elapsed_ticks: 21974}
+        ];
+        const reasons = new Map([[1, 'nothing can carry coal from the buffer at [32.5,-41.5] to the iron-chest at [27.5,-40.5]: no belt route, blocked by 1 tile(s): [30.5,-39.5]']]);
+        const w = mount(MilestoneRibbon, {props: {scale: {from: 3242, to: 30000}, clock: {from: 3242, to: 30000}, splits: stuckSplits, cursor: 10000, reasons}});
+        const seg = w.get('.seg');
+        expect(seg.attributes('title')).toContain('blocked by 1 tile');
+        expect(seg.attributes('data-stuck')).toBe('true');
+    });
 });

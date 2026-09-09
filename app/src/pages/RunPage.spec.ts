@@ -33,7 +33,8 @@ const RUN_ID = 'run-1788696619-00325';
 const DETAIL: RunDetail = {
     summary: {
         run_id: RUN_ID, finished: true, started_unix: 1788696619, finished_unix: 1788697000,
-        outcome: 'satisfied', elapsed_ticks: 21982, events: run.events.length, splits: 1
+        outcome: 'satisfied', elapsed_ticks: 21982, events: run.events.length, splits: 1,
+        samples: null, map: null, samples_lag_ticks: null
     },
     splits: [{index: 1, goal: 'research automation', started_tick: 3242, ended_tick: 25216, outcome: 'satisfied', elapsed_ticks: 21974}]
 };
@@ -49,7 +50,21 @@ vi.mock('@/api/client', () => ({
     getRunMap: async () => ({map: [], skipped: 0}),
     getRunVideo: async () => { throw new Error('this run recorded no video'); },
     getRunVideoTicks: async () => { throw new Error('this run recorded no video'); },
-    getRunEvents: async () => ({events: run.events, skipped: 0})
+    getRunEvents: async () => ({events: run.events, skipped: 0}),
+    // The page renders chips off provenance and plan counts off the replay
+    // (see the seed-chip and plan-chip tests below); savepoints render a
+    // resume chip nothing here asserts on. Resolved rather than left
+    // undefined so `openRun`'s `Promise.allSettled` array can be built at
+    // all -- the fixed values below are just what this file does not
+    // otherwise exercise.
+    getRunProvenance: async () => ({
+        schema: 1, run_id: RUN_ID, started_unix: 1788696619, started_tick: 0,
+        seed: null, map_exchange_string: null, map: null, factorio: null, mods: null,
+        git: null, profile: 'release', roster_requested: [], workspace: null,
+        resumed_from: null, bot_mode: null, game_speed: null, peaceful: null
+    }),
+    getRunReplay: async () => ({planned_makespan: 0, refused: null, unmatched_walks: [], steps: []}),
+    getRunSavepoints: async () => ({savepoints: [], skipped: 0, missing_zip: []})
 }));
 
 async function mountPage() {
@@ -69,6 +84,54 @@ async function mountPage() {
 }
 
 describe('RunPage', () => {
+    it('reads the seed chip off store.provenance once it loads', async () => {
+        const w = await mountPage();
+        const store = useRunsStore();
+        store.provenance = {
+            schema: 1, run_id: RUN_ID, started_unix: 1788696619, started_tick: 0,
+            seed: '31337', map_exchange_string: null, map: null, factorio: '2.1.17',
+            mods: {base: '2.1.17', BotBridge: '0.0.1'}, git: null, profile: 'release',
+            roster_requested: [1, 2, 3, 4], workspace: null, resumed_from: null,
+            bot_mode: 'clients', game_speed: 1, peaceful: null
+        };
+        await flushPromises();
+        expect(w.get('[data-chip="seed"]').text()).toContain('31337');
+    });
+
+    it('flags the plan chip truncated once the replay carries an abandoned step', async () => {
+        const w = await mountPage();
+        const store = useRunsStore();
+        store.replay = {
+            planned_makespan: 10,
+            refused: null,
+            unmatched_walks: [],
+            steps: [{
+                index: 0, bot: 1, bot_step_index: 0, what: {kind: 'act', action: 1, label: 'x'},
+                planned_start_tick: 0, planned_end_tick: 1, observed_start_tick: null, observed_end_tick: null,
+                status: 'Abandoned', attempt_number: null, evidence: {kind: 'believed', why: 'predecessor failed'}, error: 'x'
+            }]
+        };
+        await flushPromises();
+        const plan = w.get('[data-chip="plan"]');
+        expect(plan.attributes('data-state')).toBe('truncated');
+        expect(plan.text()).toContain('1 abandoned');
+    });
+
+
+    it('hands a failed replay fetch to the headline, which draws it', async () => {
+        // The page is the only place that can be wrong about this: the store
+        // records `replayError` and the headline can render it, and neither
+        // half is any use if the page never passes it across.
+        const w = await mountPage();
+        const store = useRunsStore();
+        store.replay = null;
+        store.replayError = 'replay unavailable — this server does not provide /replay';
+        await flushPromises();
+        const plan = w.get('[data-chip="plan"]');
+        expect(plan.attributes('data-state')).toBe('absent');
+        expect(plan.text()).toContain('/replay');
+    });
+
     it('reads the headline and the milestone ribbon off ONE clock', async () => {
         const w = await mountPage();
         const store = useRunsStore();
@@ -93,6 +156,25 @@ describe('RunPage', () => {
         await flushPromises();
         expect(row.key).toMatch(/^\d+$/);
         expect(w.findComponent(MapPanel).props('highlight')).toBe(positionKey(row.position));
+    });
+
+    it('shows the planner refusal behind the run\'s last stuck milestone', async () => {
+        const w = await mountPage();
+        const store = useRunsStore();
+        store.detail = {
+            ...DETAIL,
+            splits: [{index: 1, goal: 'sustain iron-plate', started_tick: 3242, ended_tick: 25216, outcome: 'stuck', elapsed_ticks: 21974}]
+        };
+        store.events = [
+            ...store.events,
+            {
+                kind: 'milestone_stuck', index: 1, outcome: 'stuck', best_steps: 12,
+                last_error: 'nothing can carry coal from the buffer at [32.5,-41.5] to the iron-chest at [27.5,-40.5]: no belt route, blocked by 1 tile(s): [30.5,-39.5]',
+                tick: 25216
+            }
+        ];
+        await flushPromises();
+        expect(w.get('[data-testid="stuck-reason"]').text()).toContain('no belt route, blocked by 1 tile');
     });
 
     it('reports a failed /samples fetch in every band that needs samples', async () => {

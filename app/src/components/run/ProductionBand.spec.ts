@@ -29,6 +29,10 @@ describe('ProductionBand', () => {
         expect(verdicts.has('roster-fed')).toBe(true);
         expect(verdicts.has('factory')).toBe(false);
         expect(w.text()).toContain('roster-fed');
+        // A verdict with no denominator is misread -- every rect carries the
+        // count it was computed over, and the band's text names it.
+        for (const r of rects) expect(Number(r.attributes('data-delta'))).toBeGreaterThan(0);
+        expect(w.text()).toMatch(/roster-fed · \d+ items/);
     });
     it('draws an INFERRED verdict differently from a measured one, and says so in the word', () => {
         // Two mounts, because this fixture's machine counters cover every
@@ -49,8 +53,8 @@ describe('ProductionBand', () => {
         expect(inferred.every((r) => r.attributes('data-source') === 'inference')).toBe(true);
         expect(inferred[0].attributes('stroke')).toBe('var(--color-ink-muted)');
         expect(inferred[0].attributes('stroke-dasharray')).toBe('3 2');
-        expect(w.text()).toContain('unclear (inferred)');
-        expect(w.text()).toContain('roster-fed (inferred)');
+        expect(w.text()).toMatch(/unclear · \d+ items? \(inferred\)/);
+        expect(w.text()).toMatch(/roster-fed · \d+ items? \(inferred\)/);
     });
     it('labels the 5:00 mark with the tool\'s rate for that item', () => {
         const w = mountBand(['iron-plate']);

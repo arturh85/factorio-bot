@@ -318,6 +318,24 @@ export interface RunSummary {
     elapsed_ticks: number | null;
     events: number | null;
     splits: number | null;
+    /**
+     * Archived sample lines. `null` for an unfinished run; `0` for a finished
+     * run with no samples file.
+     *
+     * **`0` carries a third meaning**: `Manifest.samples` is
+     * `#[serde(default)]`, so a manifest written before the field existed
+     * parses as `0` too. So `0` is "no samples file OR a pre-field manifest",
+     * and only `null` is unambiguous. Do not read `0` as "this run captured
+     * nothing" for an old run.
+     */
+    samples: number | null;
+    /** Lines in `map.jsonl`, same convention as `samples` -- including the `0`. */
+    map: number | null;
+    /**
+     * Ticks of the run's span the samples do NOT cover. `null` when the run
+     * has no samples at all or never finished.
+     */
+    samples_lag_ticks: number | null;
 }
 
 /** `GET /api/v1/runs` response. */
@@ -357,6 +375,135 @@ export interface RunDetail {
      * events -- so a crashed run still shows the milestones it got through.
      */
     splits: Split[];
+}
+
+/**
+ * An identity for a map computed from the world itself -- the only identity
+ * available for a map whose seed was never recorded.
+ *
+ * Equal digests mean the same map; unequal digests mean **unknown**, since
+ * charting grows as bots explore. `tiles` is the human-readable half: how
+ * many tiles of each resource were charted, by name.
+ */
+export interface ResourceFingerprint {
+    digest: string;
+    tiles: Record<string, number>;
+}
+
+/**
+ * Which commit the code came from, and whether it had been edited.
+ *
+ * Read at run start from the working tree, not stamped into the binary --
+ * this is the working tree *now*, which is the commit the binary was built
+ * from only if nobody has moved since. `dirty` is what makes it useful
+ * anyway: a dirty tree means the commit hash alone does not describe the
+ * code.
+ */
+export interface GitProvenance {
+    /** Full 40-character commit hash of `HEAD`. */
+    commit: string;
+    dirty: boolean;
+    /** How this was obtained. Always `"working-tree-at-run-start"` today. */
+    source: string;
+}
+
+/**
+ * The immutable facts about what a run was launched with.
+ *
+ * Every field is nullable except the identity, and each `null` is a real
+ * answer: "nothing observed this". Fields are present-and-null rather than
+ * omitted -- a key that is always there says "we looked", where a missing key
+ * cannot be told apart from "we never asked". **`null` means "not
+ * captured", never a default**: `mods: null` is not "the game is vanilla",
+ * `Some`-of-empty is -- collapsing the two would make an unrecorded run
+ * indistinguishable from a base-game one, which is exactly the confusion this
+ * record exists to prevent.
+ */
+export interface Provenance {
+    /**
+     * Bumped when a field changes meaning, never when one is added. Readers
+     * must accept any schema at or below their own.
+     */
+    schema: number;
+    run_id: string;
+    /** Unix seconds at which the run directory was created. */
+    started_unix: number;
+    /** The game tick the run opened at. */
+    started_tick: number;
+    /** The map-generation seed, when this workspace's world recorded one. */
+    seed: string | null;
+    /** The map-exchange string for the map this run played -- a seed plus the map-gen settings. */
+    map_exchange_string: string | null;
+    /** An identity for the map computed from the world itself. See `ResourceFingerprint`. */
+    map: ResourceFingerprint | null;
+    /** The installed game's version, e.g. `"2.1.17"`. */
+    factorio: string | null;
+    /** Every mod the running game loaded, as `name -> version`. */
+    mods: Record<string, string> | null;
+    /** Where the code came from. See `GitProvenance`. */
+    git: GitProvenance | null;
+    /** `"debug"` or `"release"`. */
+    profile: string;
+    /** The roster the run was launched for, ascending. */
+    roster_requested: number[];
+    /** The workspace the run used, absolute. */
+    workspace: string | null;
+    /** The save, if any, this run was resumed from rather than starting fresh. */
+    resumed_from: string | null;
+    /** `"clients"` or `"characters"`. */
+    bot_mode: string | null;
+    /** `game.speed` as set at start. */
+    game_speed: number | null;
+    /** Whether every surface had peaceful mode on, as the running game answered at run start. */
+    peaceful: boolean | null;
+}
+
+/**
+ * The mod code a savepoint was written under.
+ *
+ * A digest, not the version number: `mods/BotBridge/info.json` is pinned at
+ * `0.0.1` for the whole life of this project, so the version says nothing
+ * about whether `control.lua` changed.
+ */
+export interface ModFingerprint {
+    /** `version` out of the mod's `info.json`, when it could be read. */
+    version: string | null;
+    /** Lowercase hex CRC-32 over the sorted file list. */
+    digest: string;
+    /** How many files went into the digest. */
+    files: number;
+}
+
+/**
+ * One savepoint's metadata, written beside the `.zip` it describes.
+ *
+ * Deliberately small: seed, map fingerprint, git commit, Factorio version and
+ * build profile live in `Provenance` one directory up, not copied here.
+ */
+export interface Savepoint {
+    schema: number;
+    run_id: string;
+    /** Which milestone had just been satisfied, as numbered by the supervisor. */
+    milestone_index: number;
+    /** The game tick the save was requested at. */
+    tick: number;
+    created_unix: number;
+    /** Size of the `.zip`. */
+    bytes: number;
+    /** Name of the save file, relative to this metadata file. */
+    file: string;
+    /** The mod code the save was written under. See `ModFingerprint`. */
+    mods: ModFingerprint | null;
+}
+
+/** `GET /api/v1/runs/{id}/savepoints` response. */
+export interface RunSavepointsResponse {
+    /** Ascending by milestone index. Excludes any milestone in `missing_zip`. */
+    savepoints: Savepoint[];
+    /** Metadata files that did not parse -- a truncated or corrupt `milestone-N.json`. */
+    skipped: number;
+    /** Milestone indices whose metadata parsed but whose `.zip` is not on disk. */
+    missing_zip: number[];
 }
 
 /** One thing a bot did, placed on the tick axis. */

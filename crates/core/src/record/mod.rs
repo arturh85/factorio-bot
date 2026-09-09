@@ -51,6 +51,11 @@ pub use video::{
     archive_video, parse_tick_samples, read_video_dir,
 };
 
+/// The executor's replay, written beside a run's `events.jsonl` since Phase 2
+/// of Run Anatomy. See [`crate::record`]'s module doc for the other file
+/// names a run directory holds.
+pub const REPLAY_FILE: &str = "replay.json";
+
 /// What happened. Internally tagged as `kind`, so a line is one flat object.
 ///
 /// [`EventKind::Unknown`] is the `serde(other)` catch-all: a reader built

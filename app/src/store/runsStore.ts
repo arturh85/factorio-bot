@@ -4,7 +4,10 @@ import {
     getRunEvents,
     getRunLanes,
     getRunMap,
+    getRunProvenance,
+    getRunReplay,
     getRunSamples,
+    getRunSavepoints,
     getRunVideo,
     getRunVideoTicks,
     listRuns
@@ -18,9 +21,11 @@ import {
     Lane,
     MapRecord,
     Position,
+    Provenance,
     RunDetail,
     RunSummary,
     Sample,
+    Savepoint,
     VideoManifest,
     VideoTicksResponse
 } from '@/api/types';
@@ -28,6 +33,8 @@ import {laneBots, leadInTicks, tickBounds} from '@/lib/runTimeline';
 import {botSampleAt, forceSampleAt, inventoryOf, productionSeries, trackedItems, trailsAt} from '@/lib/runSamples';
 import {boundsAt, entitiesAt} from '@/lib/runMap';
 import {machineStatusAt} from '@/lib/machineTimeline';
+import {lagTicks} from '@/lib/runCoverage';
+import {parseReplay, Replay, ReplayStatus} from '@/api/replay';
 
 /** The `force`-kind half of `Sample`, narrowed for `forceState`. */
 type ForceSample = Extract<Sample, {kind: 'force'}>;
@@ -128,6 +135,33 @@ export const useRunsStore = defineStore('runs', {
         sampleError: null as string | null,
         mapError: null as string | null,
         videoError: null as string | null,
+        /**
+         * What the run was launched with -- seed, mods, git commit, roster.
+         *
+         * `null` either because the fetch failed (see `provenanceError`) or
+         * because the server answered a genuinely older run: `provenance.json`
+         * is written at run start, so its absence means "not captured", not
+         * "empty".
+         */
+        provenance: null as Provenance | null,
+        provenanceError: null as string | null,
+        /**
+         * The executor's replay -- planned against observed per step.
+         *
+         * Parsed through `parseReplay` rather than trusted as the server's
+         * `unknown` body: a document that fails to narrow sets `replayError`
+         * exactly like a failed fetch would, because a malformed replay is
+         * exactly as unusable as a missing one.
+         *
+         * **This is the last `goal.run` batch of the run, not the whole run.**
+         * Each batch overwrites `replay.json` and the supervisor plans once per
+         * milestone, so earlier batches are not in `replay.json`.
+         */
+        replay: null as Replay | null,
+        replayError: null as string | null,
+        /** The milestone savepoints this run wrote. Empty is the ordinary case. */
+        savepoints: [] as Savepoint[],
+        savepointsError: null as string | null,
         /** The run's raw event log. */
         events: [] as Event[],
         /**
@@ -253,6 +287,42 @@ export const useRunsStore = defineStore('runs', {
         /** Every bot the lanes ever mention, ascending. */
         laneBotIds(): number[] {
             return laneBots(this.lanes);
+        },
+        /**
+         * Per-status counts over the replay's steps, or `null` when the run
+         * has no parsed replay -- distinct from a replay whose counts are all
+         * zero, which is a real (if odd) document.
+         */
+        replayCounts(): {steps: number; abandoned: number; lost: number; failed: number; pending: number; believed: number} | null {
+            if (this.replay === null) return null;
+            const steps = this.replay.steps;
+            const count = (status: ReplayStatus) => steps.filter((step) => step.status === status).length;
+            return {
+                steps: steps.length,
+                abandoned: count('Abandoned'),
+                lost: count('Lost'),
+                failed: count('Failed'),
+                pending: count('Pending'),
+                believed: steps.filter((step) => step.evidence.kind === 'believed').length
+            };
+        },
+        /**
+         * Ticks the archived samples fall short of the run's end.
+         *
+         * The manifest's own `samples_lag_ticks` outranks a client-side
+         * derivation when the server carries one -- it was computed against
+         * the run's actual end, where `lagTicks` only has the analysis
+         * window's `hi` to work from. Falls back to `lagTicks` whenever the
+         * manifest field is null, which is true of two different runs: a
+         * summary from a server that predates the field, and an unfinished
+         * run on a current one (the field is only ever computed against a
+         * finished run's end).
+         */
+        sampleLag(): number | null {
+            const fromManifest = this.detail?.summary.samples_lag_ticks;
+            if (fromManifest !== undefined && fromManifest !== null) return fromManifest;
+            const win = this.window;
+            return win === null ? null : lagTicks(win.hi, this.samples);
         }
     },
 
@@ -300,6 +370,9 @@ export const useRunsStore = defineStore('runs', {
             this.eventsError = null;
             this.eventsSkipped = 0;
             this.selectedMachine = null;
+            this.provenanceError = null;
+            this.replayError = null;
+            this.savepointsError = null;
             try {
                 this.detail = await getRun(id);
 
@@ -309,14 +382,20 @@ export const useRunsStore = defineStore('runs', {
                     mapResult,
                     videoResult,
                     videoTicksResult,
-                    eventsResult
+                    eventsResult,
+                    provenanceResult,
+                    replayResult,
+                    savepointsResult
                 ] = await Promise.allSettled([
                     getRunLanes(id),
                     getRunSamples(id),
                     getRunMap(id),
                     getRunVideo(id),
                     getRunVideoTicks(id),
-                    getRunEvents(id)
+                    getRunEvents(id),
+                    getRunProvenance(id),
+                    getRunReplay(id),
+                    getRunSavepoints(id)
                 ]);
 
                 if (lanesResult.status === 'fulfilled') {
@@ -353,6 +432,40 @@ export const useRunsStore = defineStore('runs', {
                     this.eventsError = enrichmentUnavailable('events', '/events', eventsResult.reason);
                 }
 
+                if (provenanceResult.status === 'fulfilled') {
+                    this.provenance = provenanceResult.value;
+                } else {
+                    this.provenance = null;
+                    this.provenanceError = enrichmentUnavailable(
+                        'provenance',
+                        '/provenance',
+                        provenanceResult.reason
+                    );
+                }
+
+                if (replayResult.status === 'fulfilled') {
+                    try {
+                        this.replay = parseReplay(replayResult.value);
+                    } catch (err) {
+                        this.replay = null;
+                        this.replayError = err instanceof Error ? err.message : String(err);
+                    }
+                } else {
+                    this.replay = null;
+                    this.replayError = enrichmentUnavailable('replay', '/replay', replayResult.reason);
+                }
+
+                if (savepointsResult.status === 'fulfilled') {
+                    this.savepoints = savepointsResult.value.savepoints;
+                } else {
+                    this.savepoints = [];
+                    this.savepointsError = enrichmentUnavailable(
+                        'savepoints',
+                        '/savepoints',
+                        savepointsResult.reason
+                    );
+                }
+
                 // Both halves of the recording, or neither: a manifest without
                 // its clock can place nothing, and a clock without its manifest
                 // has no calibration to place it against. Reporting one error
@@ -387,6 +500,9 @@ export const useRunsStore = defineStore('runs', {
                 this.map = [];
                 this.events = [];
                 this.eventsSkipped = 0;
+                this.provenance = null;
+                this.replay = null;
+                this.savepoints = [];
             } finally {
                 this.loading = false;
             }

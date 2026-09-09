@@ -45,6 +45,40 @@ export function replanBoundaries(events: Event[]): number[] {
     return events.filter((e) => e.kind === 'plan_created').map((e) => e.tick).sort((a, b) => a - b);
 }
 
+/**
+ * The tick of every `planning_timed` that produced no plan, ascending.
+ *
+ * `planning_timed` is written by the plan itself, before `plan_created` --
+ * "written by the plan itself rather than folded into `plan_created` ... a
+ * plan that raised has no `plan_created` and still cost time"
+ * (`EventKind::PlanningTimed`'s own doc). So a `planning_timed` with no
+ * `plan_created` before the next `planning_timed`, or before the end of the
+ * log, is a planning attempt the record shows no plan for -- real Space Age
+ * record: `run-1788923927-04849` has two `planning_timed` (452, 48017) and one
+ * `plan_created` (452), the second attempt writing nothing after it and 48
+ * abandoned steps before it.
+ *
+ * **That is all it says, and the marker says no more.** Nothing here separates
+ * a planner that refused from a record that simply ended -- a run killed
+ * between its `planning_timed` and its `plan_created` looks identical, and 9 of
+ * this project's 24 archived runs end on a plan line with nothing after it. The
+ * marker is therefore drawn as `no plan recorded after planning`; calling it a
+ * refusal names a cause the record does not carry, and the refusal itself is
+ * reported separately by whoever *does* know it (the milestone's stuck reason).
+ */
+export function refusedReplans(events: Event[]): number[] {
+    const timed = events.filter((e) => e.kind === 'planning_timed').map((e) => e.tick).sort((a, b) => a - b);
+    const created = new Set(replanBoundaries(events));
+    const refused: number[] = [];
+    for (let i = 0; i < timed.length; i++) {
+        const from = timed[i];
+        const to = i + 1 < timed.length ? timed[i + 1] : Infinity;
+        const answered = [...created].some((t) => t >= from && t < to);
+        if (!answered) refused.push(from);
+    }
+    return refused;
+}
+
 export function laneSegments(lanes: Lane[], boundaries: number[]): LaneSegment[] {
     return lanes.map((l) => ({
         bot: l.bot,
@@ -78,7 +112,9 @@ export interface Interval {
  */
 export function idleIntervals(lanes: Lane[], bot: number, scale: Interval): Interval[] {
     const busy = lanes
-        .filter((l) => l.bot === bot)
+        // An abandoned step is not work: the bot never touched it, so its
+        // zero-length lane must not carve a gap out of the bot's idle time.
+        .filter((l) => l.bot === bot && l.status !== 'abandoned')
         .map((l) => ({from: Math.max(scale.from, l.from_tick), to: Math.min(scale.to, l.to_tick ?? scale.to)}))
         .filter((i) => i.to >= i.from)
         .sort((a, b) => a.from - b.from);

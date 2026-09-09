@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import {describe, expect, it} from 'vitest';
 import {mount} from '@vue/test-utils';
+import {Event} from '@/api/types';
 import {loadFixtureRun} from '@/lib/fixtureRun';
 import LaneBand from './LaneBand.vue';
 
@@ -42,5 +43,34 @@ describe('LaneBand', () => {
         expect(failed.attributes('stroke')).toBe('var(--color-status-critical)');
         expect(Number(open.attributes('x')) + Number(open.attributes('width'))).toBeCloseTo(1000, 0);
         expect(open.find('title').text()).toContain('never settled');
+    });
+    it('draws an abandoned step as a hollow mark that does not count as work', () => {
+        const lanes = [{bot: 1, id: 9, action: 'abandoned: predecessor 5 failed', from_tick: 5000, to_tick: 5000, status: 'abandoned', error: 'abandoned: predecessor 5 failed'}];
+        const w = mount(LaneBand, {props: {scale, clock, cursor: run.lo, lanes, events: []}});
+        const seg = w.get('rect.segment');
+        expect(seg.attributes('fill')).toBe('none');
+        expect(seg.find('title').text()).toContain('never dispatched');
+        expect(w.text()).toContain('idle 100%');
+    });
+    it('idle share is measured over the analysis window', () => {
+        const trimmed = {from: run.lo + 175, to: run.hi};
+        const w = mount(LaneBand, {props: {scale: trimmed, clock: {from: run.lo, to: run.hi}, cursor: run.lo, lanes: run.lanes, events: run.events}});
+        expect(w.text()).toContain('idle 32%'); // 6984 / 21982, the tool's figure
+    });
+    it('draws a planning attempt no plan answered as a critical dashed line across every row', () => {
+        const events: Event[] = [
+            {kind: 'planning_timed', tick: 452, planning_ms: 1, paused: true, reason: null, tick_before: 452, tick_after: 452} as Event,
+            {kind: 'plan_created', tick: 452, milestone_index: 1, steps: 1, makespan: 1, bots: [1], plan: []} as Event,
+            {kind: 'planning_timed', tick: 48017, planning_ms: 1, paused: true, reason: null, tick_before: 48017, tick_after: 48017} as Event
+        ];
+        const w = mount(LaneBand, {props: {scale, clock, cursor: run.lo, lanes: run.lanes, events}});
+        const lines = w.findAll('line.planning-unanswered');
+        expect(lines).toHaveLength(1);
+        // Not "replan refused": a `planning_timed` with no `plan_created`
+        // after it is a refusal OR a record that ended there (a killed run),
+        // and the record cannot tell the two apart. The label says only what
+        // it sees.
+        expect(w.text()).toContain('no plan recorded after planning');
+        expect(w.text()).not.toContain('refused');
     });
 });

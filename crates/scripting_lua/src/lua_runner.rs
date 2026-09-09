@@ -971,16 +971,22 @@ pub(crate) mod tests {
     /// implementation redirected the *process's* fd 1 and 2 with `gag`, which
     /// captured the server's own logging, could not attribute a line to a job,
     /// and yielded nothing until the run was over.
-    #[derive(Default)]
+    ///
+    /// Both fields are `Arc`-wrapped so `Clone` shares the recording rather
+    /// than forking it: a caller that must hand an `Arc<dyn OutputSink>` to a
+    /// run while keeping its own handle to inspect afterwards needs the clone
+    /// and the original to be the same sink, not two that started identical
+    /// and diverged.
+    #[derive(Default, Clone)]
     pub(crate) struct RecordingSink {
-        pub(crate) lines: Mutex<Vec<(Stream, String)>>,
+        pub(crate) lines: Arc<Mutex<Vec<(Stream, String)>>>,
         /// Every string handed to [`OutputSink::replay`], verbatim.
         ///
         /// Kept as the raw JSON rather than parsed on arrival: what a
         /// consumer receives is the text, and a recorder that deserialised
         /// would hide a document whose serialisation is wrong from the tests
         /// that exist to catch exactly that.
-        pub(crate) replays: Mutex<Vec<String>>,
+        pub(crate) replays: Arc<Mutex<Vec<String>>>,
     }
 
     impl OutputSink for RecordingSink {

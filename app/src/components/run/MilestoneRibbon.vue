@@ -8,7 +8,10 @@ import {AXIS_WIDTH, formatGameTime, TickScale, tickX} from '@/lib/tickScale';
  * (labels) -- so a milestone's time here is the one the headline states.
  * See the header of `@/lib/tickScale`.
  */
-const props = defineProps<{scale: TickScale; clock: TickScale; splits: Split[]; cursor: number}>();
+const props = withDefaults(
+    defineProps<{scale: TickScale; clock: TickScale; splits: Split[]; cursor: number; reasons?: Map<number, string>}>(),
+    {reasons: () => new Map()}
+);
 const pct = (t: number) => `${(tickX(props.scale, t) / AXIS_WIDTH) * 100}%`;
 function style(s: Split) {
     const end = s.ended_tick ?? props.scale.to;
@@ -19,13 +22,20 @@ function label(s: Split) {
     const ticks = s.elapsed_ticks === null ? '—' : s.elapsed_ticks.toLocaleString();
     return `m${s.index} · ${s.goal} · ${at} · ${ticks} ticks`;
 }
+/** The label, plus the planner's refusal when this split is a stuck one. */
+function title(s: Split) {
+    const reason = props.reasons.get(s.index);
+    return reason === undefined ? label(s) : `${label(s)} · ${reason}`;
+}
 </script>
 
 <template>
   <div class="relative h-9">
     <div v-for="s in splits" :key="`${s.index}-${s.started_tick}`"
-         class="seg absolute top-2 h-[22px] overflow-hidden text-ellipsis whitespace-nowrap rounded border border-verdict-roster bg-verdict-roster-soft px-2 font-mono text-[11px] leading-5 text-ink"
-         :class="{'is-current ring-2 ring-verdict-roster': splitAt(splits, cursor)?.started_tick === s.started_tick}"
-         :style="style(s)" :title="label(s)">{{ label(s) }}</div>
+         class="seg absolute top-2 h-[22px] overflow-hidden text-ellipsis whitespace-nowrap rounded border bg-verdict-roster-soft px-2 font-mono text-[11px] leading-5 text-ink"
+         :class="[reasons.get(s.index) !== undefined ? 'border-status-critical' : 'border-verdict-roster',
+                  {'is-current ring-2 ring-verdict-roster': splitAt(splits, cursor)?.started_tick === s.started_tick}]"
+         :data-stuck="reasons.get(s.index) !== undefined ? 'true' : undefined"
+         :style="style(s)" :title="title(s)">{{ label(s) }}</div>
   </div>
 </template>

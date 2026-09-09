@@ -54,7 +54,7 @@ pub const SOURCE_WORKING_TREE: &str = "working-tree-at-run-start";
 /// omitted for the reason [`super::EventKind::RunStarted`]'s `seed` is -- a key
 /// that is always there says "we looked", where a missing key cannot be told
 /// apart from "we never asked".
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Provenance {
     /// Bumped when a field changes meaning, never when one is added. Readers
     /// must accept any schema at or below their own, the same rule
@@ -216,7 +216,7 @@ pub struct Provenance {
 /// useful anyway -- a dirty tree means the commit hash alone does not describe
 /// the code, and a comparison across two dirty runs is not a comparison across
 /// two commits.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GitProvenance {
     /// Full 40-character commit hash of `HEAD`.
     pub commit: String,

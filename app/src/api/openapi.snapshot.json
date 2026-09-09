@@ -2434,6 +2434,29 @@
           }
         ]
       },
+      "GitProvenance": {
+        "description": "Which commit the code came from, and whether it had been edited.\n\n# Read at run start, from the working tree\n\nDeliberately **not** stamped into the binary by `build.rs`. A build script\nthat shells out to `git` makes every build depend on git state and on git\nbeing installed; `app/src-tauri/build.rs` does not do this today and this\nmodule is not a reason to start.\n\nThe honest cost of reading it at run start is stated in [`Self::source`]:\nthis is the working tree *now*, which is the commit the binary was built\nfrom only if nobody has moved since. `dirty` is the part that makes it\nuseful anyway -- a dirty tree means the commit hash alone does not describe\nthe code, and a comparison across two dirty runs is not a comparison across\ntwo commits.",
+        "properties": {
+          "commit": {
+            "description": "Full 40-character commit hash of `HEAD`.",
+            "type": "string"
+          },
+          "dirty": {
+            "description": "Whether the working tree had uncommitted changes to tracked files.\n`true` makes `commit` an approximation rather than an identity.",
+            "type": "boolean"
+          },
+          "source": {
+            "description": "How this was obtained, so a reader is never misled about its strength.\nAlways `\"working-tree-at-run-start\"` today.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commit",
+          "dirty",
+          "source"
+        ],
+        "type": "object"
+      },
       "GuiSettings": {
         "properties": {
           "enable_autostart": {
@@ -3006,6 +3029,32 @@
         ],
         "description": "One line of `map.jsonl`."
       },
+      "ModFingerprint": {
+        "description": "The mod code a savepoint was written under.\n\n# Why a fingerprint and not the version number\n\n`mods/BotBridge/info.json` is pinned at `0.0.1` and has been for the whole\nlife of this project, because bumping it makes Factorio run migrations.\nSo the version says nothing about whether `control.lua` changed, and\n`control.lua` is what decides how `storage` is shaped and read. Two saves\nwith the same version and different code is the *ordinary* case here, not\nan exotic one.\n\n# What the digest is, and is not\n\nCRC-32 over every file in the mod directory, sorted by relative path, with\neach path and length folded in so that renames and truncations move it. It\ndetects drift; it is not a cryptographic commitment and must not be\ndescribed as one. Nothing here is defending against an adversary -- the\nquestion is only \"is this the same mod I ran last week\".",
+        "properties": {
+          "digest": {
+            "description": "Lowercase hex CRC-32 over the sorted file list. See the type docs.",
+            "type": "string"
+          },
+          "files": {
+            "description": "How many files went into the digest. A digest over a directory that was\nhalf missing would otherwise look like an ordinary mismatch.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "version": {
+            "description": "`version` out of the mod's `info.json`, when it could be read.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "digest",
+          "files"
+        ],
+        "type": "object"
+      },
       "MovePlayerBody": {
         "properties": {
           "goal": {
@@ -3268,6 +3317,146 @@
         ],
         "type": "object"
       },
+      "Provenance": {
+        "description": "The immutable facts about what a run was launched with.\n\nEvery field is `Option` except the identity, and each `None` is a real\nanswer: \"nothing observed this\". They are present-and-null rather than\nomitted for the reason [`super::EventKind::RunStarted`]'s `seed` is -- a key\nthat is always there says \"we looked\", where a missing key cannot be told\napart from \"we never asked\".",
+        "properties": {
+          "bot_mode": {
+            "description": "`\"clients\"` or `\"characters\"`: whether the bots were graphical clients\nor server-side character entities (`--headless`). Play fidelity is\nthe same, so a comparison across the two is flagged, not refused. `None`\nfor runs older than the field and for attached servers.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "factorio": {
+            "description": "The installed game's version, e.g. `\"2.1.17\"`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "game_speed": {
+            "description": "`game.speed` as set at start. Timings are in ticks and do not change\nwith it; whether the server *kept up* with it is what a reader wants\nto know when a run at speed 10 looks slower per tick than one at 1.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "git": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GitProvenance",
+                "description": "Where the code came from. See [`GitProvenance`]."
+              }
+            ]
+          },
+          "map": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ResourceFingerprint",
+                "description": "An identity for the map computed from the world itself, which is the\nonly identity available for a map whose seed was never recorded.\n\nSee [`ResourceFingerprint`] for what a match and a mismatch each mean --\nthey are not symmetrical."
+              }
+            ]
+          },
+          "map_exchange_string": {
+            "description": "The map-exchange string for the map this run played -- a **seed plus the\nmap-gen settings**, which is what actually identifies a map. The same\nseed under different settings, or on a Factorio version whose defaults\nmoved, is a different map, so the seed two fields up is necessary and\nnot sufficient.\n\nAsked of the running game ([`crate::factorio::rcon::FactorioRcon::\nmap_exchange_string`]) and falling back to `map-exchange-string.txt`,\nwhich setup writes only when a string was *supplied* to it. Until\n2026-09-06 the file was the only source and nothing produced a string\nfrom a live map, so all 20 archived runs carry `null` here and their\nmaps are permanently unidentifiable.\n\n**`None` means \"not captured\", never \"default settings\".** An RCON\nfailure, an old mod without the function, and a server this process did\nnot start all land here, and none of them is evidence about the map --\nthe same asymmetry [`ResourceFingerprint`] documents.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mods": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Every mod the running game **loaded**, as `name -> version`.\n\nRecorded because a run's mod set is part of what a run *is*, and nothing\nelse here captures it. Two runs on the same seed, the same commit and\nthe same game version are still not comparable if one loaded a mod that\nadds prototypes, changes recipes, or supplies infinite resources — and\nuntil 2026-09-07 there was no way to tell them apart afterwards. That is\nthe shape that already made every pre-2026-09-04 timing unidentifiable,\nwhen `--seed` was silently ignored and nothing recorded the map.\n\n**This includes BotBridge**, whose version has never been pinned to a\nrun. The mod resolves from different places in debug and release builds\n(see `CLAUDE.md`), so the same commit can genuinely run different Lua —\n`profile` hints at that and this settles it.\n\n`None` is **not captured**; `Some` of an empty map is the positive\nanswer that the game loaded no mods at all. A reader must not collapse\nthem: \"we could not ask\" and \"there are none\" are different facts, and\nthis file already keeps that distinction for `seed`, `map` and\n`map_exchange_string`.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "peaceful": {
+            "description": "Whether **every surface** had peaceful mode on, as the running game\nanswered at run start.\n\n# What it does and does not mean\n\nPeaceful mode does **not** remove biters. Nests, worms and units all\nstill generate and still stand on the map; what changes is that they do\nnot attack unprovoked. So `true` here does not license \"there were no\nenemies\", only \"nothing attacked this run unless it was attacked\nfirst\". Anyone quoting a run that survived a walk past a nest needs\nthis field to know which claim they are making.\n\n# Why it has to exist at all\n\nA peaceful run and a hostile one are byte-identical in every other\nfield: the same seed, the same settings, the same commit, the same\nmods, the same map fingerprint. Without this, a run that never lost a\nbot because nothing was hunting it would compare directly against one\nthat did, and the difference would be attributed to whatever change was\nunder test. That is precisely the failure `CLAUDE.md` records for the\nmap-exchange string: a run that looks controlled and is not.\n\n# Observed, not requested\n\nAsked of the game ([`crate::factorio::rcon::FactorioRcon::\npeaceful_mode`]), the same way `map_exchange_string` is, so a run that\nasked for peaceful mode and did not get it records `false` rather than\nthe request. The `--peaceful` flag is a request; this is the answer.\n\n**`None` is \"not captured\" and must never be read as \"hostile\".** Every\nrun archived before this field existed carries no key at all, an RCON\nfailure lands here, and so does a server this process did not start.\nA reader that collapses `None` into `false` would silently declare\nevery historical run hostile on no evidence -- the exact conflation\nthis file already keeps apart for `seed`, `map`, `mods` and\n`map_exchange_string`.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "profile": {
+            "description": "`\"debug\"` or `\"release\"`. Worth recording because the two builds resolve\nmods and scripts from different places (see `CLAUDE.md`), so the same\ncommit can run different Lua in each.",
+            "type": "string"
+          },
+          "resumed_from": {
+            "description": "The save, if any, this run was resumed from rather than starting on a\nfresh world.\n\nAlways `None` today: nothing saves at a milestone yet. The field is here\nahead of that feature on purpose, because it is a *start-time* fact and\nadding it later would mean a schema bump on a file whose whole value is\nthat archived runs stay readable.\n\n**A resumed run is not benchmark-comparable with a fresh one.** It\nbegins with accumulated world state -- built furnaces, charged chests,\npartly mined patches -- so its timings measure a different thing. A\ncomparison tool must treat `Some(_)` against `None` the way it treats\ntwo different seeds, and for the same reason.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "roster_requested": {
+            "description": "The roster the run was launched for, ascending. What was *asked for*; a\nrun that degrades to fewer bots because clients never connected still\nrecords the request here, and `run_started.bots` records what it got.\nThe pair is the evidence that a run degraded.",
+            "items": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "schema": {
+            "description": "Bumped when a field changes meaning, never when one is added. Readers\nmust accept any schema at or below their own, the same rule\n[`super::samples`] follows, so that archived runs stay readable.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "seed": {
+            "description": "The map-generation seed, when this workspace's `level.zip` was created\nby a build that recorded one.\n\n`None` for every map generated before\n[`crate::process::instance_setup::record_map_gen_seed`] existed, and for\nevery map Factorio seeded itself. Both mean \"unknown\", and neither may\nbe reported as a match against anything.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_tick": {
+            "description": "The game tick the run opened at.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "started_unix": {
+            "description": "Unix seconds at which the run directory was created. For \"when was\nthis\", never for comparing two runs -- runs are compared on ticks.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "workspace": {
+            "description": "The workspace the run used, absolute. Two runs from different\nworkspaces used different `level.zip` files and different mod copies.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "schema",
+          "run_id",
+          "started_unix",
+          "started_tick",
+          "profile",
+          "roster_requested"
+        ],
+        "type": "object"
+      },
       "RconBody": {
         "properties": {
           "command": {
@@ -3352,6 +3541,31 @@
         "required": [
           "name",
           "progress"
+        ],
+        "type": "object"
+      },
+      "ResourceFingerprint": {
+        "description": "What [`EntityGraph::resource_fingerprint`] found: an identity for the map,\nand the human-readable counts behind it.",
+        "properties": {
+          "digest": {
+            "description": "FNV-1a over every charted resource tile, sorted by name and position.\nEqual digests mean the same map; unequal digests mean **unknown**, since\ncharting grows as bots explore. See the method's own documentation.",
+            "type": "string"
+          },
+          "tiles": {
+            "additionalProperties": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "description": "How many tiles of each resource were charted, by name. This is the half\na person reads: \"one map had coal and the other did not\" is visible here\nand nowhere else in a run record.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "digest",
+          "tiles"
         ],
         "type": "object"
       },
@@ -3452,6 +3666,38 @@
         ],
         "type": "object"
       },
+      "RunSavepointsResponse": {
+        "description": "`GET /api/v1/runs/{id}/savepoints` response.",
+        "properties": {
+          "missing_zip": {
+            "description": "Milestone indices whose metadata parsed but whose `file` is not on\ndisk. Named here and NOT listed in `savepoints`, because listing them\nwould offer a resume that cannot happen.",
+            "items": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "savepoints": {
+            "description": "Ascending by milestone index. Each names its `.zip` relative to the\nrun's `savepoints/` directory; `--resume-from <run>:<index>` is the\ncommand that uses one. Excludes any milestone whose metadata parsed\nbut whose `.zip` is missing -- see `missing_zip`.",
+            "items": {
+              "$ref": "#/components/schemas/Savepoint"
+            },
+            "type": "array"
+          },
+          "skipped": {
+            "description": "Metadata files that did not parse -- in practice a truncated or\ncorrupt `milestone-N.json`. Reported rather than swallowed, matching\nthe sibling responses' `skipped`: a corrupt file must not read the\nsame as \"this milestone was never saved\".",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "savepoints",
+          "skipped",
+          "missing_zip"
+        ],
+        "type": "object"
+      },
       "RunSummary": {
         "description": "One run, as it appears in a listing.\n\nEvery field except `run_id` and `finished` is nullable, because an\nunfinished run genuinely does not have them. They are present-and-null\nrather than omitted: a caller must be able to tell \"this run never finished\"\nfrom \"this build of the API does not report outcomes\".",
         "properties": {
@@ -3482,6 +3728,14 @@
               "null"
             ]
           },
+          "map": {
+            "description": "Lines in `map.jsonl`, same convention.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "outcome": {
             "type": [
               "string",
@@ -3490,6 +3744,23 @@
           },
           "run_id": {
             "type": "string"
+          },
+          "samples": {
+            "description": "Archived sample lines. `None` for an unfinished run; `Some(0)` for a\nfinished run with no samples file.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "samples_lag_ticks": {
+            "description": "Ticks of the run's span the samples do NOT cover (see `Manifest`).\n`None` when the run has no samples at all or never finished.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "splits": {
             "minimum": 0,
@@ -3695,6 +3966,69 @@
           "unknown"
         ],
         "type": "string"
+      },
+      "Savepoint": {
+        "description": "One savepoint's metadata, written beside the `.zip` it describes.\n\nDeliberately small. Seed, map fingerprint, git commit, Factorio version and\nbuild profile are **not** copied here: they are start-of-run facts and they\nare already in `provenance.json` one directory up, which this file is\nguaranteed to sit next to. Copying them would create a second source of\ntruth for values that cannot change mid-run, and second sources of truth in\nthis archive have been wrong before.\n\n[`ModFingerprint`] is the exception, and it is here because provenance does\nnot carry it and it is the one fact that decides whether this file can be\nsafely loaded at all.",
+        "properties": {
+          "bytes": {
+            "description": "Size of the `.zip`, for the reader deciding whether the archive is\ngetting expensive.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "created_unix": {
+            "description": "Unix seconds at which the file finished being written.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "file": {
+            "description": "Name of the save file, relative to this metadata file.",
+            "type": "string"
+          },
+          "milestone_index": {
+            "description": "Which milestone had just been satisfied, as numbered by the supervisor.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mods": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ModFingerprint",
+                "description": "The mod code the save was written under. See [`ModFingerprint`]."
+              }
+            ]
+          },
+          "run_id": {
+            "description": "The run that produced it. Also the name of the directory two levels up,\nso the file identifies itself even if it is copied somewhere else.",
+            "type": "string"
+          },
+          "schema": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tick": {
+            "description": "The game tick the save was requested at -- the tick the world in it is\n(very nearly) at. The engine writes at the end of a tick, so the world\non disk may be a tick or two later; nothing here needs it exact and\nclaiming it would be a lie.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema",
+          "run_id",
+          "milestone_index",
+          "tick",
+          "created_unix",
+          "bytes",
+          "file"
+        ],
+        "type": "object"
       },
       "ScriptContent": {
         "properties": {
@@ -5691,6 +6025,34 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "First tick to include.",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Last tick to include.",
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -5731,6 +6093,110 @@
         ]
       }
     },
+    "/api/v1/runs/{id}/provenance": {
+      "get": {
+        "description": "A 404, not an empty object, when `provenance.json` is missing: the file is\nwritten at run *start* since 2026-09-06, so its absence means an older run\nand the client must show \"not captured\", never a default.",
+        "operationId": "get_run_provenance",
+        "parameters": [
+          {
+            "description": "the run id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Provenance"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "What a run was launched with -- the fields that decide whether two runs\nmay be compared at all.",
+        "tags": [
+          "Runs"
+        ]
+      }
+    },
+    "/api/v1/runs/{id}/replay": {
+      "get": {
+        "description": "Written by the run at its end since Phase 2 of Run Anatomy; a run archived\nbefore that, or one that never ran a plan, has none, and that is a 404\nrather than an empty document: an empty replay would read as a run that\nplanned nothing.",
+        "operationId": "get_run_replay",
+        "parameters": [
+          {
+            "description": "the run id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "the replay document, as the executor serialised it"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "The executor's replay -- planned against observed per step, with evidence.",
+        "tags": [
+          "Runs"
+        ]
+      }
+    },
     "/api/v1/runs/{id}/samples": {
       "get": {
         "operationId": "get_run_samples",
@@ -5742,6 +6208,46 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "description": "First tick to include.",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Last tick to include.",
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Return only samples of this `kind`.",
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],
@@ -5778,6 +6284,58 @@
           }
         },
         "summary": "A run's world-state samples.",
+        "tags": [
+          "Runs"
+        ]
+      }
+    },
+    "/api/v1/runs/{id}/savepoints": {
+      "get": {
+        "operationId": "get_run_savepoints",
+        "parameters": [
+          {
+            "description": "the run id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSavepointsResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "The milestone savepoints a run wrote.",
         "tags": [
           "Runs"
         ]

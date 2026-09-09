@@ -10,9 +10,10 @@ import {
     formatTicks,
     fractionOf,
     splitAt,
+    stuckReasons,
     tickBounds
 } from './runTimeline';
-import {Split} from '@/api/types';
+import {Event, Split} from '@/api/types';
 
 const split = (
     index: number,
@@ -248,6 +249,19 @@ describe('lanes', () => {
     it('extends the axis to cover lanes', () => {
         const bounds = tickBounds([], [lane(1, 0, 'mine', 50, 800)]);
         expect(bounds).toEqual({from: 50, to: 800});
+    });
+});
+
+describe('stuckReasons', () => {
+    it('maps a stuck milestone to its refusal, skipping one with no error recorded', () => {
+        const events: Event[] = [
+            {kind: 'milestone_stuck', index: 1, outcome: 'stuck', best_steps: 3, last_error: 'no belt route', tick: 100},
+            {kind: 'milestone_stuck', index: 2, outcome: 'stuck', best_steps: null, last_error: null, tick: 200}
+        ];
+        const reasons = stuckReasons(events);
+        expect(reasons.size).toBe(1);
+        expect(reasons.get(1)).toBe('no belt route');
+        expect(reasons.has(2)).toBe(false);
     });
 });
 

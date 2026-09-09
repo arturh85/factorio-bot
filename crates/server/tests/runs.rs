@@ -337,3 +337,218 @@ async fn a_run_id_escaping_the_runs_directory_is_refused() {
         );
     }
 }
+
+const PROVENANCE: &str = r#"{"schema":1,"run_id":"alpha","started_unix":1000,"started_tick":3242,
+  "seed":"31337","map_exchange_string":null,"map":{"digest":"c161fa3f437221d0","tiles":{"iron-ore":940}},
+  "factorio":"2.1.17","mods":{"base":"2.1.17","BotBridge":"0.0.1"},
+  "git":{"commit":"492e513a261bde8f4c433ecdd4e749918f9a6160","dirty":false,"source":"working-tree-at-run-start"},
+  "profile":"release","roster_requested":[1,2,3,4],"workspace":"/w","resumed_from":null,
+  "bot_mode":"clients","game_speed":1.0,"peaceful":null}"#;
+
+#[tokio::test]
+async fn provenance_is_served_verbatim() {
+    let ws = workspace("prov");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    std::fs::write(ws.join("runs/alpha/provenance.json"), PROVENANCE).unwrap();
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/provenance").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["seed"], "31337");
+    assert_eq!(body["git"]["dirty"], false);
+    assert_eq!(body["mods"]["BotBridge"], "0.0.1");
+    assert_eq!(body["map"]["tiles"]["iron-ore"], 940);
+    // Present-and-null survives the round trip: `None` is an answer.
+    assert!(body.get("map_exchange_string").is_some());
+    assert!(body["map_exchange_string"].is_null());
+}
+
+#[tokio::test]
+async fn a_run_without_provenance_is_a_404_not_an_empty_object() {
+    let ws = workspace("noprov");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/provenance").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("recorded no provenance")
+    );
+}
+
+#[tokio::test]
+async fn a_persisted_replay_is_served_and_its_absence_is_a_404() {
+    let ws = workspace("replay");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    let (status, _) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/replay").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    std::fs::write(
+        ws.join("runs/alpha/replay.json"),
+        r#"{"planned_makespan":100,"refused":null,"steps":[],"unmatched_walks":[]}"#,
+    )
+    .unwrap();
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/replay").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["planned_makespan"], 100);
+}
+
+const MANIFEST_WITH_COVERAGE: &str = r#"{"run_id":"alpha","started_unix":1000,"finished_unix":1100,
+  "outcome":"done","elapsed_ticks":400,"events":3,"splits":1,"samples":2674,"map":24,"samples_lag_ticks":0}"#;
+
+#[tokio::test]
+async fn a_summary_carries_the_manifest_coverage_counts() {
+    let ws = workspace("coverage");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST_WITH_COVERAGE), None);
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["summary"]["samples"], 2674);
+    assert_eq!(body["summary"]["map"], 24);
+    assert_eq!(body["summary"]["samples_lag_ticks"], 0);
+}
+
+#[tokio::test]
+async fn an_old_manifest_reports_lag_as_null_and_counts_as_zero() {
+    // `samples`/`map` are `#[serde(default)]` on Manifest (0 = no such file),
+    // `samples_lag_ticks` is Option (None = no samples). The summary must keep
+    // that distinction rather than flatten it.
+    let ws = workspace("oldmanifest");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    let (_, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha").await;
+    assert_eq!(body["summary"]["samples"], 0);
+    assert!(body["summary"]["samples_lag_ticks"].is_null());
+}
+
+#[tokio::test]
+async fn an_unfinished_run_has_null_coverage() {
+    let ws = workspace("unfinished-cov");
+    seed_run(&ws, "beta", MILESTONES, None, None);
+    let (_, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/beta").await;
+    assert!(body["summary"]["samples"].is_null());
+    assert!(body["summary"]["map"].is_null());
+    assert!(body["summary"]["samples_lag_ticks"].is_null());
+}
+
+const SAMPLES: &str = concat!(
+    r#"{"schema":3,"tick":600,"run":"alpha","kind":"bots","bots":[]}"#,
+    "\n",
+    r#"{"schema":3,"tick":600,"run":"alpha","kind":"force","research":null,"techs_unlocked":0,"production":{"made":{},"consumed":{}},"power":{"generated_kw":0.0,"consumed_kw":0.0,"satisfaction":1.0,"networks":{}},"pollution":null}"#,
+    "\n",
+    r#"{"schema":3,"tick":900,"run":"alpha","kind":"machines","machines":{},"truncated":0}"#,
+    "\n",
+    r#"{"schema":3,"tick":1200,"run":"alpha","kind":"force","research":null,"techs_unlocked":0,"production":{"made":{},"consumed":{}},"power":{"generated_kw":0.0,"consumed_kw":0.0,"satisfaction":1.0,"networks":{}},"pollution":null}"#,
+    "\n",
+);
+
+#[tokio::test]
+async fn samples_can_be_sliced_by_tick_and_kind() {
+    let ws = workspace("slice");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    std::fs::write(ws.join("runs/alpha/samples.jsonl"), SAMPLES).unwrap();
+    let st = || state_with_workspace(&ws);
+    let (_, all) = get_json(st(), "/api/v1/runs/alpha/samples").await;
+    assert_eq!(all["samples"].as_array().unwrap().len(), 4);
+    let (_, window) = get_json(st(), "/api/v1/runs/alpha/samples?from=700&to=1200").await;
+    let ticks: Vec<u64> = window["samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["tick"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ticks, vec![900, 1200], "inclusive bounds");
+    let (_, force) = get_json(st(), "/api/v1/runs/alpha/samples?kind=force").await;
+    assert_eq!(force["samples"].as_array().unwrap().len(), 2);
+    assert!(
+        force["samples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["kind"] == "force")
+    );
+    let (_, both) = get_json(st(), "/api/v1/runs/alpha/samples?kind=force&to=600").await;
+    assert_eq!(both["samples"].as_array().unwrap().len(), 1);
+}
+
+const MAP_LINES: &str = concat!(
+    r#"{"tick":10,"kind":"keyframe","bounds":{"left":0,"top":0,"right":1,"bottom":1},"game":[],"model":[],"divergence":[]}"#,
+    "\n",
+    r#"{"tick":500,"kind":"placed","bot":1,"intent":{"name":"stone-furnace","position":{"x":1,"y":2},"direction":0},"actual":{"name":"stone-furnace","position":{"x":1,"y":2},"direction":0},"drift":null}"#,
+    "\n",
+    r#"{"tick":900,"kind":"placed","bot":2,"intent":{"name":"wooden-chest","position":{"x":3,"y":2},"direction":0},"actual":{"name":"wooden-chest","position":{"x":3,"y":2},"direction":0},"drift":null}"#,
+    "\n",
+);
+
+#[tokio::test]
+async fn the_map_can_be_sliced_by_tick() {
+    let ws = workspace("mapslice");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    std::fs::write(ws.join("runs/alpha/map.jsonl"), MAP_LINES).unwrap();
+    let (_, body) = get_json(
+        state_with_workspace(&ws),
+        "/api/v1/runs/alpha/map?from=100&to=600",
+    )
+    .await;
+    let ticks: Vec<u64> = body["map"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["tick"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ticks, vec![500]);
+}
+
+#[tokio::test]
+async fn savepoints_are_listed_in_milestone_order_and_absent_is_empty() {
+    let ws = workspace("savepoints");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/savepoints").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["savepoints"].as_array().unwrap().len(), 0);
+    let dir = ws.join("runs/alpha/savepoints");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("milestone-2.json"),
+        r#"{"schema":1,"run_id":"alpha","milestone_index":2,"tick":900,"created_unix":1050,"bytes":10,"file":"milestone-2.zip","mods":null}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("milestone-1.json"),
+        r#"{"schema":1,"run_id":"alpha","milestone_index":1,"tick":300,"created_unix":1020,"bytes":10,"file":"milestone-1.zip","mods":{"version":"0.0.1","digest":"f3200cfb","files":6}}"#,
+    )
+    .unwrap();
+    // Corrupt metadata: must be counted, not silently dropped.
+    std::fs::write(dir.join("milestone-3.json"), "{not valid json").unwrap();
+    // Metadata that parses but whose zip never landed: must be named as
+    // `missing_zip` and excluded from `savepoints`, not offered as resumable.
+    std::fs::write(
+        dir.join("milestone-4.json"),
+        r#"{"schema":1,"run_id":"alpha","milestone_index":4,"tick":1200,"created_unix":1080,"bytes":10,"file":"milestone-4.zip","mods":null}"#,
+    )
+    .unwrap();
+    // Metadata that cannot be READ at all. A directory answers `std::fs::read`
+    // with an error on every platform, which is the portable stand-in for a
+    // permission failure or a vanished file. It must count exactly as the
+    // corrupt one does: unreadable and unparseable are the same fact to a
+    // reader -- this milestone's metadata did not arrive -- and dropping one
+    // of them silently is what makes `skipped: 0` a lie.
+    std::fs::create_dir_all(dir.join("milestone-9.json")).unwrap();
+    // The two real savepoints actually have their zips on disk.
+    std::fs::write(dir.join("milestone-1.zip"), b"").unwrap();
+    std::fs::write(dir.join("milestone-2.zip"), b"").unwrap();
+    let (_, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/savepoints").await;
+    let idx: Vec<u64> = body["savepoints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["milestone_index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(idx, vec![1, 2]);
+    assert_eq!(body["savepoints"][0]["mods"]["digest"], "f3200cfb");
+    assert_eq!(
+        body["skipped"], 2,
+        "the corrupt metadata file AND the one that could not be read are both counted"
+    );
+    assert_eq!(
+        body["missing_zip"].as_array().unwrap(),
+        &vec![Value::from(4)],
+        "a savepoint with no zip on disk must be named, not offered as resumable"
+    );
+}

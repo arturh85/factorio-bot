@@ -99,7 +99,30 @@ pub fn derive_lanes(events: &[Event]) -> Vec<Lane> {
                     open.to_tick = Some(event.tick);
                     open.status = Some(status.clone());
                     open.error = error.clone();
+                } else if status == "abandoned" {
+                    // An abandoned step settles without ever dispatching, by
+                    // design: the executor writes the tail of a plan that
+                    // never ran (`obs.abandoned` / `batch_progress.abandoned`
+                    // in `crates/core/src/record/mod.rs`), so this is a real
+                    // record and not a broken join like the branch below it.
+                    // Drawn as a zero-length lane at the settle tick rather
+                    // than dropped -- dropping it would make the truncated
+                    // tail of a plan invisible in the lanes exactly as it was
+                    // invisible in the events before `abandoned` existed.
+                    lanes.push(Lane {
+                        bot: *bot,
+                        id: Some(*id),
+                        action: error.clone().unwrap_or_else(|| "abandoned".into()),
+                        from_tick: event.tick,
+                        to_tick: Some(event.tick),
+                        status: Some(status.clone()),
+                        error: error.clone(),
+                    });
                 }
+                // Any other status with no open dispatch is a genuinely
+                // broken record (a settle whose dispatch never made it into
+                // this log) and stays dropped -- there is no span to draw,
+                // and `run_analysis.py` reports the join failure.
             }
             // A walk opens a lane exactly as an action does. Without this the
             // viewer answered "what was this bot doing at tick T" with nothing
@@ -294,6 +317,43 @@ mod tests {
     #[test]
     fn a_settle_with_no_dispatch_is_ignored_rather_than_inventing_a_span() {
         assert!(derive_lanes(&[settled(7, 1, "success", 100)]).is_empty());
+    }
+
+    #[test]
+    fn an_abandoned_settle_without_a_dispatch_becomes_a_zero_length_lane() {
+        let events = vec![Event {
+            tick: 500,
+            kind: EventKind::ActionSettled {
+                id: 7,
+                bot: 1,
+                status: "abandoned".into(),
+                elapsed_ticks: None,
+                error: Some("abandoned: predecessor 5 failed".into()),
+                failure: None,
+            },
+        }];
+        let lanes = derive_lanes(&events);
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].from_tick, 500);
+        assert_eq!(lanes[0].to_tick, Some(500));
+        assert_eq!(lanes[0].status.as_deref(), Some("abandoned"));
+        assert_eq!(lanes[0].id, Some(7));
+    }
+
+    #[test]
+    fn a_non_abandoned_settle_without_a_dispatch_is_still_dropped() {
+        let events = vec![Event {
+            tick: 500,
+            kind: EventKind::ActionSettled {
+                id: 7,
+                bot: 1,
+                status: "success".into(),
+                elapsed_ticks: Some(3),
+                error: None,
+                failure: None,
+            },
+        }];
+        assert!(derive_lanes(&events).is_empty());
     }
 
     #[test]

@@ -14307,20 +14307,43 @@ mod tests {
             "a bill a supplier's share could not usefully divide stays here"
         );
 
-        // Far past the roster's swings, so the estimate's pessimism cannot be
-        // what decides.
-        let need = 400;
+        // The boundary, stated because it is a choice and not a rounding
+        // detail: `suppliers` swings deal one swing each, and one swing each
+        // plus a chest placement, a stock per supplier and a take is not
+        // better than one bot swinging three times. So the ceiling is
+        // strictly *above* the supplier count.
+        let level = Goal::Have {
+            item: "stone".into(),
+            count: 60,
+            whose: Holder::Share(BotId(1)),
+            via: None,
+        };
+        assert_eq!(
+            chop_swings(&state, &"stone".to_string(), 60, &Holder::Share(BotId(1))),
+            Some(3),
+            "control: sixty stone is exactly one swing per supplier on this fixture"
+        );
+        assert!(
+            !Chop.yields_at(SUBGOAL_SITE, &level, &state),
+            "a bill of exactly one swing per supplier is not worth a chest"
+        );
+
+        // One swing past the boundary, and -- the part that makes the `find`
+        // assertion below mean anything -- still a bill `Chop` would take:
+        // the fixture's rocks cover it, so `chop_beats_mining` says yes and
+        // only the yield sends it on. Ask for more and `Chop` refuses on
+        // coverage, `Stockpile` gets the goal either way, and the test would
+        // pass with the hook deleted.
+        let need = 80;
         let big = Goal::Have {
             item: "stone".into(),
             count: need,
             whose: Holder::Share(BotId(1)),
             via: None,
         };
-        let big_swings = chop_swings(&state, &"stone".to_string(), need, &Holder::Share(BotId(1)))
-            .expect("control: the same rocks");
         assert!(
-            big_swings > 3,
-            "control: {need} stone must be beyond three suppliers' arms, and got {big_swings}"
+            Chop.applicable(&big, &state),
+            "control: {need} stone is a bill `Chop` would otherwise claim"
         );
         assert!(
             Chop.yields_at(SUBGOAL_SITE, &big, &state),

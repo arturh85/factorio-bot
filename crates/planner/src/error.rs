@@ -1350,6 +1350,36 @@ pub enum PlannerError {
         why: String,
     },
 
+    /// A stage-1 cell already makes the ingredient an assembly cell has to be
+    /// supplied with, and no belt run joins the two.
+    ///
+    /// **This is the difference between a cell and a factory, refused by
+    /// name.** An assembly cell's supply chest is charged once with
+    /// `CELL_CHARGE_TICKS` worth of ingredients and nothing refills it; the
+    /// live cell of `run-1788730139-71923` earned this project's first
+    /// `factory` verdict and then stopped dead at 9:48 when its charge ran
+    /// out. So when a renewing source of that ingredient *is* standing, the
+    /// run to it is not an optional improvement, and quietly falling back to
+    /// the hand charge would rebuild exactly the arrangement that stopped.
+    ///
+    /// Reached only when a source was found: a world with no stage-1 cell for
+    /// the supplied item plans exactly as it did before, hand charge and all.
+    #[error(
+        "a cell already makes {item} at {from} and nothing can carry it to the supply chest at          {to}: {why}"
+    )]
+    #[diagnostic(
+        code(planner::assembly_no_route_for_supply),
+        help(
+            "the run is planned in one window centred on the source container, so a supply              chest further away than that cannot be reached; site the assembly cell nearer the              cell that feeds it, or clear the ground between them"
+        )
+    )]
+    AssemblyNoRouteForSupply {
+        item: ItemId,
+        from: String,
+        to: String,
+        why: String,
+    },
+
     /// The cell stands and nothing can take its product away.
     ///
     /// **Measured, in `run-1788679826-02267`.** A belted burner cell ran for

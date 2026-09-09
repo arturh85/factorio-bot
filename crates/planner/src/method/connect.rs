@@ -700,9 +700,21 @@ fn place_step(ctx: &mut ExpansionCtx, entity: FactorioEntity, build: f64, note: 
 /// Connect `from` to `to` with a belt run and the inserter at each end that
 /// loads and unloads it.
 ///
+/// # It is not restricted to machines, and saying it was cost this project a
+/// stated gap
+///
+/// This doc said "between two **machines**" and `method::assemble`'s said
+/// chest-to-chest "is not a shape it has"; three sessions named that as the
+/// biggest thing standing between a charged cell and a factory. Nothing here
+/// ever restricted it. [`footprint_of`] reads a `bounding_box`, a 1x1
+/// container has one, and `tests::a_run_between_two_chests_is_routed` is the
+/// measurement rather than the argument. What *is* true of a container is
+/// narrower and is stated on [`container_sides`]: it has four sides, each run
+/// in or out of it spends one, and they go quickly.
+///
 /// # The geometry
 ///
-/// `from` and `to` are the two **machines**, and they are taken at their real
+/// `from` and `to` are the two **entities**, and they are taken at their real
 /// size: [`footprint_of`] reads each one's `bounding_box`, every cell of both
 /// is marked occupied, and each end's inserter is placed on the machine's
 /// **footprint perimeter** rather than beside its centre. Three collinear
@@ -1696,5 +1708,46 @@ mod tests {
     fn the_chain_actor_is_the_one_the_context_carries() {
         let (ctx, _, _) = crate::test_world::furnace_and_lab_on_open_ground();
         assert_eq!(ctx.chain_actor, BotId(1));
+    }
+    /// **Chest to chest is a shape this module already has**, and this test
+    /// is the measurement that says so.
+    ///
+    /// Both this module's doc and `method::assemble`'s said the opposite --
+    /// that `connect_steps` "routes a belt run between two **machines**" and
+    /// that chest-to-chest "is not a shape it has" -- and three separate
+    /// sessions named that as the gap between a charged cell and a factory.
+    /// Nothing in the code ever restricted it: `footprint_of` reads a
+    /// `bounding_box`, and a 1x1 container has one. The two ends here are
+    /// `iron-chest`s eight tiles apart, and the run that comes back is the
+    /// whole arrangement -- an arm on each chest, a belt row between them,
+    /// and both facings naming the side each arm PICKS UP from.
+    ///
+    /// What *is* scarce is a chest's sides: it has four, and this run spends
+    /// one at each end (see `container_sides`).
+    #[test]
+    fn a_run_between_two_chests_is_routed() {
+        let (mut ctx, source, sink) = crate::test_world::two_chests_on_open_ground();
+        let steps = connect_steps_with(&mut ctx, &source, &sink, &"iron-plate".into(), INSERTER)
+            .expect("two chests eight tiles apart on open ground");
+        assert_eq!(
+            placements(&steps, INSERTER),
+            vec![
+                // On the source chest's north side, picking up from the
+                // SOUTH -- which is the chest.
+                (Position::new(4.5, 4.5), dir(Direction::South)),
+                // On the sink chest's north side, picking up from the
+                // NORTH -- which is the belt.
+                (Position::new(12.5, 4.5), dir(Direction::North)),
+            ],
+            "an arm at each end, each facing what it picks up from"
+        );
+        let belts = placements(&steps, BELT);
+        assert_eq!(belts.len(), 9, "nine belt tiles from x=4.5 to x=12.5");
+        assert!(
+            belts
+                .iter()
+                .all(|(at, facing)| at.y() == 3.5 && *facing == dir(Direction::East)),
+            "one straight row, running east: {belts:?}"
+        );
     }
 }

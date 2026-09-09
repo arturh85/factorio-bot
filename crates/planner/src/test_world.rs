@@ -1164,6 +1164,22 @@ pub(crate) fn world_with_technologies_and_no_water() -> FactorioSurface {
     dry
 }
 
+/// Two `iron-chest`s on open ground, eight tiles apart on one row.
+///
+/// **The premise probe for chest-to-chest.** A produce cell's plates end in a
+/// container ([`crate::method::sustain`]'s offtake sink) and an assembly
+/// cell's ingredients start in one ([`crate::method::assemble`]'s supply
+/// chest), so the link between the two is a run between two 1x1 containers --
+/// the shape `method::connect`'s doc says it does not have. Nothing else is
+/// near: `fixture_world`'s rocks are at `(20, 20)` and `(40, 30)`, its trees
+/// around `(-20, -20)`, and its ore west of `x = -40`.
+pub(crate) fn two_chests_on_open_ground() -> (ExpansionCtx, FactorioEntity, FactorioEntity) {
+    let source = iron_chest(&Position::new(4.5, 5.5));
+    let sink = iron_chest(&Position::new(12.5, 5.5));
+    let entities = vec![source.clone(), sink.clone()];
+    (connect_ctx(entities), source, sink)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

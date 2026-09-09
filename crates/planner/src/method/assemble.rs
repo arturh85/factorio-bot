@@ -99,15 +99,29 @@
 //! cannot see it either.
 //!
 //! And one more, stated plainly because the goal's name invites the opposite
-//! reading: **the chests are filled by hand.** The cell is charged with
-//! [`CELL_CHARGE_TICKS`] worth of ingredients when it is built and nothing
-//! refills it. Making the inputs arrive by machine is a belt or a second cell
-//! feeding this one, which is stage 3.
+//! reading: **the feed chests are filled by hand.** A cell is charged with
+//! [`CELL_CHARGE_TICKS`] worth of ingredients when it is built and, for those,
+//! nothing refills them.
+//!
+//! **The supply chest is the exception since 2026-09-09**, and it is the one
+//! that matters: it holds the *smelted* ingredient, which is the only one a
+//! stage-1 cell can make. When a [`crate::method::produce`] cell for that item
+//! is already standing, this method belts its product into the supply chest
+//! and states the wire that runs the load arm --- see [`supply_link_steps`].
+//! The charge stays, demoted to an ignition charge, because a belt that has to
+//! fill delivers nothing for its first several hundred ticks.
+//!
+//! What that does **not** do is make a cell autonomous on its own: the goal
+//! has to have been asked in a world where such a cell stands, which today
+//! means composing it (`goal.all{sustain(<smelted>, ...), producing(...)}`).
+//! A cell asked for in isolation is still charge-fed, exactly as before, and
+//! the feed chests are hand-filled either way.
 
 use crate::action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{ActionId, BotId, ItemId, Ticks};
+use crate::method::connect::connect_steps_with;
 use crate::method::have::{COAL_BURN_TICKS, fuel_visits};
 use crate::method::have::{
     HANDOVER_WALK_TICKS, PLACE_TICKS, TRANSFER_TICKS, participants_that_can_work,
@@ -2941,6 +2955,311 @@ fn chest_role_name(role: Role) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// The supply link: where the ingredient comes from when it is not a bot's hands
+// ---------------------------------------------------------------------------
+
+/// How far from a stage-1 cell's furnace its offtake arm is looked for.
+///
+/// The arm stands on the furnace's own perimeter, so the container it drops
+/// into is at most two tiles from a footprint tile and at most three from the
+/// centre of a 2x2. Three, and not "everything nearby": a wider radius would
+/// start finding a *neighbouring* cell's offtake and attribute it to this
+/// furnace.
+const OFFTAKE_RADIUS: f64 = 3.0;
+
+/// The container a stage-1 cell already drops `item` into, and the cell's own
+/// furnace that fills it -- or `None` when no such arrangement stands.
+///
+/// **This is the whole precondition of the supply link**, and it is asked of
+/// what stands rather than of what some other method planned: the answer is
+/// read out of `PlanState` through the same two predicates
+/// [`crate::method::sustain`]'s own offtake check uses, so a container filled
+/// by hand, an arm pointing the wrong way, or a drop onto bare ground all
+/// answer `None` rather than being taken for a supply.
+///
+/// Three conditions, and each one has a failure it exists to exclude:
+///
+/// * the furnace belongs to a **cell that makes `item`** -- `cell_spec` names
+///   the ore and the smelting recipe, and `standing_cells` counts only drills
+///   actually standing on that ore facing a furnace, so a furnace somebody
+///   fed copper into is not a copper supply;
+/// * the arm **picks up from the furnace** (`delivers_into`'s pull branch), so
+///   an arm delivering coal *into* it is not mistaken for an offtake;
+/// * the arm **drops into a container**, so an arm dropping onto the ground is
+///   not counted as a source with nothing in it.
+///
+/// Deterministic: `standing_cells` is in a fixed order and
+/// `entities_within` is sorted by `(x, y)`, so the first answer is the same
+/// answer on every run.
+pub struct SupplySource {
+    /// The container the cell drops the item into. The **preferred** end of
+    /// the run and the one siting is measured from.
+    pub buffer: Position,
+    /// The furnace that fills it -- the fallback end, and the reason the
+    /// fallback exists is measured rather than hypothetical. See
+    /// [`supply_link_steps`].
+    pub furnace: Position,
+}
+
+fn standing_supply_source(state: &PlanState, item: &str) -> Option<SupplySource> {
+    let spec = cell_spec(state, item)?;
+    for cell in crate::method::produce::standing_cells(state, &spec) {
+        for arm in state.entities_within(&cell.furnace, OFFTAKE_RADIUS) {
+            if state.pickup_position(&arm).is_none() {
+                continue;
+            }
+            if !state.delivers_into(&cell.furnace, &arm.position) {
+                continue;
+            }
+            let Some(drop) = state.delivery_position(&arm) else {
+                continue;
+            };
+            let Some(sink) = state.entity_at(&drop) else {
+                continue;
+            };
+            if !is_container(state, &sink.name) {
+                continue;
+            }
+            if !state.delivers_into(&arm.position, &sink.position) {
+                continue;
+            }
+            return Some(SupplySource {
+                buffer: sink.position,
+                furnace: cell.furnace,
+            });
+        }
+    }
+    None
+}
+
+/// Is `name` a container, by the prototype rather than by the entity?
+///
+/// A plan-built entity may carry an empty `entity_type`, which is why the
+/// prototype is asked -- the same reading `method::connect`'s own
+/// `container_sides` makes, and for the same reason.
+fn is_container(state: &PlanState, name: &str) -> bool {
+    state
+        .base()
+        .globals
+        .entity_prototypes
+        .get(name)
+        .is_some_and(|proto| proto.entity_type == "container")
+}
+
+/// Is something already dropping into the container at `at`?
+///
+/// The discriminator is direction, and it is exact rather than approximate:
+/// a cell's own [`Role::SupplyInserter`] stands beside the supply chest and
+/// **picks up from** it, so it is not an answer here; only an arm whose
+/// *drop* lands in the chest is. That is what makes this idempotent across a
+/// replan -- the second plan finds its own unload arm standing and lays no
+/// second run.
+fn already_filled_by_machine(state: &PlanState, at: &Position) -> bool {
+    state
+        .entities_within(at, 2.0)
+        .into_iter()
+        .any(|arm| state.pickup_position(&arm).is_some() && state.delivers_into(&arm.position, at))
+}
+
+/// Belt runs from a standing stage-1 cell's product container to each new
+/// cell's supply chest.
+///
+/// # The shape, and why this one
+///
+/// **Container to container**, not furnace to chest and not machine to
+/// machine, and the geometry decides it rather than taste:
+///
+/// * a stage-1 cell's furnace has a *two-by-two* perimeter of eight tiles and
+///   already spends four of them -- the drill's drop tile, the coal arm, the
+///   offtake arm, and the belt that fuels the offtake arm -- so taking two
+///   more for a load arm and its belt is the tightest end available, and the
+///   furnace's output slot is also the thing whose backing up
+///   `SustainNoOfftake` exists to prevent. The container is downstream of
+///   that, so a run out of it cannot throttle the furnace;
+/// * the container is a **buffer**, and a buffer is the whole reason the two
+///   ends may run at different rates. A furnace makes one plate every 192
+///   ticks and an assembling machine eats them in bursts; wire them mouth to
+///   mouth and the belt is the only slack there is;
+/// * and it is 1x1 at both ends, so [`crate::method::connect`]'s perimeter
+///   search has a four-tile budget it can state, which is exactly the budget
+///   `container_sides` reserves.
+///
+/// The run itself is `connect_steps_with`, unchanged: an arm on the source
+/// chest picking up from it, a belt, an arm on the supply chest dropping into
+/// it. The [`INSERTER`] is the electric one for the same reason the rest of
+/// this cell's arms are -- the cell stands on a network by construction, and
+/// a burner arm here would need a coal supply of its own that nothing feeds.
+///
+/// # What it does NOT do
+///
+/// It does not remove the hand charge. A belt that has to fill is a belt that
+/// delivers nothing for its first several hundred ticks, and a machine whose
+/// input is empty when the plan's last action settles reads as a dead cell to
+/// every witness this crate has. The charge is now an **ignition** charge, the
+/// same role [`crate::method::sustain`]'s one coal per burner plays, and the
+/// continuity claim rests on the belt.
+/// Where every [`INSERTER`] a belt run places stands, in emission order.
+fn inserters_placed(run: &[Step]) -> Vec<Position> {
+    run.iter()
+        .filter_map(|step| match step {
+            Step::Act(action) => match &action.kind {
+                crate::action::ActionKind::Place { entity } if entity.name == INSERTER => {
+                    Some(entity.position.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+fn supply_link_steps(
+    ctx: &mut ExpansionCtx,
+    spec: &AssemblySpec,
+    cells: &[Cell],
+    source: &SupplySource,
+) -> Result<Vec<Step>, PlannerError> {
+    let mut steps = Vec::new();
+    for cell in cells {
+        let Some(part) = cell.at(Role::SupplyChest) else {
+            continue;
+        };
+        if already_filled_by_machine(&ctx.state, &part.position) {
+            continue;
+        }
+        let Some(sink) = ctx.state.entity_at(&part.position) else {
+            continue;
+        };
+        // `connect_steps_with` returns every refusal **before** it emits an
+        // action or adds an entity to the overlay -- that is the promise
+        // `ConnectRefusal` makes and the reason a refused end can simply be
+        // followed by the next one here.
+        let mut why: Vec<String> = Vec::new();
+        let mut linked = false;
+        for at in [&source.buffer, &source.furnace] {
+            let Some(from) = ctx.state.entity_at(at) else {
+                continue;
+            };
+            match connect_steps_with(ctx, &from, &sink, &spec.supplied.0, INSERTER) {
+                Ok(run) => {
+                    // EVERY ARM ON THIS RUN NEEDS A WIRE, and the load arm is
+                    // the one that does not have one already.
+                    //
+                    // The unload arm stands beside the supply chest, inside
+                    // the cell's own supply area, so `ensure_powered`'s
+                    // headroom test holds and it emits nothing. The **load**
+                    // arm stands on a stage-1 cell that is entirely burner --
+                    // no pole, no network, deliberately (see
+                    // `method::sustain`) -- and it is sixteen tiles from the
+                    // assembly cell's pole on seed 31337. `INSERTER` there is
+                    // not a choice: the belt carries plates, and a
+                    // `burner-inserter` that is not standing in the coal it
+                    // is moving has no fuel source at all -- it burns its
+                    // hand charge and stops, which is this project's
+                    // "a burner block works exactly where coal flows THROUGH
+                    // it" written out one arm at a time.
+                    //
+                    // So the wire is run to it, by the one function that
+                    // does that. `Ok(None)` -- supply exists and no run of
+                    // poles reaches -- is a refusal here and not a silent
+                    // omission, for the same reason the route itself is:
+                    // an unpowered inserter places 100%, passes every
+                    // geometry check, and moves nothing.
+                    let mut powered = Vec::new();
+                    let mut claims: Vec<(Position, Condition)> = Vec::new();
+                    let mut unreachable: Option<String> = None;
+                    for at in inserters_placed(&run) {
+                        let (Some(area), Some(kw)) = (
+                            ctx.state.collision_area(INSERTER, &at),
+                            ctx.state.consumer_draw_kw(INSERTER),
+                        ) else {
+                            continue;
+                        };
+                        match crate::method::power::ensure_powered(
+                            ctx,
+                            INSERTER,
+                            &at,
+                            &area,
+                            kw,
+                            ANCHOR_SEARCH_RADIUS,
+                            &[],
+                        )? {
+                            Some(powering) => {
+                                powered.extend(powering.steps);
+                                claims.push((at.clone(), powering.powered));
+                            }
+                            None => {
+                                unreachable = Some(format!(
+                                    "the load arm at {at} draws {kw:.0} kW and no run of poles \
+                                     this planner will build carries supply to it"
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                    // NOT a fall-through to the next end. `connect_steps_with`
+                    // has already added this run's belts and arms to the plan
+                    // overlay -- that is what makes a second connection in one
+                    // expansion route around the first -- so abandoning it here
+                    // would leave the state holding entities no step places.
+                    // The route stands; it is the wire that does not.
+                    if let Some(reason) = unreachable {
+                        return Err(PlannerError::AssemblyNoRouteForSupply {
+                            item: spec.supplied.0.clone(),
+                            from: at.to_string(),
+                            to: part.position.to_string(),
+                            why: reason,
+                        });
+                    }
+                    // THE CLAIM RIDES ON THE PLACEMENT, and it has to: the
+                    // audit (`crate::powered::audit`) asks the finished
+                    // network whether some action states a
+                    // `Condition::Powered` about each electric consumer's
+                    // tile, and `connect_steps_with` states `AtPosition`,
+                    // `AreaFree` and `HasItem` and nothing else -- it had
+                    // never placed an electric thing before. Without this the
+                    // plan refuses `UnpoweredConsumer` naming the load arm
+                    // even with the poles standing in it, which is the audit
+                    // working correctly on a method that had not yet spoken.
+                    let mut run = run;
+                    for step in &mut run {
+                        let Step::Act(action) = step else {
+                            continue;
+                        };
+                        let ActionKind::Place { entity } = &action.kind else {
+                            continue;
+                        };
+                        if entity.name != INSERTER {
+                            continue;
+                        }
+                        if let Some((_, claim)) = claims
+                            .iter()
+                            .find(|(at, _)| Pos::from(at) == Pos::from(&entity.position))
+                        {
+                            action.pre.push(claim.clone());
+                        }
+                    }
+                    steps.extend(powered);
+                    steps.extend(run);
+                    linked = true;
+                    break;
+                }
+                Err(refusal) => why.push(format!("from the {} at {at}: {refusal}", from.name)),
+            }
+        }
+        if !linked {
+            return Err(PlannerError::AssemblyNoRouteForSupply {
+                item: spec.supplied.0.clone(),
+                from: source.buffer.to_string(),
+                to: part.position.to_string(),
+                why: why.join("; "),
+            });
+        }
+    }
+    Ok(steps)
+}
+
+// ---------------------------------------------------------------------------
 // The method
 // ---------------------------------------------------------------------------
 
@@ -3015,10 +3334,29 @@ impl Method for BuildAssemblyCell {
             return Ok(Vec::new());
         }
 
-        let from = ctx
-            .state
-            .bot(ctx.chain_actor)
-            .map(|b| b.position.clone())
+        // WHERE THE CELL IS SITED FROM, and the one thing the supply link
+        // changes about the rest of this method.
+        //
+        // A cell is sited from an anchor, and the anchor search starts from
+        // here. Started from the bot, a cell lands wherever the roster
+        // happened to be standing, and a stage-1 cell already making the
+        // supplied ingredient could be anywhere at all -- most often further
+        // than the one `enclosure::window` a belt run is planned in, which
+        // would make the link refuse for a reason that is about the roster's
+        // position rather than about the ground.
+        //
+        // So when such a source stands, it is what the siting starts from.
+        // Nothing else about the search changes: `supply_anchor` still
+        // adopts an existing network in preference to building a plant, and
+        // still refuses by name when there is no room. In a world with no
+        // stage-1 cell for the supplied item -- which is every baseline --
+        // `supply_source` is `None` and this is the bot's position exactly as
+        // before, so no plan that does not have a source to link to moves.
+        let supply_source = standing_supply_source(&ctx.state, &spec.supplied.0);
+        let from = supply_source
+            .as_ref()
+            .map(|source| source.buffer.clone())
+            .or_else(|| ctx.state.bot(ctx.chain_actor).map(|b| b.position.clone()))
             .unwrap_or_default();
         // Somewhere with the capacity *left* to run a whole cell -- a network
         // that already stands wherever `power::supply_for` can find one, and
@@ -3048,6 +3386,13 @@ impl Method for BuildAssemblyCell {
         let (built, needs_power) = cell_steps(ctx, &spec, &cells, coal, &boilers, &roster)?;
         let mut steps = plant_steps_taken;
         steps.extend(built);
+        // The supply link, after the cells stand: `connect_steps_with` reads
+        // the supply chest out of `ctx.state`, and `cell_steps` is what puts
+        // it there.
+        if let Some(source) = &supply_source {
+            let link = supply_link_steps(ctx, &spec, &cells, source)?;
+            steps.extend(link);
+        }
         // Every id, not just the generator's: an engine with no steam produces
         // nothing and a boiler with no water makes no steam, so the cell waits
         // for the whole plant. `plant_steps` returns them all for exactly this
@@ -5590,5 +5935,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **The gate on everything above, and what keeps every baseline still.**
+    ///
+    /// The supply link is reached only when a stage-1 cell for the supplied
+    /// item is already standing, and on a world where none is, this answers
+    /// `None` -- so the cell is sited from the bot exactly as before and no
+    /// belt run is laid. That is why `researched:automation`,
+    /// `producing:automation-science-pack:6` and the other five baselines are
+    /// byte-identical across this change: not because the link is cheap, but
+    /// because nothing reaches it.
+    ///
+    /// Asserted about the *shared fixture*, which is the world those
+    /// baselines' unit-test siblings run on.
+    #[test]
+    fn a_world_with_no_standing_cell_offers_no_supply_source() {
+        let state = bare(&[BotId(1)]);
+        let spec = assembly_spec(&state, PACK).expect("red science is a cell shape");
+        assert_eq!(
+            spec.supplied.0.as_str(),
+            "copper-plate",
+            "red science's smelted ingredient"
+        );
+        assert!(
+            standing_supply_source(&state, &spec.supplied.0).is_none(),
+            "no drill, no furnace, no offtake -- nothing to link to"
+        );
+    }
+
+    /// **Direction is the discriminator, and it has to be.** A cell's own
+    /// `SupplyInserter` stands beside the supply chest and *picks up* from it;
+    /// the link's unload arm stands beside it and *drops into* it. Read the
+    /// wrong way round, a freshly-planned cell would look already-fed and the
+    /// link would never be laid -- the silent half of the failure this whole
+    /// change exists to end.
+    #[test]
+    fn a_cells_own_supply_arm_does_not_count_as_something_filling_the_chest() {
+        let bots = [BotId(1)];
+        let mut state = powered_with_room(&bots);
+        let spec = assembly_spec(&state, PACK).expect("red science is a cell shape");
+        let cell = plan_cell(&state, &Position::new(10.5, 10.5), &spec)
+            .or_else(|_| plan_cell(&state, &Position::new(20.5, 20.5), &spec))
+            .expect("a cell fits somewhere on the fixture");
+        for part in &cell.parts {
+            let entity = entity_for(&state, part);
+            state.create_entity(entity);
+        }
+        let chest = cell
+            .at(Role::SupplyChest)
+            .expect("every cell has a supply chest");
+        assert!(
+            !already_filled_by_machine(&state, &chest.position),
+            "the cell's own supply inserter takes OUT of this chest, so nothing fills it"
+        );
     }
 }

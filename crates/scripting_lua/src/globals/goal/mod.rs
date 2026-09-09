@@ -493,6 +493,7 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::SustainSupplyNotStanding { .. }
         | PlannerError::SustainNoFuelSource { .. }
         | PlannerError::SustainNoRouteForFuel { .. }
+        | PlannerError::AssemblyNoRouteForSupply { .. }
         | PlannerError::SustainNoOfftake { .. }
         | PlannerError::SolarBankShort { .. }
         | PlannerError::SolarBankNotSizable { .. }

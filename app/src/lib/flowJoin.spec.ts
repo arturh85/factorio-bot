@@ -79,9 +79,35 @@ describe('flowView', () => {
         const samples: Sample[] = [machinesSample(3600, 10), machinesSample(6000, 34)];
         const view = flowView(FURNACE_FLOW, samples, 6000, 2);
         const furnace = view.nodes.find((n) => n.id === 1)!;
-        // 24 items over the trailing 2-minute window = 12/min.
-        expect(furnace.measuredPerMinute).toBe(12);
+        // The nominal window is [6000 - 2*3600, 6000] = [-1200, 6000], clamped
+        // to lo = 0. No `machines` sample exists at or before tick 0, so the
+        // baseline falls back to the earliest sample (tick 3600, produced 10)
+        // -- the fallback `machineRatePerMinuteAt` documents. The 24 items
+        // (34 - 10) were made over the REAL observed span, tick 3600 to tick
+        // 6000 -- 2400 ticks, i.e. 2400 / 3600 = 2/3 minute -- not over the
+        // nominal 2-minute window. 24 / (2/3) = 36/min.
+        expect(furnace.measuredPerMinute).toBe(36);
         expect(furnace.status).toBe('good'); // 'working' -> statusClass -> 'good'
+    });
+
+    it('agrees with the naive nominal-window formula when the baseline sample lands exactly at lo', () => {
+        // cursorTick=7200, windowMinutes=1 -> lo = 3600, exactly the tick of
+        // the baseline sample. The real observed span (3600 to 7200 = 3600
+        // ticks = 1 minute) then coincides with the nominal window, so
+        // dividing by either gives the same answer: (40-10)/1 = 30/min.
+        const samples: Sample[] = [machinesSample(3600, 10), machinesSample(7200, 40)];
+        const view = flowView(FURNACE_FLOW, samples, 7200, 1);
+        const furnace = view.nodes.find((n) => n.id === 1)!;
+        expect(furnace.measuredPerMinute).toBe(30);
+    });
+
+    it('reports measured as null, not Infinity or a fabricated number, when baseline and end sample coincide', () => {
+        // Only one `machines` sample exists, so baseAt and endAt are the same
+        // sample and the real elapsed span is zero.
+        const samples: Sample[] = [machinesSample(50, 5)];
+        const view = flowView(FURNACE_FLOW, samples, 100);
+        const furnace = view.nodes.find((n) => n.id === 1)!;
+        expect(furnace.measuredPerMinute).toBeNull();
     });
 
     it('derives model rate from the node\'s own outgoing edges, in items/minute', () => {

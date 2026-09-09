@@ -35,9 +35,12 @@ export interface FlowViewNode {
      *  outgoing edge and lane. `null` exactly when `primaryItem` is. */
     modelPerMinute: number | null;
     /** Items/minute, measured: this node's own machine sample, `primaryItem`'s
-     *  production over the trailing window. `null` when there is no machine
-     *  sample at this position (a belt, a pipe) or no counter reading there
-     *  -- never `0` for "we do not know". */
+     *  production over the trailing window, divided by the REAL elapsed span
+     *  between the baseline and end samples (which can be shorter than the
+     *  nominal window -- see `machineRatePerMinuteAt`). `null` when there is
+     *  no machine sample at this position (a belt, a pipe), no counter
+     *  reading there, or no real elapsed span -- never `0` for "we do not
+     *  know". */
     measuredPerMinute: number | null;
     /** `modelPerMinute / measuredPerMinute`. `null` whenever either side is
      *  `null` or measured is `0` -- a ratio against nothing said is not a
@@ -83,7 +86,8 @@ function byPosition(machines: Record<string, MachineSample>): Map<string, Machin
 }
 
 /**
- * Each machine's own production delta over `(lo, hi]`, by position key.
+ * Each machine's own production RATE, items/minute, over `(lo, hi]`, by
+ * position key.
  *
  * Deliberately NOT `runAttribution.ts`'s `machineProduction` -- that
  * function aggregates by item and entity *name* for the roster-fed/factory
@@ -98,8 +102,20 @@ function byPosition(machines: Record<string, MachineSample>): Map<string, Machin
  * made inside one trailing window; falling back to the oldest sample we do
  * have measures "since we started watching" instead, which is what a
  * reader staring at the first few minutes of a run actually wants.
+ *
+ * That fallback means the sample actually used as the baseline can be more
+ * recent than `lo` itself, so the ACTUAL elapsed span between `baseAt` and
+ * `endAt` can be shorter than the nominal `hi - lo` window. Dividing a
+ * delta earned over that shorter span by the nominal window width
+ * understates the rate. So the division happens HERE, against
+ * `(endAt.tick - baseAt.tick)`, the real span both samples were drawn from
+ * -- mirroring `runRates.ts`'s `rateSeries`, which computes its own
+ * `winMinutes` from the samples it actually compares rather than from a
+ * nominal window. A non-positive real span (baseAt and endAt coincide, or
+ * disagree in direction) produces no entries at all: absent, not a
+ * divide-by-zero or a fabricated number.
  */
-function machineDeltaAt(samples: Sample[], lo: number, hi: number): Map<string, number> {
+function machineRatePerMinuteAt(samples: Sample[], lo: number, hi: number): Map<string, number> {
     const rows = machinesSamples(samples);
     const out = new Map<string, number>();
     if (rows.length === 0) return out;
@@ -111,13 +127,15 @@ function machineDeltaAt(samples: Sample[], lo: number, hi: number): Map<string, 
         else break;
     }
     if (endAt === null) return out;
+    const spanMinutes = (endAt.tick - baseAt.tick) / TICKS_PER_MINUTE;
+    if (spanMinutes <= 0) return out;
     const base = byPosition(baseAt.machines);
     for (const m of Object.values(endAt.machines)) {
         if (m.produced === null || m.produced === undefined) continue;
         const key = positionKey(m.position);
         const before = base.get(key)?.produced ?? 0;
         const delta = m.produced - before;
-        if (delta > 0) out.set(key, (out.get(key) ?? 0) + delta);
+        if (delta > 0) out.set(key, (out.get(key) ?? 0) + delta / spanMinutes);
     }
     return out;
 }
@@ -153,15 +171,13 @@ function viewNode(
     node: FlowExportNode,
     outgoing: Map<string, number> | undefined,
     statuses: Map<string, string | null>,
-    produced: Map<string, number>,
-    windowMinutes: number
+    ratesPerMinute: Map<string, number>
 ): FlowViewNode {
     const key = positionKey(node.position);
     const status = statusClass(statuses.get(key) ?? null);
     const {item: primaryItem, perSecond} = primaryOf(outgoing);
     const modelPerMinute = primaryItem === null ? null : perSecond * 60;
-    const madeThisWindow = produced.get(key);
-    const measuredPerMinute = madeThisWindow === undefined ? null : madeThisWindow / windowMinutes;
+    const measuredPerMinute = ratesPerMinute.get(key) ?? null;
     const gap =
         modelPerMinute !== null && measuredPerMinute !== null && measuredPerMinute > 0
             ? modelPerMinute / measuredPerMinute
@@ -185,10 +201,10 @@ export function flowView(
     const windowTicks = windowMinutes * TICKS_PER_MINUTE;
     const lo = Math.max(0, cursorTick - windowTicks);
     const statuses = machineStatusAt(samples, cursorTick);
-    const produced = machineDeltaAt(samples, lo, cursorTick);
+    const ratesPerMinute = machineRatePerMinuteAt(samples, lo, cursorTick);
     const outgoing = outgoingRatesByNode(flow);
 
-    const nodes = flow.nodes.map((n) => viewNode(n, outgoing.get(n.id), statuses, produced, windowMinutes));
+    const nodes = flow.nodes.map((n) => viewNode(n, outgoing.get(n.id), statuses, ratesPerMinute));
 
     const edges: FlowViewEdge[] = flow.edges.map((e) => ({
         from: e.from,

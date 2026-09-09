@@ -2277,7 +2277,10 @@ impl RunRecorder {
     /// there is no equivalent of `placed_bounds` to maintain, because a
     /// flow keyframe is a full snapshot rather than a delta a later
     /// reconstruction depends on.
-    pub fn record_flow(&mut self, export: &crate::graph::flow_export::FlowExport) -> io::Result<()> {
+    pub fn record_flow(
+        &mut self,
+        export: &crate::graph::flow_export::FlowExport,
+    ) -> io::Result<()> {
         let mut line = serde_json::to_string(export).map_err(io::Error::other)?;
         line.push('\n');
         self.flow.write_all(line.as_bytes())?;

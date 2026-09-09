@@ -398,6 +398,50 @@ pub enum Goal {
         entity: String,
         unlocks: Option<String>,
     },
+    /// A space platform is in orbit of `planet`, delivered by a rocket
+    /// carrying `starter_pack`.
+    ///
+    /// # Why this is a goal of its own and not a `Researched`
+    ///
+    /// It is the same argument [`Goal::Extracted`] makes, one rung along.
+    /// Creating a platform is the `create-space-platform` research trigger of
+    /// the `space-platform` technology, so `researched:space-platform` is the
+    /// thing a caller says today -- and it refuses today, with
+    /// [`crate::PlannerError::UnsupportedResearchTrigger`], because
+    /// `Researched`'s trigger path has no goal to hand the act to. Every other
+    /// trigger it *can* plan is handed to a goal naming the act: a `craft-item`
+    /// to [`Goal::Produced`], a `mine-entity` to [`Goal::Produced`] or
+    /// [`Goal::Extracted`]. This is that goal for the third kind.
+    ///
+    /// Folding it into `Researched` instead was considered and rejected on
+    /// three counts, all of which `Extracted`'s own doc already makes: the
+    /// refusal wants asking of the world *after* the technology's
+    /// prerequisites have been planned; a caller who already has the
+    /// technology could then never ask for a second platform, because
+    /// `AlreadySatisfied` owns that question; and the method that eventually
+    /// stands a silo up needs a goal to claim.
+    ///
+    /// `unlocks` rides on it for the same reason it rides on `Extracted`,
+    /// `Gathered` and `Produced`: only the method that emits the actions knows
+    /// which one to hang [`crate::Effect::Researched`] on.
+    ///
+    /// # What it does NOT say
+    ///
+    /// Nothing about a surface. The platform this goal ends with is
+    /// **invisible to the planner**: the mod drops every non-Nauvis chunk
+    /// (`mods/BotBridge/control.lua`, counted in `surface_chunk_drops`), so no
+    /// platform tile, entity or character ever reaches a `FactorioSurface`.
+    /// This goal is satisfied by having *done the act*, which is exactly what
+    /// the game rewards, and it is deliberately not widened to "and the
+    /// planner can see it" -- that is a bridge gap of its own and much larger
+    /// than this goal.
+    Orbiting {
+        /// The planet the platform is created in orbit of, e.g. `nauvis`.
+        planet: String,
+        /// The item the rocket carries up, e.g. `space-platform-starter-pack`.
+        starter_pack: ItemId,
+        unlocks: Option<String>,
+    },
     /// This blueprint stands at this anchor.
     ///
     /// **Shaped to survive replanning.** Expanding it means *the entities not
@@ -494,6 +538,22 @@ impl std::fmt::Display for Goal {
             Goal::Gathered { entity, unlocks } => match unlocks {
                 Some(tech) => write!(f, "gather {} into a tank to unlock {}", entity, tech),
                 None => write!(f, "gather {} into a tank", entity),
+            },
+            Goal::Orbiting {
+                planet,
+                starter_pack,
+                unlocks,
+            } => match unlocks {
+                Some(tech) => write!(
+                    f,
+                    "put a platform in orbit of {} with a {} to unlock {}",
+                    planet, starter_pack, tech
+                ),
+                None => write!(
+                    f,
+                    "put a platform in orbit of {} with a {}",
+                    planet, starter_pack
+                ),
             },
             Goal::Built { blueprint, site } => {
                 let where_ = match site {

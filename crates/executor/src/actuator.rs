@@ -306,6 +306,28 @@ pub trait Actuator: Send + Sync {
         expected_ticks: u32,
     ) -> Result<ActionTicks, ActuatorFailure>;
 
+    /// Ask the force to create a space platform in orbit of `planet`, to be
+    /// delivered by a rocket carrying `starter_pack`.
+    ///
+    /// **No `BotId`, for the same reason [`Actuator::research`] takes none**:
+    /// `LuaForce.create_space_platform` is force-level. It names no
+    /// `LuaEntity` and no tile either, which is why the planner cannot express
+    /// it as a `place` or an `insert` -- see `ActionKind::CreatePlatform`.
+    ///
+    /// **A required method, not a default**, on [`Actuator::set_recipe`]'s
+    /// grounds: a default returning `Ok` would let an actuator report a
+    /// platform created by a game that was never asked.
+    ///
+    /// It creates a *pending* platform, waiting for its starter pack. What
+    /// makes it real is the ordinary `insert` that follows, and then the silo
+    /// launching itself -- there is deliberately no launch verb on this trait.
+    async fn create_platform(
+        &self,
+        name: &str,
+        planet: &str,
+        starter_pack: &str,
+    ) -> Result<ActionTicks, ActuatorFailure>;
+
     /// Put `recipe` on the crafting machine named `entity` at `at`.
     ///
     /// `entity` as well as `at` for the same reason [`Actuator::insert`] takes
@@ -630,6 +652,14 @@ mod tests {
                 unreachable!()
             }
             async fn research(&self, _: &str, _: u32) -> Result<ActionTicks, ActuatorFailure> {
+                unreachable!()
+            }
+            async fn create_platform(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+            ) -> Result<ActionTicks, ActuatorFailure> {
                 unreachable!()
             }
             async fn set_recipe(

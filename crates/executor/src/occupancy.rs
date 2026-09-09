@@ -100,6 +100,11 @@ pub fn kind_occupancy(kind: &ActionKind) -> Occupancy {
         // research is force-wide. The bot has nothing to do with it beyond
         // having fed the lab, which is a separate `Insert`.
         ActionKind::Research { .. } => Occupancy::Background,
+        // Force-level, like research, and `Actuator::create_platform` takes no
+        // bot either. It is one RCON round trip against `game.forces.player`
+        // and the character does nothing at all -- so it must not stop the bot
+        // walking, which is what an `Exclusive` here would do.
+        ActionKind::CreatePlatform { .. } => Occupancy::Background,
         // The character swings the pick.
         ActionKind::Mine { .. }
         | ActionKind::Chop { .. }
@@ -217,6 +222,11 @@ pub fn inventory_footprint(action: &Action) -> BTreeSet<ItemId> {
         | ActionKind::SetRecipe { .. }
         | ActionKind::Evacuate { .. }
         | ActionKind::Survey { .. }
+        // It names the starter pack and does not spend it: the pack is spent
+        // by the `Insert` that follows, which is where the `LoseItem` sits.
+        // Listing it as a spender would double-count one pack and could make
+        // the plan believe a bot needs two.
+        | ActionKind::CreatePlatform { .. }
         | ActionKind::StampGhosts { .. } => {}
     }
     items

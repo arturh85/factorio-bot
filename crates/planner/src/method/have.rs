@@ -297,6 +297,16 @@ pub fn holds(goal: &Goal, state: &PlanState) -> Option<bool> {
         // idempotence a `Some(true)` would have bought actually lives.
         Goal::Gathered { .. } => None,
         Goal::Built { .. } => None,
+        // Unanswerable, and the strongest case of the three. A platform is
+        // not on any surface this model holds -- the mod drops every
+        // non-Nauvis chunk -- so the overlay could not report one standing
+        // even after the act succeeded. `Some(false)` would be a claim about
+        // a world nothing here can see; `None` says the model cannot answer,
+        // which is the truth. The consequence is deliberate and matches
+        // `Sustain`: this goal never reports itself already satisfied, so
+        // `method::orbit` has to refuse or plan on every replan, and asking
+        // for a platform twice plans a second one rather than nothing.
+        Goal::Orbiting { .. } => None,
         // A *state*, and one the model can answer exactly. Answering here as
         // well as inside `Scout` is what makes a charted disc
         // `already-satisfied` -- so a replan over ground the last plan
@@ -4355,6 +4365,19 @@ impl Method for Researched {
                     unlocks: Some(name.clone()),
                 })
             }
+            // The same seat again, for the third planned trigger. The planet
+            // and the pack are named here rather than read off the trigger,
+            // which states neither: `nauvis` because the first platform does
+            // not move (a `space-platform-thruster` costs 500 space science,
+            // so there is nothing to fuel one with until after this), and the
+            // shipped starter pack because it is the only item whose recipe
+            // `rocket-silo` unlocks for the purpose. Both are the goal's
+            // fields, so a script that wants otherwise says so directly.
+            (Some(TriggerRequirement::CreatePlatform), _) => Some(Goal::Orbiting {
+                planet: crate::method::orbit::FIRST_PLANET.to_string(),
+                starter_pack: crate::method::orbit::STARTER_PACK.to_string(),
+                unlocks: Some(name.clone()),
+            }),
             _ => None,
         };
         if let Some(subgoal) = subgoal {
@@ -5292,6 +5315,11 @@ pub fn default_registry() -> MethodRegistry {
         // Claims `Goal::Charted`, which nothing else claims, so where it sits
         // changes no other goal's method. See `method::scout`.
         .with(Box::new(crate::method::scout::Scout))
+        // Claims `Goal::Orbiting`, which nothing else claims, so where it
+        // sits changes no other goal's method. Beside `Extract` and `Gather`
+        // because it is the same shape: a Factorio 2.0 research trigger whose
+        // act needed a goal of its own. See `method::orbit`.
+        .with(Box::new(crate::method::orbit::Orbit))
         .with(Box::new(Researched { bots: Vec::new() }))
         .with(Box::new(crate::method::produce::BuildCell))
         // Its sibling, and disjoint from it by construction: `BuildCell`
@@ -6822,6 +6850,11 @@ pub fn registry_for(bots: &[BotId]) -> MethodRegistry {
         // Claims `Goal::Charted`, which nothing else claims, so where it sits
         // changes no other goal's method. See `method::scout`.
         .with(Box::new(crate::method::scout::Scout))
+        // Claims `Goal::Orbiting`, which nothing else claims, so where it
+        // sits changes no other goal's method. Beside `Extract` and `Gather`
+        // because it is the same shape: a Factorio 2.0 research trigger whose
+        // act needed a goal of its own. See `method::orbit`.
+        .with(Box::new(crate::method::orbit::Orbit))
         // Roster-aware since 2026-09-05: the pack bill is dealt across these
         // bots and each delivers its share to the lab itself. See the
         // method's `expand`.
@@ -8392,6 +8425,7 @@ mod tests {
                 ActionKind::SetRecipe { .. } => "set_recipe",
                 ActionKind::Evacuate { .. } => "evacuate",
                 ActionKind::Survey { .. } => "survey",
+                ActionKind::CreatePlatform { .. } => "create-platform",
                 ActionKind::StampGhosts { .. } => "stamp_ghosts",
             })
             .collect();
@@ -9044,6 +9078,7 @@ mod tests {
                 ActionKind::SetRecipe { .. } => "set_recipe",
                 ActionKind::Evacuate { .. } => "evacuate",
                 ActionKind::Survey { .. } => "survey",
+                ActionKind::CreatePlatform { .. } => "create-platform",
                 ActionKind::StampGhosts { .. } => "stamp_ghosts",
             })
             .collect();

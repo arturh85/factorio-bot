@@ -1288,6 +1288,18 @@ async fn perform<A: Actuator + ?Sized>(
                 .await
         }
         ActionKind::Research { tech } => act.research(tech, expected_ticks).await,
+        // No walk and no `AtPosition` to satisfy -- the call is force-level.
+        // The platform it creates is pending until the `Insert` that follows
+        // loads the pack onto a rocket; nothing launches it, because the silo
+        // does that itself once the cargo is aboard.
+        ActionKind::CreatePlatform {
+            name,
+            planet,
+            starter_pack,
+        } => {
+            act.create_platform(name, planet, starter_pack.as_str())
+                .await
+        }
         ActionKind::SetRecipe {
             pos,
             entity,
@@ -1391,6 +1403,7 @@ mod tests {
             async fn insert(&self, bot: BotId, entity: &str, at: Position, slot: InventorySlot, item: &str, count: u32) -> Result<ActionTicks, ActuatorFailure>;
             async fn remove(&self, bot: BotId, entity: &str, at: Position, slot: InventorySlot, item: &str, count: u32) -> Result<ActionTicks, ActuatorFailure>;
             async fn research(&self, tech: &str, expected_ticks: u32) -> Result<ActionTicks, ActuatorFailure>;
+            async fn create_platform(&self, name: &str, planet: &str, starter_pack: &str) -> Result<ActionTicks, ActuatorFailure>;
             async fn set_recipe(&self, bot: BotId, entity: &str, at: Position, recipe: &str) -> Result<ActionTicks, ActuatorFailure>;
         }
     }
@@ -2025,6 +2038,15 @@ mod tests {
             Ok(self.ticks_now())
         }
 
+        async fn create_platform(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            Ok(self.ticks_now())
+        }
+
         async fn set_recipe(
             &self,
             _bot: BotId,
@@ -2290,6 +2312,14 @@ mod tests {
             &self,
             _tech: &str,
             _expected_ticks: u32,
+        ) -> Result<ActionTicks, ActuatorFailure> {
+            Ok(some_ticks())
+        }
+        async fn create_platform(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
         ) -> Result<ActionTicks, ActuatorFailure> {
             Ok(some_ticks())
         }

@@ -684,6 +684,19 @@ pub enum InventorySlot {
     AssemblerInput,
     AssemblerOutput,
     LabInput,
+    /// The cargo hold of the rocket a `rocket-silo` is *currently building*.
+    ///
+    /// The one slot here that is not a machine's working inventory. It is the
+    /// receiver for [`ActionKind::CreatePlatform`]'s companion `Insert`: a
+    /// `space-platform-starter-pack` put here while the silo is mid-build
+    /// loads as the rocket's cargo, and the silo then launches itself.
+    ///
+    /// **Which slot it is decides whether anything happens at all**, and the
+    /// wrong neighbour fails silently: the same item put into
+    /// `rocket_silo_attached_cargo_unit` -- a finished, empty rocket -- sits
+    /// there and goes nowhere. Established live on 2026-09-07,
+    /// `docs/superpowers/notes/2026-09-07-a-space-platform-needs-one-new-verb.md`.
+    RocketSiloRocket,
 }
 
 impl InventorySlot {
@@ -708,11 +721,12 @@ impl InventorySlot {
             InventorySlot::AssemblerInput => "crafter_input",
             InventorySlot::AssemblerOutput => "crafter_output",
             InventorySlot::LabInput => "lab_input",
+            InventorySlot::RocketSiloRocket => "rocket_silo_rocket",
         }
     }
 
     /// Every variant, for exhaustive checks against the game's defines table.
-    pub const ALL: [InventorySlot; 7] = [
+    pub const ALL: [InventorySlot; 8] = [
         InventorySlot::Chest,
         InventorySlot::FurnaceSource,
         InventorySlot::FurnaceResult,
@@ -720,6 +734,7 @@ impl InventorySlot {
         InventorySlot::AssemblerInput,
         InventorySlot::AssemblerOutput,
         InventorySlot::LabInput,
+        InventorySlot::RocketSiloRocket,
     ];
 }
 
@@ -783,6 +798,47 @@ pub enum ActionKind {
     },
     Research {
         tech: String,
+    },
+    /// Ask the force to create a space platform in orbit of `planet`, to be
+    /// delivered by a rocket carrying `starter_pack`.
+    ///
+    /// # Why this cannot be any of the other ten
+    ///
+    /// Every other variant here names an `LuaEntity` the mod addresses with
+    /// `surface.find_entity(name, position)`, or a recipe the acting character
+    /// crafts. `LuaForce.create_space_platform` names **neither**: it is a
+    /// force-level call with no receiver and no tile, which is why
+    /// [`ActionKind::target_position`] answers `None` for it alongside `Craft`
+    /// and `Research`. Expressing it as a `Place` would need an entity that
+    /// does not exist yet on a surface that does not exist yet; expressing it
+    /// as an `Insert` would need an inventory. That is a structural fact about
+    /// an entity-scoped vocabulary rather than a gap somebody forgot to fill,
+    /// and it is the whole of the addition -- see
+    /// `docs/superpowers/notes/2026-09-07-a-space-platform-needs-one-new-verb.md`.
+    ///
+    /// # There is deliberately no launch action beside it
+    ///
+    /// The silo launches itself once a rocket it is building carries valid
+    /// cargo with somewhere to go. `LuaEntity.launch_rocket` returned `false`
+    /// throughout the live run that nevertheless produced a platform, and
+    /// 2.1.17 has no writable `auto_launch` to set. So the sequence is this
+    /// action, then one ordinary [`ActionKind::Insert`] into
+    /// [`InventorySlot::RocketSiloRocket`], then nothing.
+    ///
+    /// # `name` is the platform's, and it is validated downstream
+    ///
+    /// All three fields land inside a Lua string literal the game executes, so
+    /// `FactorioRcon::create_space_platform` refuses anything that is not a
+    /// plain Factorio name. Nothing here escapes them; the refusal is the
+    /// boundary.
+    CreatePlatform {
+        /// What to call the platform, e.g. `platform-1`.
+        name: String,
+        /// The planet it is created in orbit of, e.g. `nauvis`.
+        planet: String,
+        /// The starter-pack item the rocket carries, e.g.
+        /// `space-platform-starter-pack`.
+        starter_pack: ItemId,
     },
     /// Put `recipe` on the crafting machine named `entity` standing at `pos`.
     ///
@@ -933,7 +989,12 @@ impl ActionKind {
             ActionKind::Place { entity } => Some(entity.position.clone()),
             ActionKind::Evacuate { to } | ActionKind::Survey { to } => Some(to.clone()),
             ActionKind::StampGhosts { anchor, .. } => Some(anchor.clone()),
-            ActionKind::Craft { .. } | ActionKind::Research { .. } => None,
+            // `CreatePlatform` joins the two location-free variants for a
+            // third reason: it is force-level, so there is no tile it could
+            // name even in principle. See its own doc.
+            ActionKind::Craft { .. }
+            | ActionKind::Research { .. }
+            | ActionKind::CreatePlatform { .. } => None,
         }
     }
 }
@@ -1533,7 +1594,7 @@ mod tests {
         let mut keys: Vec<&str> = InventorySlot::ALL.iter().map(|s| s.defines_key()).collect();
         keys.sort_unstable();
         keys.dedup();
-        assert_eq!(InventorySlot::ALL.len(), 7);
+        assert_eq!(InventorySlot::ALL.len(), 8);
         assert_eq!(
             keys,
             vec![
@@ -1541,7 +1602,8 @@ mod tests {
                 "crafter_input",
                 "crafter_output",
                 "fuel",
-                "lab_input"
+                "lab_input",
+                "rocket_silo_rocket"
             ]
         );
     }

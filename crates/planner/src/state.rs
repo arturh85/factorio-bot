@@ -2820,7 +2820,12 @@ impl PlanState {
             InventorySlot::FurnaceResult
             | InventorySlot::AssemblerOutput
             | InventorySlot::Fuel
-            | InventorySlot::LabInput => stack,
+            | InventorySlot::LabInput
+            // A rocket's cargo hold takes whole stacks like the rest. It is
+            // never split in practice -- one starter pack is one item -- but
+            // the arm is stated rather than folded into a catch-all for the
+            // reason the `Chest` arm below gives.
+            | InventorySlot::RocketSiloRocket => stack,
             // Returned above; matched rather than `_` so a new variant is a
             // compile error here and not a silently wrong capacity.
             InventorySlot::Chest => return None,

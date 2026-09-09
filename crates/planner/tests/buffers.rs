@@ -117,6 +117,9 @@ fn kinds(net: &ActionNetwork) -> Vec<String> {
             ActionKind::Evacuate { to } => format!("evacuate to {to}"),
             ActionKind::Survey { to } => format!("survey {to}"),
             ActionKind::StampGhosts { anchor, .. } => format!("stamp ghosts at {anchor}"),
+            ActionKind::CreatePlatform { planet, .. } => {
+                format!("create platform in orbit of {planet}")
+            }
         })
         .collect();
     out.sort();

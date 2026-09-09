@@ -230,6 +230,21 @@ pub(crate) fn parse_goal(spec: &str) -> Result<Goal> {
       per_minute: count(n)?,
       window_ticks: count(window)?,
     }),
+    // `orbiting` on its own, or `orbiting:<planet>`. The only shorthand with
+    // a zero-argument form, and the defaults are `method::orbit`'s constants
+    // rather than literals typed here: the first platform does not move, so it
+    // is Nauvis orbit and the shipped starter pack. A pack other than the
+    // shipped one needs `--goal-json`, which is what that flag is for.
+    ["orbiting"] => Ok(Goal::Orbiting {
+      planet: factorio_bot_planner::method::orbit::FIRST_PLANET.to_owned(),
+      starter_pack: factorio_bot_planner::method::orbit::STARTER_PACK.to_owned(),
+      unlocks: None,
+    }),
+    ["orbiting", planet] if !planet.is_empty() => Ok(Goal::Orbiting {
+      planet: (*planet).to_owned(),
+      starter_pack: factorio_bot_planner::method::orbit::STARTER_PACK.to_owned(),
+      unlocks: None,
+    }),
     // `charted:<x>:<y>:<radius>`. The one shorthand whose arguments are
     // coordinates rather than an item name, and it takes all three because
     // there is no sane default for *where*: spawn is only the right centre
@@ -243,7 +258,7 @@ pub(crate) fn parse_goal(spec: &str) -> Result<Goal> {
       "`{spec}` is not a goal. Expected have:<item>:<count>[:<recipe>], \
        produced:<item>:<count>[:<recipe>], producing:<item>:<per-minute>, \
        sustain:<item>:<per-minute>:<window-ticks>, \
-       gathered:<resource-entity>, \
+       gathered:<resource-entity>, orbiting[:<planet>], \
        charted:<x>:<y>:<radius> or researched:<technology> -- or --goal-json \
        for anything else."
     )),

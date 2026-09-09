@@ -1150,6 +1150,14 @@ mod tests {
         ) -> Result<crate::actuator::ActionTicks, crate::ActuatorFailure> {
             Ok(crate::actuator::ActionTicks::UNKNOWN)
         }
+        async fn create_platform(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<crate::actuator::ActionTicks, crate::ActuatorFailure> {
+            Ok(crate::actuator::ActionTicks::UNKNOWN)
+        }
     }
 
     /// The `recover` -> `run_into` seam, walked exactly as `Rescheduled`'s own

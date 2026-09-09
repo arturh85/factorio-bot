@@ -19,6 +19,7 @@ use crate::types::Position;
 use std::sync::Arc;
 
 pub mod exposure;
+pub mod flow;
 pub mod lanes;
 pub mod map;
 pub mod provenance;
@@ -1824,6 +1825,7 @@ pub struct RunRecorder {
     /// -- there is no ingestion step, because nothing produces this file but
     /// this recorder.
     map: File,
+    flow: File,
     started_unix: u64,
     /// The game tick of the first event recorded, so a duration can be a
     /// duration. Absent until something has been recorded.
@@ -1918,12 +1920,14 @@ impl RunRecorder {
         fs::create_dir_all(&dir)?;
         let events = File::create(dir.join("events.jsonl"))?;
         let map = File::create(dir.join("map.jsonl"))?;
+        let flow = File::create(dir.join("flow.jsonl"))?;
         let recorder = Self {
             dir,
             run_id,
             exposure: exposure::Exposure::none_yet(),
             events,
             map,
+            flow,
             start_tick: None,
             high_tick: 0,
             map_count: 0,
@@ -2263,6 +2267,24 @@ impl RunRecorder {
         self.map.write_all(line.as_bytes())?;
         self.map_count += 1;
         self.map.flush()
+    }
+
+    /// Appends one line to `flow.jsonl` and flushes it, for the same
+    /// reason [`Self::record_map`] does: a crashed run must leave a
+    /// readable flow history, not just a readable event log.
+    ///
+    /// Unlike `record_map`, this does no bookkeeping beyond the write --
+    /// there is no equivalent of `placed_bounds` to maintain, because a
+    /// flow keyframe is a full snapshot rather than a delta a later
+    /// reconstruction depends on.
+    pub fn record_flow(
+        &mut self,
+        export: &crate::graph::flow_export::FlowExport,
+    ) -> io::Result<()> {
+        let mut line = serde_json::to_string(export).map_err(io::Error::other)?;
+        line.push('\n');
+        self.flow.write_all(line.as_bytes())?;
+        self.flow.flush()
     }
 
     /// The bounding box of everything placed so far this run, expanded by
@@ -3542,6 +3564,34 @@ mod map_tests {
                 bottom: 20.0 + 16.0,
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod flow_tests {
+    use super::*;
+
+    #[test]
+    fn record_flow_appends_one_line_per_call_and_flushes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut recorder = RunRecorder::start(tmp.path(), "run-test-flow").unwrap();
+        let export = crate::graph::flow_export::FlowExport {
+            tick: 100,
+            nodes: vec![],
+            edges: vec![],
+        };
+        recorder.record_flow(&export).unwrap();
+        let export2 = crate::graph::flow_export::FlowExport {
+            tick: 200,
+            nodes: vec![],
+            edges: vec![],
+        };
+        recorder.record_flow(&export2).unwrap();
+
+        let read = crate::record::flow::read_flow(&recorder.dir().join("flow.jsonl")).unwrap();
+        assert_eq!(read.records.len(), 2);
+        assert_eq!(read.records[0].tick, 100);
+        assert_eq!(read.records[1].tick, 200);
     }
 }
 

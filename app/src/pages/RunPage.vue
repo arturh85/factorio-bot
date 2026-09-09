@@ -13,6 +13,7 @@ import {compareSplits, formatTicks, formatWhen, startedUnixOf, stuckReasons} fro
 import {rateItems} from '@/lib/runRates';
 import {headline} from '@/lib/runHeadline';
 import {machineRows, positionKey} from '@/lib/machineTimeline';
+import {flowAt} from '@/lib/flowJoin';
 import BandFrame from '@/components/run/BandFrame.vue';
 import TickAxis from '@/components/run/TickAxis.vue';
 import ProductionBand from '@/components/run/ProductionBand.vue';
@@ -92,6 +93,8 @@ const highlight = computed(() => {
     const row = machineRows(store.samples).find((r) => r.key === store.selectedMachine);
     return row ? positionKey(row.position) : null;
 });
+/** The flow keyframe nearest the cursor, or null before the run's first one. */
+const flowAtCursor = computed(() => flowAt(store.flow, store.cursor));
 const otherRuns = computed(() => store.runs.filter((r) => r.run_id !== id.value));
 
 /** Every stuck milestone's planner refusal, by split index -- fed to the ribbon's segment titles. */
@@ -191,6 +194,7 @@ const LEGEND = [
                     :video="store.video" :video-ticks="store.videoTicks" :video-error="store.videoError"
                     :entities="store.entities" :bots="store.mapBots" :trail="store.trail" :records="store.map" :bounds="store.mapBounds"
                     :map-error="store.mapError" :fills="store.machineFills" :highlight="highlight"
+                    :flow="flowAtCursor" :flow-error="store.flowError" :samples="store.samples"
                     @seek="store.seek($event)" @pause="store.playing && store.togglePlay()"/>
 
       <div class="border-t border-divider px-5 py-4">

@@ -2,6 +2,7 @@ import {defineStore} from 'pinia';
 import {
     getRun,
     getRunEvents,
+    getRunFlow,
     getRunLanes,
     getRunMap,
     getRunProvenance,
@@ -18,6 +19,7 @@ import {
     Bounds,
     EntitySnapshot,
     Event,
+    FlowExport,
     Lane,
     MapRecord,
     Position,
@@ -145,6 +147,12 @@ export const useRunsStore = defineStore('runs', {
          */
         provenance: null as Provenance | null,
         provenanceError: null as string | null,
+        /** The flow graph's own keyframes for this run -- empty for a run
+         *  recorded before this feature existed, or one that never reached
+         *  a keyframe. See `flowJoin.ts::flowAt` for picking the one nearest
+         *  a cursor tick. */
+        flow: [] as FlowExport[],
+        flowError: null as string | null,
         /**
          * The executor's replay -- planned against observed per step.
          *
@@ -373,6 +381,7 @@ export const useRunsStore = defineStore('runs', {
             this.provenanceError = null;
             this.replayError = null;
             this.savepointsError = null;
+            this.flowError = null;
             try {
                 this.detail = await getRun(id);
 
@@ -385,7 +394,8 @@ export const useRunsStore = defineStore('runs', {
                     eventsResult,
                     provenanceResult,
                     replayResult,
-                    savepointsResult
+                    savepointsResult,
+                    flowResult
                 ] = await Promise.allSettled([
                     getRunLanes(id),
                     getRunSamples(id),
@@ -395,7 +405,8 @@ export const useRunsStore = defineStore('runs', {
                     getRunEvents(id),
                     getRunProvenance(id),
                     getRunReplay(id),
-                    getRunSavepoints(id)
+                    getRunSavepoints(id),
+                    getRunFlow(id)
                 ]);
 
                 if (lanesResult.status === 'fulfilled') {
@@ -466,6 +477,14 @@ export const useRunsStore = defineStore('runs', {
                     );
                 }
 
+                if (flowResult.status === 'fulfilled') {
+                    this.flow = flowResult.value.flow;
+                    this.flowError = null;
+                } else {
+                    this.flow = [];
+                    this.flowError = enrichmentUnavailable('flow', '/flow', flowResult.reason);
+                }
+
                 // Both halves of the recording, or neither: a manifest without
                 // its clock can place nothing, and a clock without its manifest
                 // has no calibration to place it against. Reporting one error
@@ -503,6 +522,7 @@ export const useRunsStore = defineStore('runs', {
                 this.provenance = null;
                 this.replay = null;
                 this.savepoints = [];
+                this.flow = [];
             } finally {
                 this.loading = false;
             }

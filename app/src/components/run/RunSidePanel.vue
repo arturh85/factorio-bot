@@ -1,11 +1,12 @@
 <!-- app/src/components/run/RunSidePanel.vue -->
 <script setup lang="ts">
 import {computed, ref, watchEffect} from 'vue';
-import {Bounds, EntitySnapshot, MapRecord, Position, VideoManifest, VideoTicksResponse} from '@/api/types';
+import {Bounds, EntitySnapshot, FlowExport, MapRecord, Position, Sample, VideoManifest, VideoTicksResponse} from '@/api/types';
 import {parseVideoClock, tickToVideoSeconds, videoSecondsToTick} from '@/api/videoClock';
 import {videoDefects} from '@/api/videoJoin';
 import {BotDot} from '@/lib/mapFeatures';
 import MapPanel from '@/components/MapPanel.vue';
+import FlowPanel from '@/components/run/FlowPanel.vue';
 
 const props = defineProps<{
     runId: string; cursor: number;
@@ -18,12 +19,22 @@ const props = defineProps<{
      * (a test, another page) leaves it out and the map marks nothing.
      */
     highlight?: string | null;
+    /**
+     * The single flow keyframe nearest the cursor -- the parent computes
+     * this from `store.flow` via `flowAt`, the same way `entities`/`records`
+     * are pre-derived one level up rather than handed the raw arrays.
+     */
+    flow: FlowExport | null; flowError: string | null;
+    /** The run's raw world-state samples, joined to `flow` at render time. */
+    samples: Sample[];
 }>();
 const emit = defineEmits<{seek: [tick: number]; pause: []}>();
 
 const hasVideo = computed(() => props.video?.video != null);
-const tab = ref<'map' | 'video'>('map');
-watchEffect(() => { if (!hasVideo.value) tab.value = 'map'; });
+const hasFlow = computed(() => props.flow !== null || props.flowError !== null);
+const tab = ref<'map' | 'video' | 'flow'>('map');
+watchEffect(() => { if (!hasVideo.value && tab.value === 'video') tab.value = 'map'; });
+watchEffect(() => { if (!hasFlow.value && tab.value === 'flow') tab.value = 'map'; });
 
 const videoClock = computed(() => parseVideoClock(props.video, props.videoTicks));
 const videoSrc = computed(() => (hasVideo.value ? `/api/v1/runs/${props.runId}/video/file` : null));
@@ -60,11 +71,14 @@ function onVideoPlay() { emit('pause'); }
               :class="tab === 'map' ? 'bg-card text-ink' : 'text-ink-muted'" @click="tab = 'map'">Map</button>
       <button v-if="hasVideo" role="tab" type="button" :aria-selected="tab === 'video'" class="rounded-t border border-b-0 border-divider px-3 py-1 text-sm"
               :class="tab === 'video' ? 'bg-card text-ink' : 'text-ink-muted'" @click="tab = 'video'">Video</button>
+      <button v-if="hasFlow" role="tab" type="button" :aria-selected="tab === 'flow'" class="rounded-t border border-b-0 border-divider px-3 py-1 text-sm"
+              :class="tab === 'flow' ? 'bg-card text-ink' : 'text-ink-muted'" @click="tab = 'flow'">Flow</button>
     </div>
     <div v-if="tab === 'map'" class="p-3">
       <p v-if="mapError" class="rounded border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-warn-dark">{{ mapError }}</p>
       <MapPanel v-else :entities="entities" :bots="bots" :trail="trail" :records="records" :bounds="bounds" :fills="fills" :highlight="highlight ?? null"/>
     </div>
+    <FlowPanel v-else-if="tab === 'flow'" :flow="flow" :flow-error="flowError" :samples="samples" :cursor="cursor"/>
     <div v-else class="p-3">
       <p v-if="videoError" class="rounded border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-warn-dark">{{ videoError }}</p>
       <p v-for="d in videoIssues" :key="d.kind" class="rounded border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-warn-dark">{{ d.message }}</p>

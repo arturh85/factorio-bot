@@ -16,6 +16,7 @@ use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Path, Query, Request, State};
 use axum::response::Response;
+use factorio_bot_core::graph::flow_export::FlowExport;
 use factorio_bot_core::record::map::{MapRecord, read_map};
 use factorio_bot_core::record::provenance::{Provenance, read_provenance};
 use factorio_bot_core::record::savepoint::{SAVEPOINTS_DIR, Savepoint};
@@ -150,6 +151,15 @@ pub struct RunMapResponse {
     pub map: Vec<MapRecord>,
     /// Lines that did not parse. Reported rather than swallowed, matching
     /// `EventsResponse.skipped`.
+    pub skipped: usize,
+}
+
+/// `GET /api/v1/runs/{id}/flow` response.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RunFlowResponse {
+    pub flow: Vec<FlowExport>,
+    /// Lines that did not parse. Reported rather than swallowed, matching
+    /// `RunMapResponse.skipped`.
     pub skipped: usize,
 }
 
@@ -609,6 +619,52 @@ pub async fn get_run_map(
     }))
 }
 
+/// One archived run's flow-graph keyframes -- one per milestone boundary,
+/// plus its opening one. Each entry is a full snapshot (unlike `map.jsonl`,
+/// nothing here reconstructs from a base plus deltas), so a caller wanting
+/// the graph nearest a cursor tick picks the latest entry at or before it.
+///
+/// A run recorded before this feature existed, or one that never reached a
+/// keyframe, answers an empty list, not a 404 -- matching `get_run_map`: an
+/// absent capability and a present-but-empty one read the same here, and the
+/// page already treats an empty flow list as "nothing to draw yet".
+#[utoipa::path(
+    get,
+    path = "/api/v1/runs/{id}/flow",
+    tag = "Runs",
+    params(("id" = String, Path, description = "the run id"), TickWindow),
+    responses(
+        (status = 200, body = RunFlowResponse),
+        (status = 400, body = crate::error::ErrorResponse),
+        (status = 404, body = crate::error::ErrorResponse),
+    )
+)]
+pub async fn get_run_flow(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(window): Query<TickWindow>,
+) -> Result<Json<RunFlowResponse>, ErrorResponse> {
+    let dir = run_dir(&runs_root(&state).await?, &id)?;
+    let path = dir.join("flow.jsonl");
+    if !path.exists() {
+        return Ok(Json(RunFlowResponse {
+            flow: Vec::new(),
+            skipped: 0,
+        }));
+    }
+    let read = factorio_bot_core::record::flow::read_flow(&path)
+        .map_err(|err| ErrorResponse::internal(format!("failed to read flow: {err}")))?;
+    let flow = read
+        .records
+        .into_iter()
+        .filter(|r| window.contains(r.tick))
+        .collect();
+    Ok(Json(RunFlowResponse {
+        flow,
+        skipped: read.skipped,
+    }))
+}
+
 /// A run's archived video manifest.
 ///
 /// A run recorded before video existed -- or one that never asked for it, which
@@ -701,6 +757,7 @@ pub fn router() -> utoipa_axum::router::OpenApiRouter<AppState> {
         .routes(routes!(get_run_lanes))
         .routes(routes!(get_run_samples))
         .routes(routes!(get_run_map))
+        .routes(routes!(get_run_flow))
         .routes(routes!(get_run_video))
         .routes(routes!(get_run_video_ticks))
         .routes(routes!(get_run_video_file))

@@ -62,12 +62,17 @@ import type {
     ExecuteRequest,
     ExistsResponse,
     FailureKind,
+    FlowExport,
+    FlowExportEdge,
+    FlowExportNode,
+    FlowExportRate,
     GitProvenance,
     InstanceStatus,
     Job,
     JobStatus,
     ModFingerprint,
     RunDetail,
+    RunFlowResponse,
     Lane,
     MapKind,
     MapRecord,
@@ -229,6 +234,14 @@ const OPERATIONS: readonly OperationContract[] = [
         pathParams: ['id'],
         query: [['from', false], ['to', false]],
         response: {status: '200', schema: 'RunMapResponse'}
+    },
+    {
+        path: '/api/v1/runs/{id}/flow',
+        method: 'get',
+        caller: 'getRunFlow',
+        pathParams: ['id'],
+        query: [['from', false], ['to', false]],
+        response: {status: '200', schema: 'RunFlowResponse'}
     },
     {
         path: '/api/v1/runs/{id}/provenance',
@@ -752,6 +765,43 @@ const SCHEMAS: Record<string, SchemaContract> = {
     RunMapResponse: objectContract<RunMapResponse>({
         map: {required: true, arrayOf: 'MapRecord'},
         skipped: {required: true, type: 'integer'}
+    }),
+
+    // -- flow graph (crates/core/src/graph/flow_export.rs) -----------------
+    RunFlowResponse: objectContract<RunFlowResponse>({
+        flow: {required: true, arrayOf: 'FlowExport'},
+        skipped: {required: true, type: 'integer'}
+    }),
+    FlowExport: objectContract<FlowExport>({
+        tick: {required: true, type: 'integer'},
+        nodes: {required: true, arrayOf: 'FlowExportNode'},
+        edges: {required: true, arrayOf: 'FlowExportEdge'}
+    }),
+    FlowExportNode: objectContract<FlowExportNode>({
+        id: {required: true, type: 'integer'},
+        position: {required: true, ref: 'Position'},
+        name: {required: true, type: 'string'},
+        kind: {required: true, type: 'string'},
+        // `Option<String>` with no `skip_serializing_if`: always present on
+        // the wire, sometimes null -- but utoipa still leaves an `Option`
+        // field out of `required`, the same pattern `Provenance.seed` and
+        // `RunSummary.outcome` follow above. `required: false` matches the
+        // snapshot's `required` array, not the field's presence on the wire.
+        recipe: {required: false, type: 'string', nullable: true},
+        miner_ore: {required: false, type: 'string', nullable: true}
+    }),
+    FlowExportEdge: objectContract<FlowExportEdge>({
+        from: {required: true, type: 'integer'},
+        to: {required: true, type: 'integer'},
+        // `Vec<Vec<FlowExportRate>>` -- this checker's `arrayOf` has no
+        // vocabulary for a nested array of a named schema, so this is
+        // declared the same way `RunSavepointsResponse.missing_zip`
+        // (`Vec<u32>`) is: present and shaped as an array, not fully typed.
+        lanes: {required: true, type: 'array'}
+    }),
+    FlowExportRate: objectContract<FlowExportRate>({
+        item: {required: true, type: 'string'},
+        per_second: {required: true, type: 'number'}
     }),
     // `MapKind` flattened into `MapRecord`, the same shape `Sample` takes over
     // `SampleKind`: utoipa cannot fold a `#[serde(flatten)]` back into one

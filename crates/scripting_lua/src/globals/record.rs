@@ -1354,6 +1354,9 @@ end
                                 },
                             })
                             .map_err(record_error)?;
+                        recorder
+                            .record_flow(&world.flow_graph.export(opened_at))
+                            .map_err(record_error)?;
                     }
 
                     // Video is filmed from a client's window, and a headless
@@ -2451,6 +2454,10 @@ end
 -- before it ever reaches `record.finish()` still keeps everything through its
 -- last closed milestone instead of losing the whole sample stream.
 --
+-- Also exports the flow graph's current state to flow.jsonl, for the same
+-- reason: a reader of this run's flow history should never find a gap where
+-- a milestone boundary should be.
+--
 -- Returns `false`, and writes no keyframe, for either of two unremarkable
 -- cases: no recording is running, or one is but nothing has been placed yet
 -- (a keyframe over a box nothing has ever occupied is not a fact worth
@@ -2535,6 +2542,9 @@ end
                                 divergence,
                             },
                         })
+                        .map_err(record_error)?;
+                    recorder
+                        .record_flow(&world.flow_graph.export(tick))
                         .map_err(record_error)?;
                     Ok(true)
                 }
@@ -3049,6 +3059,112 @@ mod tests {
             .into_iter()
             .map(|event| event.tick)
             .collect()
+    }
+
+    // ------------------------------------------------------------------ flow.jsonl
+
+    /// Task 3 wires `world.flow_graph.export(tick)` +
+    /// `recorder.record_flow(...)` into the two places that already write a
+    /// `MapKind::Keyframe` line: the opening keyframe in `record.start()` and
+    /// the `record.keyframe()` binding. **Neither call site can be driven
+    /// through Lua in this test module**: both reach `keyframe_snapshot`,
+    /// which makes a real RCON call (`rcon.find_entities_filtered`), and this
+    /// file's own `create_lua_record_with_slot` doc already states why that
+    /// "cannot succeed in a test, since it always makes a real RCON call ...
+    /// that fails against `FactorioRcon::new_empty()`" -- the only `rcon`
+    /// this test module has. `recording_lua`/`recording_lua_for` exist
+    /// precisely to route around that by seeding a recorder directly instead
+    /// of going through `record.start()`; there is no equivalent route around
+    /// `keyframe_snapshot` itself.
+    ///
+    /// So this test exercises the exact composition both call sites now run
+    /// -- `record_map` for the map-side keyframe, then
+    /// `world.flow_graph.export(tick)` and `recorder.record_flow(...)` for
+    /// the flow-side one, at the same tick -- directly against a `RunRecorder`
+    /// and a `FactorioSurface` holding one placed entity, the same
+    /// "stone-furnace" fixture name `record.actions`'s neighbouring tests
+    /// place. It cannot prove the Lua binding itself reaches this code (that
+    /// would need a live game), but it does prove the two lines Task 3 added
+    /// are wired correctly: a world that can see an entity produces a flow
+    /// line naming it, written to `flow.jsonl` in the run this task's own
+    /// `RunRecorder` opened.
+    #[test]
+    fn a_keyframe_also_writes_a_flow_line_naming_what_it_saw() {
+        use factorio_bot_core::record::map::Bounds;
+        use factorio_bot_core::types::{Direction, EntityName, FactorioEntity};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut recorder = RunRecorder::start(tmp.path(), "run-flow").expect("recorder starts");
+        let run_dir = recorder.dir().to_path_buf();
+
+        // `FlowGraph::update` only walks from a **source root** -- an
+        // offshore pump, or a mining drill standing on ore -- so a
+        // stone-furnace with nothing feeding it never becomes a flow node
+        // (see `FlowGraph::update`'s own doc: "a machine a bot hand-loads
+        // has no incoming edge and reads as zero"). The fixture is therefore
+        // the same ore -> drill -> belt -> inserter -> furnace chain
+        // `flow_graph.rs`'s own `test_furnace` uses, trimmed to the prefix
+        // that gets the furnace reached by the walk.
+        let world = factorio_bot_core::test_utils::fixture_world();
+        world
+            .update_chunk_entities(vec![
+                FactorioEntity::new_resource(
+                    &Position::new(0.5, -1.5),
+                    Direction::South,
+                    &EntityName::IronOre.to_string(),
+                ),
+                FactorioEntity::new_electric_mining_drill(
+                    &Position::new(0.5, -1.5),
+                    Direction::South,
+                ),
+                FactorioEntity::new_transport_belt(&Position::new(0.5, 0.5), Direction::South),
+                FactorioEntity::new_inserter(&Position::new(0.5, 1.5), Direction::North),
+                FactorioEntity::new_stone_furnace(&Position::new(1.0, 3.0), Direction::South),
+            ])
+            .expect("place the drill-to-furnace chain");
+        world.entity_graph.connect().expect("wire the chain");
+
+        let tick = 42;
+        // The map-side keyframe both call sites already write, so the
+        // pairing this task's own doc promises -- "a reader of one never
+        // finds a gap where the other should be" -- is visible here too, not
+        // only asserted in prose.
+        recorder
+            .record_map(MapRecord {
+                tick,
+                kind: MapKind::Keyframe {
+                    bounds: Bounds {
+                        left: 0.0,
+                        top: 0.0,
+                        right: 1.0,
+                        bottom: 1.0,
+                    },
+                    game: vec![],
+                    model: vec![],
+                    divergence: vec![],
+                },
+            })
+            .expect("record_map");
+        // The two lines Task 3 added at both call sites.
+        recorder
+            .record_flow(&world.flow_graph.export(tick))
+            .expect("record_flow");
+
+        let flow = factorio_bot_core::record::flow::read_flow(&run_dir.join("flow.jsonl"))
+            .expect("flow.jsonl readable");
+        assert_eq!(
+            flow.records.len(),
+            1,
+            "one flow line for the one keyframe written"
+        );
+        assert!(
+            flow.records[0]
+                .nodes
+                .iter()
+                .any(|n| n.name == "stone-furnace"),
+            "the flow line must see the entity this test placed: {:?}",
+            flow.records[0].nodes
+        );
     }
 
     // ------------------------------------------------------------- plan_created

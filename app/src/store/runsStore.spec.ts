@@ -3,7 +3,7 @@ import {createPinia, setActivePinia} from 'pinia';
 import {useRunsStore} from './runsStore';
 import * as client from '@/api/client';
 import {ApiError} from '@/api/http';
-import {EntitySnapshot, Event, Lane, MapRecord, RunDetail, RunSummary, Sample, Split} from '@/api/types';
+import {EntitySnapshot, Event, FlowExport, Lane, MapRecord, RunDetail, RunSummary, Sample, Split} from '@/api/types';
 import {CLEAN_MANIFEST, CLEAN_TICKS, NO_TICKS, NO_VIDEO_MANIFEST} from '@/api/video.fixtures';
 
 vi.mock('@/api/client');
@@ -78,6 +78,8 @@ beforeEach(() => {
     vi.mocked(client.getRunReplay).mockRejectedValue(new ApiError(404, 'not_found', null, ''));
     vi.mocked(client.getRunSavepoints).mockReset();
     vi.mocked(client.getRunSavepoints).mockRejectedValue(new ApiError(404, 'not_found', null, ''));
+    vi.mocked(client.getRunFlow).mockReset();
+    vi.mocked(client.getRunFlow).mockRejectedValue(new ApiError(404, 'not_found', null, ''));
 });
 
 describe('loadRuns', () => {
@@ -701,6 +703,25 @@ describe('phase 2 enrichments', () => {
         await store.openRun('run-1');
         expect(store.provenance?.seed).toBe('31337');
         expect(store.replayCounts).toEqual({steps: 3, abandoned: 1, lost: 0, failed: 0, pending: 0, believed: 1});
+    });
+
+    it('a 404 on flow is "not captured", not an error for the run', async () => {
+        vi.mocked(client.getRun).mockResolvedValue(DETAIL);
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.detail).not.toBeNull();
+        expect(store.flow).toEqual([]);
+        expect(store.flowError).toContain('/flow');
+    });
+
+    it('keeps a served flow', async () => {
+        vi.mocked(client.getRun).mockResolvedValue(DETAIL);
+        const FLOW: FlowExport[] = [{tick: 59400, nodes: [], edges: []}];
+        vi.mocked(client.getRunFlow).mockResolvedValue({flow: FLOW, skipped: 0});
+        const store = useRunsStore();
+        await store.openRun('run-1');
+        expect(store.flow).toEqual(FLOW);
+        expect(store.flowError).toBeNull();
     });
 
     it('prefers the manifest lag over the derived one', async () => {

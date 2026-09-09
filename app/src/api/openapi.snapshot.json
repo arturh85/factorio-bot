@@ -2380,6 +2380,126 @@
         ],
         "type": "string"
       },
+      "FlowExport": {
+        "description": "A point-in-time snapshot of the flow graph -- one line of `flow.jsonl`,\nor the body of `/api/v1/runs/{id}/flow`'s array and of the live\n`/api/v1/game/flow`.\n\nBuilt by [`super::flow_graph::FlowGraph::export`]. Deliberately not\n`Default` or otherwise constructible from nothing outside that method:\nan empty-looking `FlowExport` and one honestly built from an empty graph\nmust not be interchangeable by accident.",
+        "properties": {
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/FlowExportEdge"
+            },
+            "type": "array"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/FlowExportNode"
+            },
+            "type": "array"
+          },
+          "tick": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tick",
+          "nodes",
+          "edges"
+        ],
+        "type": "object"
+      },
+      "FlowExportEdge": {
+        "description": "One flow-graph edge: an inserter, belt or pipe link between two nodes.",
+        "properties": {
+          "from": {
+            "description": "A [`FlowExportNode::id`] in this same export.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "lanes": {
+            "description": "One entry for a single-lane connection (a pipe, most belts); two for\na belt whose left and right lane carry different items\n(`FlowEdge::Double` in `flow_graph.rs`). Never empty and never more\nthan two -- a Factorio belt has exactly two lanes.",
+            "items": {
+              "items": {
+                "$ref": "#/components/schemas/FlowExportRate"
+              },
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "to": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "lanes"
+        ],
+        "type": "object"
+      },
+      "FlowExportNode": {
+        "description": "One flow-graph node: a machine, chest, drill or lab the flow graph\ntracks, at the moment [`FlowExport::tick`] names.",
+        "properties": {
+          "id": {
+            "description": "Scoped to this one document -- the index the node held in\n[`super::flow_graph::FlowGraphInner`] when this export was built.\nStable within the document (every edge's `from`/`to` names a node id\nthat appears in this same export's `nodes`), not across two exports:\na rebuild of the underlying `StableGraph` can renumber freely. Join\ntwo exports on `position`, never on `id`.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "description": "The entity type, kebab-case (`EntityType`'s `Display`), e.g.\n`mining-drill`, `assembling-machine`, `transport-belt`.",
+            "type": "string"
+          },
+          "miner_ore": {
+            "description": "The ore a mining drill sits on, when this node is one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "The entity's prototype name, e.g. `stone-furnace`.",
+            "type": "string"
+          },
+          "position": {
+            "$ref": "#/components/schemas/Position"
+          },
+          "recipe": {
+            "description": "What `get_recipe()` last reported for a crafting machine. `None` for\nevery non-crafting node, and for a crafting machine with none set --\nthe two are not distinguished here any more than they are on\n`FactorioEntity.recipe` itself.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "position",
+          "name",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "FlowExportRate": {
+        "description": "One modelled item rate, in items per second -- the same unit\n`FlowGraph::FlowRates` already uses everywhere else in this crate.",
+        "properties": {
+          "item": {
+            "type": "string"
+          },
+          "per_second": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "item",
+          "per_second"
+        ],
+        "type": "object"
+      },
       "FluidFilter": {
         "description": "Which fluid a fluid box will ever accept, as its **prototype** declares it.\n\n# Three answers, and the two that look alike are the point\n\nThis is `LuaFluidBoxPrototype::filter`, which is an *attribute* and not a\nmethod (checked against `runtime-api.json` for 2.1.17, not recalled -- the\nshape that made `volume` need a `pcall` two fields down). It is the\nquestion *\"what will this machine ever take here\"*, asked of the\nprototype. It is **not** `LuaEntity::get_fluid_filter`, the runtime filter\na pump can be set to, and it is not what a box currently contains --\nnothing in this crate models either.\n\nAn `Option<String>` would have two slots for three states and would\nsilently merge the middle one into the last:\n\n- [`FluidFilter::Only`] -- *\"a boiler's output is steam\"*. Definite.\n- [`FluidFilter::Any`] -- *\"a chemical plant's input has no filter, so the\n  recipe decides\"*. **Also definite, and a completely different fact.**\n- [`FluidFilter::Unknown`] -- the sender never said: an archived dump, a\n  mod predating this field, a build whose read raised. Not a fact about\n  the game at all.\n\n`Any` is the common case for the machines this project cares about most:\nevery crafting machine's boxes are unfiltered, because the recipe is what\npicks the fluid. Reading that as \"we could not tell\" would throw away the\none thing that makes the chemistry rung composable.\n\n# Two predicates, neither the negation of the other\n\n[`Self::is_only`] and [`Self::excludes`] are both *positive* claims, and\nboth are false for `Any` and for `Unknown`. That is deliberate: a single\n`accepts(fluid) -> bool` cannot distinguish its own two meanings, which is\nthe defect class this type exists to avoid.",
         "oneOf": [
@@ -3605,6 +3725,27 @@
         "required": [
           "summary",
           "splits"
+        ],
+        "type": "object"
+      },
+      "RunFlowResponse": {
+        "description": "`GET /api/v1/runs/{id}/flow` response.",
+        "properties": {
+          "flow": {
+            "items": {
+              "$ref": "#/components/schemas/FlowExport"
+            },
+            "type": "array"
+          },
+          "skipped": {
+            "description": "Lines that did not parse. Reported rather than swallowed, matching\n`RunMapResponse.skipped`.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "flow",
+          "skipped"
         ],
         "type": "object"
       },
@@ -5139,6 +5280,38 @@
         ]
       }
     },
+    "/api/v1/game/flow": {
+      "get": {
+        "description": "`tick` comes from the instance's own RCON connection, not from the\ncaller: a live query has exactly one tick worth reporting, the game's\ncurrent one.",
+        "operationId": "flow",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowExport"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "The flow graph for the running world's one surface -- the live analogue\nof `GET /api/v1/runs/{id}/flow`'s archived keyframes.",
+        "tags": [
+          "Query"
+        ]
+      }
+    },
     "/api/v1/game/insert-to-inventory": {
       "post": {
         "operationId": "insert_to_inventory",
@@ -5956,6 +6129,87 @@
           }
         },
         "summary": "A run's event log.",
+        "tags": [
+          "Runs"
+        ]
+      }
+    },
+    "/api/v1/runs/{id}/flow": {
+      "get": {
+        "description": "A run recorded before this feature existed, or one that never reached a\nkeyframe, answers an empty list, not a 404 -- matching `get_run_map`: an\nabsent capability and a present-but-empty one read the same here, and the\npage already treats an empty flow list as \"nothing to draw yet\".",
+        "operationId": "get_run_flow",
+        "parameters": [
+          {
+            "description": "the run id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "First tick to include.",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Last tick to include.",
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunFlowResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "One archived run's flow-graph keyframes -- one per milestone boundary,\nplus its opening one. Each entry is a full snapshot (unlike `map.jsonl`,\nnothing here reconstructs from a base plus deltas), so a caller wanting\nthe graph nearest a cursor tick picks the latest entry at or before it.",
         "tags": [
           "Runs"
         ]

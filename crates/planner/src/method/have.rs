@@ -3199,9 +3199,100 @@ fn chop_beats_mining(state: &PlanState, item: &ItemId, need: u32, whose: &Holder
     chopping < hand_mining
 }
 
+/// Swings [`chop_beats_mining`] would charge one bot for this bill, or `None`
+/// when nothing standing can supply it.
+///
+/// The same worst-deal-on-the-map estimate, and pessimistic in the same
+/// direction: it charges the standing source with the highest
+/// ticks-per-item ratio, so the swing count it returns is an upper bound on
+/// what `Chop::expand` will actually need. A caller asking "is this bill too
+/// big for one bot" therefore over-states the bill, which errs towards
+/// yielding — see [`Chop::yields_at`] for why that is the safe direction
+/// there.
+fn chop_swings(state: &PlanState, item: &ItemId, need: u32, whose: &Holder) -> Option<u64> {
+    let (sources, _threatened) = state.minable_sources_by_safety(item);
+    let mut worst: Option<(Ticks, u32)> = None;
+    for (entity, _position, yields) in &sources {
+        let candidate = (mining_ticks(state, entity), *yields);
+        let worse = match worst {
+            None => true,
+            Some(best) => {
+                u64::from(candidate.0) * u64::from(best.1)
+                    > u64::from(best.0) * u64::from(candidate.1)
+            }
+        };
+        if worse {
+            worst = Some(candidate);
+        }
+    }
+    let (_, swing_yield) = worst?;
+    let judged = need.max(state.gathering_ahead(whose, item));
+    Some(u64::from(judged.div_ceil(swing_yield)))
+}
+
 impl Method for Chop {
     fn name(&self) -> &'static str {
         "chop"
+    }
+
+    /// A bill too big for one bot's arms goes to [`Stockpile`], which deals
+    /// the same swinging across the roster and gathers it in a chest.
+    ///
+    /// `Chop` sits ahead of `Stockpile` in `registry_for` on a measured
+    /// argument about *small* bills -- against a goal two swings cover
+    /// outright, a chest placement, a stock per supplier and a take are most
+    /// of the work. That argument has a ceiling and the registry order has no
+    /// way to express one, so this is where the ceiling lives.
+    ///
+    /// # The two halves, and why neither alone works
+    ///
+    /// **Size.** One supplier per bot other than the taker, so the swings a
+    /// share would carry are `swings / suppliers`; yielding is worth it only
+    /// once that division has something to divide. Stated against the roster
+    /// rather than as a constant, so it scales with the bots actually
+    /// present and reduces to "never" on a roster of one.
+    ///
+    /// **Site.** `Stockpile`'s supplier shares are expanded at
+    /// [`GoalSite::converging`] -- its own termination guard -- and they come
+    /// straight back to this method. Yielding them too would send the bill
+    /// past `Stockpile` to `Mine`, and hand-mining is the thing chopping
+    /// exists to beat: measured on `producing:iron-plate:261`, yielding on
+    /// size alone put three bots on 27,480 ticks of hand-mining each where
+    /// the whole bill is 12,960 ticks of swinging, and regressed
+    /// `gathered:crude-oil` from 2,330/354,699 to 2,477/361,589.
+    ///
+    /// The estimate over-states the swings (see [`chop_swings`]), so this
+    /// yields marginally too readily rather than too seldom -- and a yield is
+    /// recoverable (`Stockpile` refuses and `Mine` or a later `Chop` takes
+    /// the goal) where an unyielded bill is not.
+    fn yields_at(&self, site: GoalSite, goal: &Goal, state: &PlanState) -> bool {
+        if site.converging {
+            return false;
+        }
+        // The taker does not supply its own stockpile -- `worth_stockpiling`'s
+        // rule, and the reason this counts the roster minus one.
+        let suppliers = state.bot_ids().len().saturating_sub(1) as u64;
+        if suppliers < 2 {
+            return false;
+        }
+        let Some(Demand {
+            item, need, whose, ..
+        }) = demand(goal, state)
+        else {
+            return false;
+        };
+        // **Only where `Stockpile` can actually take it.** Yielding is a bet
+        // on a later method, and `Stockpile::site` refuses anything not mined
+        // from a patch this world knows -- which is wood, the item this
+        // method exists for. Yielding a wood bill would send it to `Mine`,
+        // which cannot mine wood either, and the goal would go unclaimed:
+        // `Chop` would have turned a serial plan into a refusal. Same
+        // predicate, same reason it is the quiet spelling -- see
+        // `Chop::applicable`.
+        if !state.has_resource_patches(item) {
+            return false;
+        }
+        chop_swings(state, item, need, whose).is_some_and(|swings| swings > suppliers)
     }
 
     fn applicable(&self, goal: &Goal, state: &PlanState) -> bool {
@@ -14222,6 +14313,181 @@ mod tests {
             chop_beats_mining(&state, &"stone".to_string(), 3, &share),
             "a forecast beyond what the rocks hold still lets them supply the fragment"
         );
+    }
+
+    /// A bill one bot can swing at stays `Chop`'s; a bill beyond the roster's
+    /// arms goes to the method that deals it out.
+    ///
+    /// The registry orders `Chop` ahead of `Stockpile` on a measured argument
+    /// about small bills, and that argument has a ceiling. This is the
+    /// ceiling.
+    #[test]
+    fn a_bill_beyond_the_suppliers_arms_is_yielded_to_the_stockpile() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let state = wooded_state(&bots, &[Position::new(5., 5.)]);
+        let small = Goal::Have {
+            item: "stone".into(),
+            count: 3,
+            whose: Holder::Share(BotId(1)),
+            via: None,
+        };
+        let swings = chop_swings(&state, &"stone".to_string(), 3, &Holder::Share(BotId(1)))
+            .expect("control: the fixture stands rocks that yield stone");
+        assert!(
+            swings <= 3,
+            "control: three stone is inside three suppliers' arms, and got {swings} swings"
+        );
+        assert!(
+            !Chop.yields_at(SUBGOAL_SITE, &small, &state),
+            "a bill a supplier's share could not usefully divide stays here"
+        );
+
+        // The boundary, stated because it is a choice and not a rounding
+        // detail: `suppliers` swings deal one swing each, and one swing each
+        // plus a chest placement, a stock per supplier and a take is not
+        // better than one bot swinging three times. So the ceiling is
+        // strictly *above* the supplier count.
+        let level = Goal::Have {
+            item: "stone".into(),
+            count: 60,
+            whose: Holder::Share(BotId(1)),
+            via: None,
+        };
+        assert_eq!(
+            chop_swings(&state, &"stone".to_string(), 60, &Holder::Share(BotId(1))),
+            Some(3),
+            "control: sixty stone is exactly one swing per supplier on this fixture"
+        );
+        assert!(
+            !Chop.yields_at(SUBGOAL_SITE, &level, &state),
+            "a bill of exactly one swing per supplier is not worth a chest"
+        );
+
+        // One swing past the boundary, and -- the part that makes the `find`
+        // assertion below mean anything -- still a bill `Chop` would take:
+        // the fixture's rocks cover it, so `chop_beats_mining` says yes and
+        // only the yield sends it on. Ask for more and `Chop` refuses on
+        // coverage, `Stockpile` gets the goal either way, and the test would
+        // pass with the hook deleted.
+        let need = 80;
+        let big = Goal::Have {
+            item: "stone".into(),
+            count: need,
+            whose: Holder::Share(BotId(1)),
+            via: None,
+        };
+        assert!(
+            Chop.applicable(&big, &state),
+            "control: {need} stone is a bill `Chop` would otherwise claim"
+        );
+        assert!(
+            Chop.yields_at(SUBGOAL_SITE, &big, &state),
+            "a bill of {need} stone is more swinging than one bot should do alone"
+        );
+
+        // Through `find`, which is where the yield has to take effect: the
+        // hook is only worth anything if the registry consults it and the
+        // *next* method actually takes the goal.
+        let registry = registry_for(&bots);
+        // Not `Some("chop")`: on a four-bot fixture with no gathering forecast
+        // `chop_beats_mining` refuses three stone on its own and `Mine` takes
+        // it, which is the behaviour this change must not touch. What matters
+        // is that nothing handed the bill on -- had `Chop` yielded it,
+        // `Stockpile` sits between `Chop` and `Mine` and would have claimed it.
+        assert_ne!(
+            registry
+                .find(&small, &state, SUBGOAL_SITE)
+                .map(Method::name),
+            Some("stockpile"),
+            "control: a bill inside the roster's arms is not dealt out"
+        );
+        assert_eq!(
+            registry.find(&big, &state, SUBGOAL_SITE).map(Method::name),
+            Some("stockpile"),
+            "the yielded bill lands on the method that deals it across the roster"
+        );
+    }
+
+    /// The termination guard, and the one that was measured the hard way.
+    ///
+    /// `Stockpile` deals a yielded bill out as supplier shares expanded at
+    /// `GoalSite::converging`, and those shares arrive back at `Chop`.
+    /// Yielding them too sends the bill past `Stockpile` to `Mine`, and
+    /// hand-mining is precisely what chopping exists to beat: a swing-count
+    /// gate with no site test took `producing:iron-plate:261` to three bots
+    /// hand-mining 27,480 ticks each against 12,960 ticks of swinging for the
+    /// whole bill, and regressed `gathered:crude-oil` by 147 actions.
+    #[test]
+    fn a_stockpiles_own_share_is_never_yielded_back() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let state = wooded_state(&bots, &[Position::new(5., 5.)]);
+        let big = Goal::Have {
+            item: "stone".into(),
+            count: 400,
+            whose: Holder::Share(BotId(1)),
+            via: None,
+        };
+        assert!(
+            Chop.yields_at(SUBGOAL_SITE, &big, &state),
+            "control: this bill is yielded at an ordinary subgoal site"
+        );
+        let converging = GoalSite {
+            converging: true,
+            ..SUBGOAL_SITE
+        };
+        assert!(
+            !Chop.yields_at(converging, &big, &state),
+            "the same bill inside a convergence is a supplier's share and is swung"
+        );
+    }
+
+    /// Wood has no patch, so nothing after `Chop` can take a wood bill --
+    /// yielding one would turn a serial plan into a refusal.
+    #[test]
+    fn a_bill_no_later_method_could_take_is_never_yielded() {
+        let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
+        let state = wooded_state(&bots, &[Position::new(5., 5.)]);
+        assert!(
+            !state.has_resource_patches("wood"),
+            "control: the fixture has no wood patch, which is the whole point"
+        );
+        let goal = Goal::Have {
+            item: "wood".into(),
+            count: 4_000,
+            whose: Holder::Share(BotId(1)),
+            via: None,
+        };
+        assert!(
+            !Chop.yields_at(SUBGOAL_SITE, &goal, &state),
+            "a bill only this method can satisfy is never handed on"
+        );
+    }
+
+    /// With fewer than two suppliers there is nothing to deal the bill to,
+    /// so the ceiling does not exist.
+    #[test]
+    fn a_roster_with_nobody_to_deal_to_never_yields() {
+        let big = Goal::Have {
+            item: "stone".into(),
+            count: 400,
+            whose: Holder::Share(BotId(1)),
+            via: None,
+        };
+        for roster in [
+            vec![BotId(1)],
+            vec![BotId(1), BotId(2)],
+            vec![BotId(1), BotId(2), BotId(3)],
+        ] {
+            let state = wooded_state(&roster, &[Position::new(5., 5.)]);
+            let expected = roster.len() > 2;
+            assert_eq!(
+                Chop.yields_at(SUBGOAL_SITE, &big, &state),
+                expected,
+                "a roster of {} has {} supplier(s) besides the taker",
+                roster.len(),
+                roster.len() - 1
+            );
+        }
     }
 
     /// What `Chop` and `Mine` record is what the forecast is made of: each

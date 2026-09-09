@@ -712,6 +712,28 @@ BotBridge Mod (Factorio mod for RPC)
     and so is a replan recognising its own half-built link: the live replan
     refused the furnace end because the link's first belt at `[27.5,-43.5]`
     stood while its arm did not.
+    **And that fix was green offline and did not hold live**
+    (`run-1788923927-04849`, same four tiles, same 48 abandoned). Read off
+    the record: `[30.5,-46.5]` — the kept exit — was under a `stone-furnace`
+    at `[31,-47]` placed at tick 14,003 by bot 3, plan id 782, a *hand-smelt*
+    furnace from a `have copper-plate` subgoal. The reservation was a local
+    of `sustain`'s expansion, handed to its own coal runs and to nothing
+    else; to every other siting the exit was free grass. Now it is state:
+    `PlanState::reserve_ground` makes the tiles `Occupant::Reserved` for
+    every `is_area_free` in the plan, and `connect` closes them to every
+    route but the one whose own end borders them. **Two lessons, both
+    general.** A promise one method makes about the ground binds every
+    method that sites on it, so it belongs in the state every siting reads,
+    not in a parameter. And **an offline plan against the t=0 dump cannot
+    see the replan path** — "a cell ALREADY MAKES copper-plate" is a sentence
+    only a replan can say, every baseline here is offline, and the t=0 dump
+    has no standing cell for a hand furnace to land beside. A regression
+    for anything replan-shaped must start from a world with the cell
+    standing (`built_world` in the sustain tests, or `--resume-from`).
+    The trigger of that replan is a third defect, unowned: action 643 *take
+    10 copper-plate from the cell* failed with `removed 3` — the plan drew
+    on the cell's chest at the planned tick, before the cell had made ten —
+    and 48 steps were abandoned behind it, the science cell among them.
     It **refuses before placing anything**: every `ConnectRefusal` variant is
     returned before an action is emitted or a single entity lands in the
     plan overlay, because a half-built belt run is worse than none — items

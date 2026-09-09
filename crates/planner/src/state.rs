@@ -1397,6 +1397,10 @@ pub enum Occupant {
     /// researcher building a block near their own bots hits, and it is
     /// cleared by walking, not by moving the block.
     Character { player: PlayerId, on_roster: bool },
+    /// Ground a method of this same plan has spoken for and nothing may be
+    /// built on -- see [`PlanState::reserve_ground`]. `keeper` is the reason
+    /// it is kept, in the reserving method's words.
+    Reserved { keeper: String },
     /// A footprint the game itself already refused a build at, this run,
     /// **with the evidence the game attached to that refusal**.
     ///
@@ -1448,6 +1452,7 @@ impl std::fmt::Display for Occupant {
                 player,
                 on_roster: false,
             } => write!(f, "character {player} is standing on it"),
+            Occupant::Reserved { keeper } => write!(f, "kept free as {keeper}"),
             Occupant::Refused {
                 entity,
                 blockers,
@@ -2015,6 +2020,9 @@ pub struct PlanState {
     /// Sorted by geometry rather than kept in arrival order, so the field
     /// does not depend on the sequence the game happened to refuse things in.
     refused: Vec<RefusedFootprint>,
+    /// Ground a method has spoken for and nothing may stand on: each tile's
+    /// box and the reason it is kept. See [`PlanState::reserve_ground`].
+    reserved_ground: Vec<(Rect, String)>,
     /// What the world last saw in each container and machine, **less whatever
     /// this plan has already taken out of it**, keyed by tile.
     ///
@@ -2558,6 +2566,7 @@ impl PlanState {
             bots_elsewhere,
             characters,
             refused,
+            reserved_ground: Vec::new(),
             buffers,
             fuel,
             input,
@@ -4051,6 +4060,22 @@ impl PlanState {
                 });
             }
         }
+        // Ground this plan has spoken for. A model of a promise, not of an
+        // obstacle: a method that keeps a tile for a run it cannot lay yet
+        // (`method::sustain`'s product exit) stated it here so every OTHER
+        // siting in the expansion -- a hand-smelt furnace, a chest, a cell
+        // -- treats it as taken. Measured in `run-1788923927-04849`: the exit
+        // was kept from every coal run of its own cell and a `have`
+        // furnace was then sited squarely on it, because the reservation
+        // lived in one method's local and the ground looked free to all
+        // the rest.
+        for (kept, keeper) in &self.reserved_ground {
+            if boxes_overlap(kept, area) {
+                return Some(Occupant::Reserved {
+                    keeper: keeper.clone(),
+                });
+            }
+        }
         // Everything the entity tree structurally cannot hold: trees, cliffs,
         // small rocks, units, and `player_collidable` tiles (water). These
         // arrive as bare rectangles — `blocked_tree` keeps only an
@@ -4313,6 +4338,53 @@ impl PlanState {
     /// failure mode this memory would otherwise introduce.
     pub fn refused_footprints(&self) -> &[RefusedFootprint] {
         &self.refused
+    }
+
+    /// Speak for `tiles`: from now on nothing in this plan may stand on them
+    /// -- [`is_area_free`](Self::is_area_free) answers `false` there and
+    /// names the reservation as [`Occupant::Reserved`] -- and a belt route
+    /// keeps off them unless they are its own end's perimeter
+    /// (`method::connect`'s rule, so the run the ground is kept FOR can use
+    /// it). `keeper` is the reason, in the caller's words, and is what the
+    /// refusal says.
+    ///
+    /// # Why this is state and not a parameter
+    ///
+    /// `method::sustain` keeps its plate chest an exit, and until this
+    /// existed the reservation was a local handed to its own coal runs and
+    /// nothing else. A `have copper-plate` subgoal of the same expansion
+    /// then sited a hand-smelt furnace on the exit (`run-1788923927-04849`,
+    /// `stone-furnace` at `[31, -47]` over `[30.5, -46.5]`), and the replan
+    /// found the chest boxed in on all four sides again. A promise one
+    /// method makes about the ground binds every method that sites on it,
+    /// so it lives where every siting already looks.
+    ///
+    /// Tile boxes, one per tile centre, so a 2x2 machine overlapping a
+    /// reserved tile is refused as surely as a 1x1 standing on it. Forked
+    /// with the state, so a trial's reservations stay in the trial.
+    pub fn reserve_ground(&mut self, tiles: &[Position], keeper: &str) {
+        for tile in tiles {
+            let already = self
+                .reserved_ground
+                .iter()
+                .any(|(kept, _)| Pos::from(&kept.center()) == Pos::from(tile));
+            if already {
+                continue;
+            }
+            let half = 0.5 - TOUCH_SLACK;
+            let area = Rect::new(
+                &Position::new(tile.x() - half, tile.y() - half),
+                &Position::new(tile.x() + half, tile.y() + half),
+            );
+            self.reserved_ground.push((area, keeper.to_string()));
+        }
+    }
+
+    /// Every tile [`reserve_ground`](Self::reserve_ground) was given, as the
+    /// boxes [`is_area_free`](Self::is_area_free) refuses on and the words it
+    /// refuses with.
+    pub fn reserved_ground(&self) -> &[(Rect, String)] {
+        &self.reserved_ground
     }
 
     /// Whether the game has already refused this exact placement.

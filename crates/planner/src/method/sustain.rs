@@ -210,6 +210,12 @@ fn enclosure_reach() -> f64 {
     factorio_bot_core::graph::enclosure::SEARCH_RADIUS
 }
 
+///
+/// Ground another cell has merely *reserved* (`PlanState::reserve_ground`,
+/// a plate chest's exit) does not count against the room: the runs route
+/// round it exactly as they route round anything, and refusing a site for
+/// two kept tiles at the rim of a 9x9 pushed this module's own fixture's
+/// chest to a tile with no side at all.
 fn room_to_route(state: &PlanState, at: &Position) -> bool {
     const BELT: &str = "transport-belt";
     for dy in -4i32..=4 {
@@ -218,8 +224,9 @@ fn room_to_route(state: &PlanState, at: &Position) -> bool {
                 continue;
             }
             let tile = Position::new(at.x() + f64::from(dx), at.y() + f64::from(dy));
-            if !state.is_area_free(BELT, &tile) {
-                return false;
+            match state.placement_occupant(BELT, &tile, Direction::North) {
+                None | Some(crate::state::Occupant::Reserved { .. }) => {}
+                Some(_) => return false,
             }
         }
     }
@@ -1034,28 +1041,18 @@ fn nearest_belt_of(steps: &[Step], at: &Position) -> Option<FactorioEntity> {
 /// after cell `k` has been *belted*, which happens in the caller's loop body
 /// and not here.
 ///
-/// `reserved` is the ground earlier cells' product exits hold
-/// ([`Offtake::exit`]). The siting is asked of a **fork with a belt standing
-/// on each of those tiles**, because `plan_cells` reads the state and
-/// nothing else, and a cell packed onto another cell's exit would spend it
-/// as surely as a coal run would. The real `ctx.state` gets the cell's
-/// parts and no placeholder.
+/// Earlier cells' product exits ([`Offtake::exit`]) are reserved in the
+/// state (`PlanState::reserve_ground`), so `plan_cells` sees them as taken
+/// ground without any placeholder: a cell packed onto another cell's exit
+/// would spend it as surely as a coal run would.
 fn site_one_cell(
     ctx: &mut ExpansionCtx,
     spec: &CellSpec,
     from: &Position,
     steps: &mut Vec<Step>,
-    reserved: &[Position],
 ) -> Result<Vec<Cell>, PlannerError> {
-    const BELT: &str = "transport-belt";
-    let mut siting = ctx.state.fork();
-    for tile in reserved {
-        if let Some(placeholder) = sized(&siting, BELT, tile, Direction::North) {
-            siting.create_entity(placeholder);
-        }
-    }
     let fresh = crate::method::produce::plan_cells(
-        &siting,
+        &ctx.state,
         from,
         spec,
         1,
@@ -1364,6 +1361,9 @@ fn belt_cell(
     Ok(())
 }
 
+/// What a reserved exit says it is, in every refusal that names it.
+const EXIT_KEEPER: &str = "a cell's product exit";
+
 /// More than any count of tunnels a cell could lay: the cost of an exit
 /// that is sealed in, so it sorts after every exit that is not.
 const GRID_CELLS: usize =
@@ -1421,6 +1421,7 @@ fn choose_exit(
         let mut kept: Vec<Position> = reserved.to_vec();
         kept.extend(exit.iter().cloned());
         let mut trial = ExpansionCtx::new(ctx.state.fork(), ctx.chain_actor);
+        trial.state.reserve_ground(&exit, EXIT_KEEPER);
         let mut laid = steps.to_vec();
         let trial_offtake = Offtake {
             exit: exit.clone(),
@@ -1564,6 +1565,7 @@ impl Method for Sustain {
             .filter_map(|cell| standing_offtake(&ctx.state, &cell.furnace))
             .flat_map(|offtake| offtake.exit)
             .collect();
+        ctx.state.reserve_ground(&reserved, EXIT_KEEPER);
         // # One cell at a time, and the rest sited AFTER their predecessors'
         // belts exist
         //
@@ -1588,13 +1590,7 @@ impl Method for Sustain {
         // and not about the first.
         let mut to_build = needed.saturating_sub(cells.len() as u32);
         if to_build > 0 {
-            cells.extend(site_one_cell(
-                ctx,
-                &spec,
-                &source.buffer,
-                &mut steps,
-                &reserved,
-            )?);
+            cells.extend(site_one_cell(ctx, &spec, &source.buffer, &mut steps)?);
             to_build -= 1;
         }
 
@@ -1778,12 +1774,17 @@ impl Method for Sustain {
                 }
             };
             let offtake = Offtake { exit, ..offtake };
-            // And its exit joins the ground no coal run may take.
+            // And its exit joins the ground no coal run may take -- and, in
+            // the STATE, the ground nothing else in this plan may site on:
+            // `run-1788923927-04849` kept the exit from every coal run and
+            // then put a hand-smelt furnace on it, because the reservation
+            // was this method's local and the furnace was another method's.
             for tile in &offtake.exit {
                 if !reserved.iter().any(|r| Pos::from(r) == Pos::from(tile)) {
                     reserved.push(tile.clone());
                 }
             }
+            ctx.state.reserve_ground(&offtake.exit, EXIT_KEEPER);
             belt_cell(
                 ctx,
                 &mut steps,
@@ -1800,13 +1801,7 @@ impl Method for Sustain {
             // overlay. See the note above the first cell for why the siting
             // is staggered rather than done in one call.
             if index == cells.len() && to_build > 0 {
-                cells.extend(site_one_cell(
-                    ctx,
-                    &spec,
-                    &source.buffer,
-                    &mut steps,
-                    &reserved,
-                )?);
+                cells.extend(site_one_cell(ctx, &spec, &source.buffer, &mut steps)?);
                 to_build -= 1;
             }
         }
@@ -2515,6 +2510,30 @@ mod tests {
             tunnels, 0,
             "and every coal run of the cell stayed on the surface"
         );
+
+        // And the ground is spoken for in the STATE, not only in this
+        // method's local: a furnace another method sites cannot land on it.
+        // `run-1788923927-04849` did exactly that with a hand-smelt furnace
+        // at `[31, -47]`, and the replan met the chest boxed in again.
+        let mut sited = ExpansionCtx::new(state.fork(), BotId(1));
+        Sustain
+            .expand(&goal(), &mut sited)
+            .expect("the same expansion, run for its state");
+        for tile in &offtake.exit {
+            assert!(
+                !sited.state.is_area_free(FURNACE, tile),
+                "a furnace can still be sited on the exit tile {tile}"
+            );
+            assert!(
+                matches!(
+                    sited
+                        .state
+                        .placement_occupant(BUFFER, tile, Direction::North),
+                    Some(crate::state::Occupant::Reserved { .. })
+                ),
+                "the exit tile {tile} is refused, but not as a reservation"
+            );
+        }
 
         // And the caller that was refused live: a run OUT of the plate chest.
         let plate_chest = built

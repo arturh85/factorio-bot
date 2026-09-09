@@ -904,6 +904,17 @@ pub fn connect_steps_reserving(
             blocked[enclosure::cell_index(cell.0, cell.1)] = true;
         }
     }
+    // AND THE PLAN'S, from `PlanState::reserve_ground` -- with one
+    // exemption: a reserved tile on the perimeter of this run's own `from`
+    // or `to` is this run's to use. The ground is kept FOR the run that
+    // leaves the chest it borders, and that run must find its end there;
+    // to every other route it is a wall like the caller's own.
+    let ground_reserved: Vec<(usize, usize)> = ctx
+        .state
+        .reserved_ground()
+        .iter()
+        .filter_map(|(kept, _)| cell_of(origin, &kept.center()))
+        .collect();
 
     let from_footprint = footprint_of(origin, from).ok_or_else(|| ConnectRefusal::NoRoute {
         blocked: vec![from.position.clone()],
@@ -913,6 +924,20 @@ pub fn connect_steps_reserving(
     })?;
     claim_footprint(&mut blocked, &from_footprint);
     claim_footprint(&mut blocked, &to_footprint);
+    let own_perimeter = |cell: (usize, usize)| {
+        [&from_footprint, &to_footprint]
+            .into_iter()
+            .any(|footprint| {
+                perimeter(footprint).into_iter().any(|((x, y), (dx, dy))| {
+                    in_grid(x, y) == Some(cell) || in_grid(x + dx, y + dy) == Some(cell)
+                })
+            })
+    };
+    for cell in ground_reserved {
+        if !own_perimeter(cell) {
+            blocked[enclosure::cell_index(cell.0, cell.1)] = true;
+        }
+    }
 
     // UNDERGROUNDS: the reach is the prototype's, or `None` -- surface-only
     // -- when the world carries no `underground-belt` prototype at all.

@@ -92,10 +92,24 @@ this file are necessary and not sufficient, and saying so is part of reporting
 them.** The failure mode is not a wrong number; it is eight right numbers and a
 broken run.
 
-**The remedy exists and nothing uses it.** `--resume-from <run>[:<milestone>]`
-starts from a milestone savepoint, and every milestone writes one, so planning
-against a half-built world costs a short start rather than a whole prelude. A
-replan-shaped regression must begin from a standing world.
+**Two things now do see it, offline, in seconds** (2026-09-09, see
+`2026-09-09-a-replan-you-can-run-offline.md`):
+
+- `just replan-check` / `plan --replan 1 [--fail <label> | --done-by <tick>]`
+  plans, applies what was built to the world as map facts, and plans again
+  from a fresh state over it. `--fail "copper-plate from the cell"` is the
+  live shape (a failed take abandons its dependency cone); reverting
+  `a69ae64c` under it reproduces `run-1788923927-04849`'s four tiles byte
+  for byte.
+- `plan --standing-from-run <run> --at-tick <T>` plans against the world a
+  finished run's own `map.jsonl` keyframe and `samples.jsonl` say it had;
+  `--save-standing` writes the snapshot a test can check in.
+
+Both are pinned by `crates/planner/tests/replan_on_standing_world.rs` and
+`replan_haul.rs`. **Run the first beside the baselines for any change that
+reads standing entities.** `--resume-from <run>[:<milestone>]` remains the
+check of record for what no offline plan carries -- chest contents, the
+executor's own behaviour, the mod's refusals.
 
 ## Goals that only exist on a categories world
 

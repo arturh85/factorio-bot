@@ -34,11 +34,12 @@ use crate::context::Context;
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::miette::{IntoDiagnostic, Result, miette};
+use factorio_bot_core::record::standing::StandingSnapshot;
 use factorio_bot_core::serde_json;
 use factorio_bot_core::types::Position;
 use factorio_bot_planner::goal::{Goal, Holder};
 use factorio_bot_planner::method::have::registry_for;
-use factorio_bot_planner::standing::{Standing, survivors_of_failure, world_after};
+use factorio_bot_planner::standing::{Standing, survivors_of_failure, world_after, world_with};
 use factorio_bot_planner::{
   ActionId, BotId, PlanReport, PlanState, PlannerError, StepKind, Ticks, pick_chain_actor,
   plan_best,
@@ -97,6 +98,17 @@ dump, so `plan --world` and `score-map` can be pointed at it directly.
 Inventories, positions, chest contents and research are NOT carried between
 rounds; see `factorio_bot_planner::standing` for why that is a stated limit.
 
+--standing-from-run <run-dir> --at-tick <tick> puts the world a FINISHED RUN's
+own record says it had at that tick onto the dump before planning: every
+non-resource entity in the last `map.jsonl` keyframe at or before the tick,
+each bot where the nearest `samples.jsonl` reading had it with what it held,
+and every machine recipe. That is how run-1788926478-07032's refusal was
+reproduced byte for byte in seconds with no game. --save-standing <path>
+writes that snapshot (a few tens of KB) so a test can check it in --
+`workspace/runs/` is not in the repository, and a number a note quotes must
+be reproducible from master; --standing <path> reads one back. Both compose
+with --replan.
+
 No Factorio, no RCON, no workspace and no settings file are involved.";
 
 impl Subcommand for ThisCommand {
@@ -153,52 +165,74 @@ impl Subcommand for ThisCommand {
           .action(ArgAction::SetTrue)
           .help("also list every scheduled step, per bot, with its start and end tick"),
       )
-      .arg(
-        Arg::new("all")
-          .long("all")
-          .action(ArgAction::SetTrue)
-          .help("plan the goals as ONE bundle (a script's goal.all{...}) rather than in sequence"),
-      )
-      .arg(
-        Arg::new("replan")
-          .long("replan")
-          .value_name("rounds")
-          .value_parser(value_parser!(u32))
-          .help("after planning, apply what was built to the world and plan again, this many times"),
-      )
-      .arg(
-        Arg::new("done-by")
-          .long("done-by")
-          .value_name("tick")
-          .value_parser(value_parser!(u32))
-          .requires("replan")
-          .help("with --replan: only steps a schedule finishes by this tick count as built"),
-      )
-      .arg(
-        Arg::new("fail")
-          .long("fail")
-          .value_name("label")
-          .value_parser(value_parser!(String))
-          .requires("replan")
-          .conflicts_with("done-by")
-          .help(
-            "with --replan: the first action whose label contains this fails, abandoning \
-             everything downstream of it; the rest counts as built",
-          ),
-      )
-      .arg(
-        Arg::new("dump-standing")
-          .long("dump-standing")
-          .value_name("path")
-          .value_parser(value_parser!(PathBuf))
-          .requires("replan")
-          .help("with --replan: write the last standing world as a dump to this path"),
-      )
+      .args(standing_args())
   }
 
   fn build_callback(&self) -> SubcommandCallback {
     |args, context| Box::pin(std::future::ready(run(args, context)))
   }
+}
+
+/// The replan and standing-world arguments, kept beside each other because
+/// they are one feature: where the first plan starts, and what the next one
+/// meets.
+fn standing_args() -> Vec<Arg> {
+  vec![
+    Arg::new("all")
+      .long("all")
+      .action(ArgAction::SetTrue)
+      .help("plan the goals as ONE bundle (a script's goal.all{...}) rather than in sequence"),
+    Arg::new("replan")
+      .long("replan")
+      .value_name("rounds")
+      .value_parser(value_parser!(u32))
+      .help("after planning, apply what was built to the world and plan again, this many times"),
+    Arg::new("done-by")
+      .long("done-by")
+      .value_name("tick")
+      .value_parser(value_parser!(u32))
+      .requires("replan")
+      .help("with --replan: only steps a schedule finishes by this tick count as built"),
+    Arg::new("fail")
+      .long("fail")
+      .value_name("label")
+      .value_parser(value_parser!(String))
+      .requires("replan")
+      .conflicts_with("done-by")
+      .help(
+        "with --replan: the first action whose label contains this fails, abandoning \
+       everything downstream of it; the rest counts as built",
+      ),
+    Arg::new("standing")
+      .long("standing")
+      .value_name("path")
+      .value_parser(value_parser!(PathBuf))
+      .conflicts_with("standing-from-run")
+      .help("a standing snapshot (see --save-standing) to put on the dump before planning"),
+    Arg::new("standing-from-run")
+      .long("standing-from-run")
+      .value_name("run-dir")
+      .value_parser(value_parser!(PathBuf))
+      .requires("at-tick")
+      .help("a run directory whose record says what stood; needs --at-tick"),
+    Arg::new("at-tick")
+      .long("at-tick")
+      .value_name("tick")
+      .value_parser(value_parser!(u64))
+      .requires("standing-from-run")
+      .help("with --standing-from-run: the game tick to take the world at"),
+    Arg::new("save-standing")
+      .long("save-standing")
+      .value_name("path")
+      .value_parser(value_parser!(PathBuf))
+      .help("write the standing snapshot the plan started from, for checking in beside a test"),
+    Arg::new("dump-standing")
+      .long("dump-standing")
+      .value_name("path")
+      .value_parser(value_parser!(PathBuf))
+      .requires("replan")
+      .help("with --replan: write the last standing world as a dump to this path"),
+  ]
 }
 
 /// One goal from the `--goal` shorthand.
@@ -381,9 +415,25 @@ pub(crate) fn load_world(world_path: &std::path::Path) -> Result<Arc<FactorioSur
   Ok(Arc::new(world))
 }
 
+/// Where the first round starts: the dump as it is, or a run's own record
+/// of what stood at a tick, put on the dump first.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Start {
+  #[default]
+  Dump,
+  /// A snapshot already on disk.
+  Snapshot(PathBuf),
+  /// A run directory and the tick to read it at.
+  Run { dir: PathBuf, tick: u64 },
+}
+
 /// How many times to replan, and what counts as built between rounds.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Replan {
+  /// What the first round plans against.
+  pub start: Start,
+  /// Where to write the snapshot the first round started from, if anywhere.
+  pub save_standing: Option<PathBuf>,
   /// Rounds *after* the first plan. Zero is the plain command.
   pub rounds: u32,
   /// Only steps a schedule finishes by this tick are applied to the world
@@ -438,43 +488,10 @@ fn plan_from_dump(
 ) -> Result<(Vec<Round>, Vec<String>)> {
   let world = load_world(world_path)?;
 
-  let mut goals: Vec<Goal> = Vec::new();
-  for spec in specs {
-    goals.push(parse_goal(spec)?);
-  }
-  for json in goal_json {
-    goals.push(serde_json::from_str(json).into_diagnostic()?);
-  }
-  if goals.is_empty() {
-    return Err(miette!(
-      "nothing to plan: pass at least one --goal or --goal-json"
-    ));
-  }
-  // `goal.all { a, b }` is not `a; b`: a bundle holds one conjunct's
-  // "already standing" refusal back while the others expand, and a sequence
-  // ends at it. A replan of a script's bundle has to be planned as the
-  // bundle or the second round refuses on the first conjunct that stands.
-  if bundle {
-    goals = vec![Goal::All(goals)];
-  }
-
-  let bots = if let Some(raw) = roster {
-    parse_roster(raw)?
-  } else {
-    let found = roster_from(&world);
-    if found.is_empty() {
-      return Err(miette!(
-        "the dump has no players, so there is no default roster -- pass \
-         --bots, e.g. --bots 1,2,3,4"
-      ));
-    }
-    found
-  };
-
-  let mut notes = Vec::new();
+  let goals = goals_from(specs, goal_json, bundle)?;
+  let bots = roster_for(roster, &world)?;
+  let (mut world, mut standing, mut notes) = starting_world(world, replan)?;
   let mut rounds = Vec::new();
-  let mut world = world;
-  let mut standing: Option<Standing> = None;
   for round in 0..=replan.rounds {
     let state = PlanState::from_world(world.clone(), &bots);
     // Not an error. A dump can legitimately be planned for a roster it has
@@ -559,47 +576,20 @@ fn plan_from_dump(
     if round == replan.rounds {
       break;
     }
-    // What this round built, as the world the next one meets. `done_by`
-    // reads the SCHEDULE, not the network: a step's end tick is the only
-    // place "finished by tick T" is defined. `fail` reads the network,
-    // because an abandoned subtree is a dependency cone, not a suffix.
-    let done: BTreeSet<ActionId> = if let Some(needle) = &replan.fail {
-      let failed = scheduled
-        .steps
-        .iter()
-        .find_map(|step| match &step.what {
-          StepKind::Act { action, label } if label.contains(needle.as_str()) => Some(*action),
-          _ => None,
-        })
-        .ok_or_else(|| {
-          miette!("--fail: no action in plan {round} has a label containing `{needle}`")
-        })?;
-      notes.push(format!(
-        "plan {round}: `{}` fails, abandoning everything downstream of it",
-        net.action(failed).map(|a| a.label.as_str()).unwrap_or("?")
-      ));
-      survivors_of_failure(&net, failed)
-    } else {
-      scheduled
-        .steps
-        .iter()
-        .filter(|step| replan.done_by.is_none_or(|tick| step.end <= tick))
-        .filter_map(|step| match &step.what {
-          StepKind::Act { action, .. } => Some(*action),
-          StepKind::Walk { .. } => None,
-        })
-        .collect()
-    };
-    let (next, built) = world_after(&state, &net, |id| done.contains(&id))
+    let done = done_after(&net, &scheduled, replan, round, &mut notes)?;
+    let (after, built) = world_after(&state, &net, |id| done.contains(&id))
       .map_err(|err| miette!("could not apply plan {round} to the world: {err}"))?;
     standing = Some(built);
-    world = next;
+    world = after;
   }
 
   if let Some(path) = &replan.dump_standing {
-    world
-      .dump_to(path)
-      .map_err(|err| miette!("could not write the standing world to {}: {err}", path.display()))?;
+    world.dump_to(path).map_err(|err| {
+      miette!(
+        "could not write the standing world to {}: {err}",
+        path.display()
+      )
+    })?;
     notes.push(format!(
       "wrote the standing world after {} round(s) to {}",
       replan.rounds,
@@ -607,6 +597,152 @@ fn plan_from_dump(
     ));
   }
   Ok((rounds, notes))
+}
+
+/// The goals, as one bundle when asked.
+fn goals_from(specs: &[String], goal_json: &[String], bundle: bool) -> Result<Vec<Goal>> {
+  let mut goals: Vec<Goal> = Vec::new();
+  for spec in specs {
+    goals.push(parse_goal(spec)?);
+  }
+  for json in goal_json {
+    goals.push(serde_json::from_str(json).into_diagnostic()?);
+  }
+  if goals.is_empty() {
+    return Err(miette!(
+      "nothing to plan: pass at least one --goal or --goal-json"
+    ));
+  }
+  // `goal.all { a, b }` is not `a; b`: a bundle holds one conjunct's
+  // "already standing" refusal back while the others expand, and a sequence
+  // ends at it. A replan of a script's bundle has to be planned as the
+  // bundle or the second round refuses on the first conjunct that stands.
+  if bundle {
+    goals = vec![Goal::All(goals)];
+  }
+  Ok(goals)
+}
+
+/// `--bots`, or the players the dump has.
+fn roster_for(roster: Option<&str>, world: &FactorioSurface) -> Result<Vec<BotId>> {
+  if let Some(raw) = roster {
+    return parse_roster(raw);
+  }
+  let found = roster_from(world);
+  if found.is_empty() {
+    return Err(miette!(
+      "the dump has no players, so there is no default roster -- pass \
+       --bots, e.g. --bots 1,2,3,4"
+    ));
+  }
+  Ok(found)
+}
+
+/// The world the first round plans against: the dump, or the dump with a
+/// run's record put on it, with what that put down and the lines to say so.
+fn starting_world(
+  world: Arc<FactorioSurface>,
+  replan: &Replan,
+) -> Result<(Arc<FactorioSurface>, Option<Standing>, Vec<String>)> {
+  let mut notes = Vec::new();
+  let snapshot = match &replan.start {
+    Start::Dump => None,
+    Start::Snapshot(path) => Some(
+      StandingSnapshot::read_from(path)
+        .map_err(|err| miette!("could not read the standing snapshot: {err}"))?,
+    ),
+    Start::Run { dir, tick } => {
+      // The dump already carries the ore; a keyframe lists it too.
+      let prototypes = world.globals.entity_prototypes.clone();
+      let built = |name: &str| {
+        prototypes
+          .get(name)
+          .is_none_or(|prototype| prototype.entity_type != "resource")
+      };
+      Some(
+        StandingSnapshot::from_run(dir, *tick, built)
+          .map_err(|err| miette!("could not read {} at tick {tick}: {err}", dir.display()))?,
+      )
+    }
+  };
+  if let Some(snapshot) = &snapshot {
+    let (next, built) = world_with(&world, snapshot);
+    notes.push(format!(
+      "standing world from {} at keyframe tick {} (bots sample {}, {} divergence(s) between \
+       game and model): {}",
+      snapshot.run.as_deref().unwrap_or("an unnamed run"),
+      snapshot.keyframe_tick,
+      snapshot
+        .bots_sample_tick
+        .map_or_else(|| "none".to_string(), |t| t.to_string()),
+      snapshot.divergences,
+      describe_standing(Some(&built))
+    ));
+    if built.placed == 0 {
+      return Err(miette!(
+        "the standing snapshot put nothing on the dump ({}) -- a plan against it would be a \
+         plan against t=0 wearing a run's name",
+        describe_standing(Some(&built))
+      ));
+    }
+    if let Some(path) = &replan.save_standing {
+      snapshot
+        .write_to(path)
+        .map_err(|err| miette!("could not write the snapshot to {}: {err}", path.display()))?;
+      notes.push(format!("wrote the standing snapshot to {}", path.display()));
+    }
+    return Ok((next, Some(built), notes));
+  }
+  if let Some(path) = &replan.save_standing {
+    return Err(miette!(
+      "--save-standing needs a standing world to save: pass --standing-from-run <dir> \
+       --at-tick <tick>; {} was not written",
+      path.display()
+    ));
+  }
+  Ok((world, None, notes))
+}
+
+/// Which of a round's actions count as executed before the next round.
+///
+/// `done_by` reads the SCHEDULE, not the network: a step's end tick is the
+/// only place "finished by tick T" is defined. `fail` reads the network,
+/// because an abandoned subtree is a dependency cone, not a suffix.
+fn done_after(
+  net: &factorio_bot_planner::ActionNetwork,
+  scheduled: &factorio_bot_planner::Schedule,
+  replan: &Replan,
+  round: u32,
+  notes: &mut Vec<String>,
+) -> Result<BTreeSet<ActionId>> {
+  let done: BTreeSet<ActionId> = if let Some(needle) = &replan.fail {
+    let failed = scheduled
+      .steps
+      .iter()
+      .find_map(|step| match &step.what {
+        StepKind::Act { action, label } if label.contains(needle.as_str()) => Some(*action),
+        _ => None,
+      })
+      .ok_or_else(|| {
+        miette!("--fail: no action in plan {round} has a label containing `{needle}`")
+      })?;
+    notes.push(format!(
+      "plan {round}: `{}` fails, abandoning everything downstream of it",
+      net.action(failed).map_or("?", |a| a.label.as_str())
+    ));
+    survivors_of_failure(net, failed)
+  } else {
+    scheduled
+      .steps
+      .iter()
+      .filter(|step| replan.done_by.is_none_or(|tick| step.end <= tick))
+      .filter_map(|step| match &step.what {
+        StepKind::Act { action, .. } => Some(*action),
+        StepKind::Walk { .. } => None,
+      })
+      .collect()
+  };
+  Ok(done)
 }
 
 /// One line saying what a replan met, for the refusal and the round header.
@@ -669,7 +805,21 @@ fn run(args: &ArgMatches, _context: &mut Context) -> Result<()> {
     .unwrap_or_default();
   let roster = args.get_one::<String>("bots").map(String::as_str);
 
+  let start = if let Some(path) = args.get_one::<PathBuf>("standing") {
+    Start::Snapshot(path.clone())
+  } else if let Some(dir) = args.get_one::<PathBuf>("standing-from-run") {
+    Start::Run {
+      dir: dir.clone(),
+      tick: *args
+        .get_one::<u64>("at-tick")
+        .ok_or_else(|| miette!("--standing-from-run needs --at-tick"))?,
+    }
+  } else {
+    Start::Dump
+  };
   let replan = Replan {
+    start,
+    save_standing: args.get_one::<PathBuf>("save-standing").cloned(),
     rounds: args.get_one::<u32>("replan").copied().unwrap_or(0),
     done_by: args.get_one::<u32>("done-by").copied(),
     fail: args.get_one::<String>("fail").cloned(),
@@ -770,14 +920,15 @@ mod tests {
       false,
       &Replan {
         rounds: 1,
-        done_by: None,
-        fail: None,
-        dump_standing: None,
+        ..Replan::default()
       },
     )
     .expect("plans twice");
     assert_eq!(rounds.len(), 2);
-    assert!(rounds[0].standing.is_none(), "the first round meets the dump");
+    assert!(
+      rounds[0].standing.is_none(),
+      "the first round meets the dump"
+    );
     let standing = rounds[1]
       .standing
       .as_ref()
@@ -805,8 +956,7 @@ mod tests {
       &Replan {
         rounds: 1,
         done_by: Some(0),
-        fail: None,
-        dump_standing: None,
+        ..Replan::default()
       },
     )
     .expect("plans twice");
@@ -816,6 +966,84 @@ mod tests {
       rounds[0].report.as_ref().map(|r| r.actions),
       rounds[1].report.as_ref().map(|r| r.actions),
       "with nothing built the replan is the same plan"
+    );
+  }
+
+  /// `--standing-from-run`: the run's keyframe stands on the dump before the
+  /// first plan, `--save-standing` writes it, and `--standing` reads it back
+  /// to the same world.
+  #[test]
+  fn a_runs_record_puts_its_world_on_the_dump_before_the_first_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dumped_world(&dir);
+    let run = dir.path().join("run-test");
+    std::fs::create_dir(&run).unwrap();
+    // One keyframe with a furnace the dump does not have, and one bots
+    // sample moving bot 1 -- the two things a snapshot exists to carry.
+    std::fs::write(
+      run.join("map.jsonl"),
+      concat!(
+        r#"{"tick":900,"kind":"keyframe","bounds":{"left":0,"top":0,"right":1,"bottom":1},"#,
+        r#""game":[],"model":[{"name":"stone-furnace","position":{"x":10.5,"y":10.5},"direction":0}],"#,
+        r#""divergence":[]}"#,
+        "\n"
+      ),
+    )
+    .unwrap();
+    let goal = ["have:iron-plate:5".to_string()];
+    let saved = dir.path().join("standing.json");
+    let (rounds, notes) = super::plan_from_dump(
+      &path,
+      &goal,
+      &[],
+      Some("1"),
+      false,
+      false,
+      &Replan {
+        start: Start::Run {
+          dir: run.clone(),
+          tick: 1_000,
+        },
+        save_standing: Some(saved.clone()),
+        ..Replan::default()
+      },
+    )
+    .expect("plans against the run's world");
+    let standing = rounds[0]
+      .standing
+      .as_ref()
+      .expect("the first round says what the record put down");
+    assert_eq!(standing.placed, 1, "{standing:?}");
+    assert!(
+      notes.iter().any(|n| n.contains("keyframe tick 900")),
+      "{notes:?}"
+    );
+    assert!(saved.exists(), "the snapshot was written for checking in");
+
+    let (again, _) = super::plan_from_dump(
+      &path,
+      &goal,
+      &[],
+      Some("1"),
+      false,
+      false,
+      &Replan {
+        start: Start::Snapshot(saved),
+        ..Replan::default()
+      },
+    )
+    .expect("plans against the saved snapshot");
+    assert_eq!(
+      again[0].standing, rounds[0].standing,
+      "the saved snapshot puts the same world on the dump"
+    );
+
+    let before = StandingSnapshot::from_run(&run, 100, |_| true).unwrap_err();
+    assert!(
+      before
+        .to_string()
+        .contains("no keyframe at or before tick 100"),
+      "{before}"
     );
   }
 
@@ -836,13 +1064,15 @@ mod tests {
       false,
       &Replan {
         rounds: 1,
-        done_by: None,
-        fail: None,
         dump_standing: Some(standing_path.clone()),
+        ..Replan::default()
       },
     )
     .expect("plans twice");
-    assert!(notes.iter().any(|n| n.contains("wrote the standing world")), "{notes:?}");
+    assert!(
+      notes.iter().any(|n| n.contains("wrote the standing world")),
+      "{notes:?}"
+    );
     let standing = load_world(&standing_path).expect("the standing dump reads back");
     let state = PlanState::from_world(standing, &[BotId(1)]);
     assert!(

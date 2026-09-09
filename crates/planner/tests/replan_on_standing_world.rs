@@ -60,7 +60,9 @@
 //! with `factorio-bot lua dump_31337.lua --headless --bots 4 --seed 31337 --new`.
 
 use factorio_bot_core::factorio::world::FactorioSurface;
-use factorio_bot_planner::standing::world_after;
+use factorio_bot_core::types::Position;
+use factorio_bot_planner::method::produce::{cell_spec, standing_cells};
+use factorio_bot_planner::standing::{survivors_of_failure, world_after};
 use factorio_bot_planner::{
     ActionId, ActionNetwork, BotId, Goal, PlanState, PlannerError, Schedule, StepKind,
     pick_chain_actor, plan_best, registry_for,
@@ -205,4 +207,139 @@ fn the_science_cell_plans_again_from_the_world_it_built() {
         scheduled.makespan,
         failures.join("\n  ")
     );
+}
+
+/// The four tiles round a chest, the only places a belt out of it can start.
+fn neighbours(of: &Position) -> [Position; 4] {
+    [
+        Position::new(of.x() + 1., of.y()),
+        Position::new(of.x() - 1., of.y()),
+        Position::new(of.x(), of.y() + 1.),
+        Position::new(of.x(), of.y() - 1.),
+    ]
+}
+
+/// The plate chests of every standing copper cell: an `iron-chest` beside
+/// the furnace that a `burner-inserter` carries the furnace's output into.
+/// The cell's COAL chests are not here -- those legitimately spend every
+/// side they have (see the `connect` entry in `CLAUDE.md`).
+fn plate_chests(state: &PlanState) -> Vec<Position> {
+    let spec = cell_spec(state, "copper-plate").expect("a stone furnace smelts copper");
+    let mut chests = Vec::new();
+    for cell in standing_cells(state, &spec) {
+        for chest in state.entities_within(&cell.furnace, 3.5) {
+            if chest.name != "iron-chest" {
+                continue;
+            }
+            let carried = state
+                .entities_within(&chest.position, 1.5)
+                .into_iter()
+                .filter(|arm| arm.name == "burner-inserter")
+                .any(|arm| {
+                    state.delivers_into(&cell.furnace, &arm.position)
+                        && state.delivers_into(&arm.position, &chest.position)
+                });
+            if carried {
+                chests.push(chest.position.clone());
+            }
+        }
+    }
+    chests
+}
+
+/// **The live shape, and the one that falsifies `a69ae64c`.** The first
+/// take of copper plates out of the cell fails and everything downstream of
+/// it is abandoned -- `survivors_of_failure`, the executor's own rule -- so
+/// the cell and every coal run stand finished while the science tail does
+/// not, exactly as `run-1788923927-04849` left the world at tick 48,017.
+///
+/// Two assertions, in order of what they are evidence of:
+///
+/// 1. **The plate chest keeps a way out.** With the reservation a local of
+///    `sustain`'s expansion (before `a69ae64c`) the hand-smelt furnace of a
+///    `have copper-plate` subgoal landed on the kept exit, and all four of
+///    the chest's sides were spent. Measured on this test's own world with
+///    that commit reverted by copy+touch: the replan refused on the run's
+///    four tiles byte for byte, `[28.5,-46.5] [29.5,-48.5] [29.5,-45.5]
+///    [30.5,-46.5]`. This is the invariant that commit states, asked of the
+///    standing world directly.
+/// 2. **Whatever the replan says, it does not blame that chest's exit.**
+///    The replan is NOT asserted to plan: on `71f9227c` it refuses further
+///    along, on two items already on record as open -- the half-built
+///    supply link's first belt on the furnace end, and the science cell's
+///    supply chest boxed in on the other (`docs/superpowers/notes/
+///    2026-09-09-a-replan-you-can-run-offline.md`). Reproduce with
+///    `just replan-check --fail "copper-plate from the cell"`. When that
+///    refusal is fixed, tighten this to `expect`.
+#[test]
+fn a_failed_take_leaves_the_plate_chest_a_way_out() {
+    let Some(world) = dump() else {
+        return;
+    };
+    let goal = continuous_supply();
+    let first = PlanState::from_world(world, &BOTS);
+    let (net, scheduled) = plan(&first, &goal).expect("the science cell plans from t=0");
+    let failed = scheduled
+        .steps
+        .iter()
+        .find_map(|step| match &step.what {
+            StepKind::Act { action, label } if label.contains("copper-plate from the cell") => {
+                Some(*action)
+            }
+            _ => None,
+        })
+        .expect(
+            "the plan takes copper plates out of the cell -- if it no longer does, the \
+                 live shape this test reproduces has changed and the label needs updating",
+        );
+    let done = survivors_of_failure(&net, failed);
+    let (standing_world, standing) =
+        world_after(&first, &net, |id| done.contains(&id)).expect("a topological order");
+    assert!(standing.placed >= 10, "{standing:?}");
+
+    let second = PlanState::from_world(standing_world, &BOTS);
+    let chests = plate_chests(&second);
+    assert!(
+        !chests.is_empty(),
+        "a copper cell stands with a chest its arm fills, or this test measures nothing"
+    );
+    for chest in &chests {
+        let open = neighbours(chest)
+            .iter()
+            .filter(|tile| second.is_area_free("transport-belt", tile))
+            .count();
+        assert!(
+            open > 0,
+            "the plate chest at {chest} has all four sides spent by the plan that built it, so \
+             no belt can ever leave it -- the exit `sustain` reserves has to be state every \
+             siting reads (`a69ae64c`), and it is not"
+        );
+    }
+
+    match plan(&second, &goal) {
+        Ok((net, scheduled)) => eprintln!(
+            "after a failed take, {standing:?}: replanned {} actions, makespan {}",
+            net.len(),
+            scheduled.makespan
+        ),
+        Err(err) => {
+            let text = err.to_string();
+            eprintln!(
+                "after a failed take the replan refuses further along, as recorded open: {text}"
+            );
+            // Before `a69ae64c` the refusal listed the plate chest's own four
+            // neighbours as the blockers. A refusal naming some OTHER chest's
+            // four sides (the science cell's supply chest, on record as open)
+            // is not that, so the check is on which tiles are named.
+            for chest in &chests {
+                let names_every_side = neighbours(chest)
+                    .iter()
+                    .all(|tile| text.contains(&tile.to_string()));
+                assert!(
+                    !names_every_side,
+                    "the replan blames the plate chest at {chest}'s own four sides again: {text}"
+                );
+            }
+        }
+    }
 }

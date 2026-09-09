@@ -52,6 +52,8 @@ mod ore_underfoot;
 mod placement_occupancy;
 #[path = "replan_haul.rs"]
 mod replan_haul;
+#[path = "replan_on_standing_world.rs"]
+mod replan_on_standing_world;
 #[path = "planning_work_ceilings.rs"]
 mod planning_work_ceilings;
 #[path = "product_index_live_capture.rs"]

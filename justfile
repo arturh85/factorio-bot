@@ -115,8 +115,12 @@ headless SCRIPT *ARGS:
 # while the other expands; two sequential --goals would refuse on the replan
 # for a reason the run never sees. `--done-by <tick>` cuts the first plan the
 # way a truncated batch would (the live replans followed a failed take, not a
-# finished plan); without it the whole plan is applied. The same check runs
-# as `crates/planner/tests/replan_on_standing_world.rs` at four cuts.
+# finished plan); without it the whole plan is applied. `--fail <label>` is
+# the live shape -- that action fails and its dependency cone is abandoned --
+# and the one that reproduces run-1788923927-04849's refusal with a69ae64c
+# reverted. `--standing-from-run <run> --at-tick <T>` instead starts from
+# what a finished run's record says stood. The same checks run as
+# `crates/planner/tests/replan_on_standing_world.rs` and `replan_haul.rs`.
 replan-check *ARGS:
     cargo run --no-default-features --features cli,lua -- plan --world workspace/scripts/map.json --bots 1,2,3,4 --all --replan 1 --goal sustain:copper-plate:15:36000 --goal producing:automation-science-pack:6 {{ARGS}}
 

@@ -384,6 +384,16 @@ destroys it unless you copy it aside first. That has already happened once.
   savepoint restores *saved* inventories and positions, not the live ones at the
   moment of failure. Two separate bugs needed the dump perturbed -- one with bot
   positions, one with inventories -- before they appeared at all.
+  **Two ways to make it otherwise without a game (2026-09-09)**: `plan
+  --replan 1 --fail <label>` applies the plan's own placements as map facts
+  and plans again (`just replan-check`), and `plan --standing-from-run <run>
+  --at-tick <T>` puts a finished run's keyframe, bot positions and machine
+  recipes on the dump. Both go through `factorio_bot_planner::standing`, and
+  both were shown red on the defect they exist for before they were trusted.
+  A tick cut is the wrong knife -- an abandoned batch is a dependency cone,
+  not a suffix -- and a snapshot without recipes is a world where every
+  assembler stands empty. See
+  `docs/superpowers/notes/2026-09-09-a-replan-you-can-run-offline.md`.
 - **A fresh map has charted almost nothing.** Distances read off an early dump
   measure what has been *seen*, not what exists.
 

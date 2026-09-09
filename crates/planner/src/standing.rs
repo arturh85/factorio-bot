@@ -58,15 +58,95 @@
 //! a tick the way a truncated batch would.
 
 use crate::action::ActionKind;
-use crate::ids::ActionId;
+use crate::ids::{ActionId, BotId};
 use crate::network::ActionNetwork;
 use crate::state::PlanState;
 use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::miette::Result;
 use factorio_bot_core::num_traits::FromPrimitive;
-use factorio_bot_core::types::Direction;
+use factorio_bot_core::record::standing::StandingSnapshot;
+use factorio_bot_core::types::{Direction, FactorioEntity};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+
+/// The world a run's own record says it had, on top of `base`.
+///
+/// The other half of [`world_after`]: that one applies a plan the planner
+/// made, this one applies what a finished run's `map.jsonl` keyframe and
+/// `samples.jsonl` recorded -- see
+/// [`factorio_bot_core::record::standing`] for what a snapshot carries and
+/// what it cannot. Both return a new surface with the entities as map facts,
+/// so `PlanState::from_world` over either is the state the supervisor's next
+/// round would build.
+///
+/// Bots named in the snapshot are moved and given the snapshot's inventory;
+/// a bot the dump does not know is skipped and counted in
+/// [`Standing::unapplied`], because inventing a player is the fabricated
+/// roster this repo already warns about. Each entity's collision box is
+/// filled from the prototype, as [`world_after`] fills it: `EntityGraph::add`
+/// **drops** an entity whose box is zero, silently, so a snapshot applied
+/// without this step would be a world with nothing in it that reads as
+/// clean ground.
+pub fn world_with(
+    base: &Arc<FactorioSurface>,
+    snapshot: &StandingSnapshot,
+) -> (Arc<FactorioSurface>, Standing) {
+    let mut surface: FactorioSurface = (**base).clone();
+    let mut standing = Standing::default();
+    {
+        let globals = Arc::get_mut(&mut surface.globals)
+            .expect("a freshly cloned surface holds its globals alone");
+        for bot in &snapshot.bots {
+            match globals.players.get_mut(&bot.id) {
+                Some(mut player) => {
+                    player.position = bot.position.clone();
+                    player.main_inventory = bot.inventory.clone();
+                }
+                None => standing.unapplied += 1,
+            }
+        }
+    }
+    let world = Arc::new(surface);
+    // A probe over the clone, only for the prototype's collision box.
+    let bots: Vec<BotId> = snapshot.bots.iter().map(|b| BotId(b.id)).collect();
+    let probe = PlanState::from_world(world.clone(), &bots);
+    for entity in &snapshot.entities {
+        let entity_type = world
+            .globals
+            .entity_prototypes
+            .get(&entity.name)
+            .map(|p| p.entity_type.clone())
+            .unwrap_or_default();
+        let bounding_box = Direction::from_u8(entity.direction)
+            .and_then(|facing| probe.collision_area_facing(&entity.name, &entity.position, facing))
+            .unwrap_or_default();
+        let standing_entity = FactorioEntity {
+            name: entity.name.clone(),
+            entity_type,
+            position: entity.position.clone(),
+            direction: entity.direction,
+            bounding_box,
+            ..Default::default()
+        };
+        if standing_entity.bounding_box.width() == 0. {
+            // `EntityGraph::add` would drop it without a word.
+            standing.unapplied += 1;
+            continue;
+        }
+        if world.on_some_entity_created(standing_entity).is_ok() {
+            standing.placed += 1;
+        }
+    }
+    for recipe in &snapshot.recipes {
+        if world
+            .entity_graph
+            .set_recipe(&recipe.position, &recipe.recipe)
+        {
+            standing.recipes_set += 1;
+        }
+    }
+    (world, standing)
+}
 
 /// What a batch leaves done when `failed` fails: everything except it and
 /// every action downstream of it.
@@ -121,10 +201,11 @@ pub struct Standing {
     pub chopped: usize,
     /// Resource tiles debited.
     pub mined: usize,
-    /// Actions the predicate said were done but this module does not apply
-    /// (crafts, inserts, walks, research...). Reported, not hidden: a reader
-    /// deciding whether the standing world is faithful enough needs the
-    /// number.
+    /// What was asked for and not applied: actions this module does not
+    /// model (crafts, inserts, walks, research...), a snapshot entity with
+    /// no prototype to size it, a snapshot bot the dump has no player for.
+    /// Reported, not hidden: a reader deciding whether the standing world is
+    /// faithful enough needs the number.
     pub unapplied: usize,
 }
 
@@ -250,7 +331,9 @@ mod tests {
         assert_eq!(standing.placed, 1);
 
         let fresh = PlanState::from_world(world, &[BotId(1)]);
-        let found = fresh.entity_at(&at).expect("the furnace stands on the new surface");
+        let found = fresh
+            .entity_at(&at)
+            .expect("the furnace stands on the new surface");
         assert_eq!(found.name, "stone-furnace");
         assert!(
             found.bounding_box.width() > 0.,
@@ -364,6 +447,75 @@ mod tests {
         assert_eq!(standing.placed, 2);
         let fresh = PlanState::from_world(world, &[BotId(1)]);
         assert!(fresh.entity_at(&Position::new(14.5, 10.5)).is_none());
+    }
+
+    /// A snapshot's entity is a map fact on the new surface, and its bot is
+    /// where the snapshot says.
+    #[test]
+    fn a_snapshot_stands_on_the_new_surface_with_its_bots_moved() {
+        use factorio_bot_core::record::standing::{BotAt, RecipeAt, StandingEntity};
+        use factorio_bot_core::types::FactorioPlayer;
+        let mut base = fixture_world();
+        Arc::get_mut(&mut base.globals).unwrap().players.insert(
+            1,
+            FactorioPlayer {
+                player_id: 1,
+                ..FactorioPlayer::default()
+            },
+        );
+        let base = Arc::new(base);
+        let at = Position::new(10.5, 10.5);
+        let snapshot = StandingSnapshot {
+            entities: vec![
+                StandingEntity {
+                    name: "stone-furnace".to_string(),
+                    position: at.clone(),
+                    direction: 0,
+                },
+                StandingEntity {
+                    name: "no-such-prototype".to_string(),
+                    position: Position::new(12.5, 12.5),
+                    direction: 0,
+                },
+            ],
+            bots: vec![
+                BotAt {
+                    id: 1,
+                    position: Position::new(40.5, 40.5),
+                    inventory: [("coal".to_string(), 9)].into_iter().collect(),
+                },
+                BotAt {
+                    id: 200,
+                    position: Position::new(0.5, 0.5),
+                    inventory: BTreeMap::new(),
+                },
+            ],
+            recipes: vec![RecipeAt {
+                position: at.clone(),
+                recipe: "iron-plate".to_string(),
+            }],
+            ..StandingSnapshot::default()
+        };
+        let (world, standing) = world_with(&base, &snapshot);
+        assert_eq!(standing.placed, 1, "{standing:?}");
+        assert_eq!(standing.recipes_set, 1, "{standing:?}");
+        assert_eq!(
+            standing.unapplied, 2,
+            "the unknown prototype and the unknown bot are counted: {standing:?}"
+        );
+        let fresh = PlanState::from_world(world, &[BotId(1)]);
+        let found = fresh.entity_at(&at).expect("the furnace stands");
+        assert!(found.bounding_box.width() > 0.);
+        assert_eq!(found.recipe.as_deref(), Some("iron-plate"));
+        let bot = fresh.bot(BotId(1)).expect("bot 1 is in the dump");
+        assert_eq!(bot.position, Position::new(40.5, 40.5));
+        assert_eq!(fresh.inventory_count(BotId(1), "coal"), 9);
+        assert!(
+            PlanState::from_world(base, &[BotId(1)])
+                .entity_at(&at)
+                .is_none(),
+            "the base world is untouched"
+        );
     }
 
     /// Actions this module does not model are counted, not silently dropped.

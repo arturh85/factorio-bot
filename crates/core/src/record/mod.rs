@@ -27,6 +27,7 @@ pub mod run_mode;
 pub mod samples;
 pub mod savepoint;
 pub mod splits;
+pub mod standing;
 pub mod video;
 pub use lanes::{Lane, derive_lanes};
 pub use provenance::{

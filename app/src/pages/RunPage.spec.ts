@@ -64,7 +64,11 @@ vi.mock('@/api/client', () => ({
         resumed_from: null, bot_mode: null, game_speed: null, peaceful: null
     }),
     getRunReplay: async () => ({planned_makespan: 0, refused: null, unmatched_walks: [], steps: []}),
-    getRunSavepoints: async () => ({savepoints: [], skipped: 0, missing_zip: []})
+    getRunSavepoints: async () => ({savepoints: [], skipped: 0, missing_zip: []}),
+    // Nothing here asserts on the Flow tab; resolved the same way the other
+    // untested enrichments above are, so `Promise.allSettled` has something
+    // to await from every one of them.
+    getRunFlow: async () => ({flow: [], skipped: 0})
 }));
 
 async function mountPage() {

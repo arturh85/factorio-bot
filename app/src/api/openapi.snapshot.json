@@ -5280,6 +5280,38 @@
         ]
       }
     },
+    "/api/v1/game/flow": {
+      "get": {
+        "description": "`tick` comes from the instance's own RCON connection, not from the\ncaller: a live query has exactly one tick worth reporting, the game's\ncurrent one.",
+        "operationId": "flow",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowExport"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "summary": "The flow graph for the running world's one surface -- the live analogue\nof `GET /api/v1/runs/{id}/flow`'s archived keyframes.",
+        "tags": [
+          "Query"
+        ]
+      }
+    },
     "/api/v1/game/insert-to-inventory": {
       "post": {
         "operationId": "insert_to_inventory",

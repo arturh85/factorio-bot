@@ -4,6 +4,7 @@ use crate::game::{require_player, require_surface};
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::State;
+use factorio_bot_core::graph::flow_export::FlowExport;
 use factorio_bot_core::num_traits::FromPrimitive;
 use factorio_bot_core::types::{
     AreaFilter, Direction, FactorioEntity, FactorioEntityPrototype, FactorioItemPrototype,
@@ -344,4 +345,29 @@ pub async fn entity_prototypes(
         data.insert(prototype.name.clone(), prototype.clone());
     }
     Ok(Json(data))
+}
+
+/// The flow graph for the running world's one surface -- the live analogue
+/// of `GET /api/v1/runs/{id}/flow`'s archived keyframes.
+///
+/// `tick` comes from the instance's own RCON connection, not from the
+/// caller: a live query has exactly one tick worth reporting, the game's
+/// current one.
+#[utoipa::path(
+    get,
+    path = "/api/v1/game/flow",
+    tag = "Query",
+    responses(
+        (status = 200, body = FlowExport),
+        (status = 503, body = crate::error::ErrorResponse),
+    )
+)]
+pub async fn flow(State(state): State<AppState>) -> ApiResult<FlowExport> {
+    let instance = state.instance.read().await;
+    let instance = instance
+        .as_ref()
+        .ok_or_else(|| ErrorResponse::not_running("not started"))?;
+    let world = require_surface(instance)?;
+    let tick = instance.rcon.last_tick().unwrap_or(0);
+    Ok(Json(world.flow_graph.export(tick)))
 }

@@ -69,6 +69,13 @@ async fn read_routes_report_not_started_without_instance() {
 }
 
 #[tokio::test]
+async fn flow_answers_503_with_no_instance_running() {
+    let (status, body) = get("/api/v1/game/flow").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body.contains("not started"), "got: {body}");
+}
+
+#[tokio::test]
 async fn inventory_contents_at_rejects_query_without_separator() {
     let (status, body) = get("/api/v1/game/inventory-contents-at?query=nonsense").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

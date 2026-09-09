@@ -20,9 +20,7 @@ use utoipa_axum::routes;
 /// the day one holds two this stops answering instead of silently picking
 /// Nauvis for a caller that never said so. The handlers, and the routes'
 /// shapes, are what would then need the surface named.
-pub fn require_surface(
-    instance: &FactorioInstance,
-) -> Result<Arc<FactorioSurface>, ErrorResponse> {
+pub fn require_surface(instance: &FactorioInstance) -> Result<Arc<FactorioSurface>, ErrorResponse> {
     instance
         .world
         .as_ref()
@@ -57,6 +55,7 @@ pub fn router() -> OpenApiRouter<AppState> {
         .routes(routes!(query::all_players))
         .routes(routes!(query::item_prototypes))
         .routes(routes!(query::entity_prototypes))
+        .routes(routes!(query::flow))
         .routes(routes!(query::plan_path))
         .routes(routes!(control::move_player))
         .routes(routes!(control::place_entity))

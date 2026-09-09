@@ -114,7 +114,21 @@ fn the_three_map_json_baselines_stay_within_their_work_ceilings() {
     // never executed. `absent()` says "This is not a pass" and that is exactly
     // right; nobody read it. The 571 is the canonical BASELINES.md figure and
     // was measured on both sides of the `yields_at` change, so it is the cell
-    // work that moved it, not the method-ordering fix. Re-measured below.
+    // work that moved it, not the method-ordering fix.
+    //
+    // Re-measured on 76540e32, same four bots and dump, with green at 571:
+    //
+    //   goal                                actions  goals  patches  threats  preds   forks
+    //   producing:logistic-science-pack:6       571  1,668        0   61,193  2,550  48,984
+    //
+    // **The ceilings are deliberately NOT re-derived from these.** Twice the
+    // new forks figure would be 97,968 against the 60,756 standing here, so
+    // "2x the latest measurement" would SLACKEN a guard that still passes --
+    // the opposite of what a ceiling is for. They stay where they are. What is
+    // worth saying out loud is the headroom: forks now sits at 81% of its
+    // ceiling and threats at 66%, so the next legitimate growth in green trips
+    // this test. That is the tripwire working, and whoever it stops should
+    // re-measure and decide, not raise the number to make it quiet.
     //
     // Ceilings are twice each of those, except `resource_patches`, whose
     // ceiling is 16 rather than 8: the memo means the count is now the number

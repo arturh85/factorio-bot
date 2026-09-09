@@ -43,8 +43,39 @@ and record what that binary was built from.
 |---|---|---|---|
 | `researched:automation` | `map.json` | 176 / 21,784 | stable across the night |
 | `producing:automation-science-pack:6` | `map.json` | 316 / 22,457 | stable across the night |
-| `producing:logistic-science-pack:6` | `map.json` | 571 / 54,371 | stable since the cell work |
+| `producing:logistic-science-pack:6` | `map.json` | 559 / 52,298 | `112e0fdf` |
+| `producing:iron-plate:261` | `map.json` | 194 / 33,645 | `71f9227c` |
+| `producing:transport-belt:6` | `map.json` | 319 / 119,396 | `71f9227c` |
+| `sustain:iron-plate:30:36000` | `map.json` | 1,234 / 64,564 | `112e0fdf` |
+| `sustain:copper-plate:15:36000` | `map.json` | 479 / 20,904 | `112e0fdf` |
 | `gathered:crude-oil` | **`map-31337-explored.json`** | **2,330 / 354,699** | `c0e51463` |
+
+### The sustain baselines drifted for hours because they lived only in prose
+
+**Never in this table until `112e0fdf`.** They were quoted from session to
+session in `/loop` prompts across an entire night — `1,111 / 62,064` and
+`470 / 28,126` — and nobody re-derived them from the binary in between. By the
+time an agent building an unrelated fix (`sealed-supply-chest`) checked, they
+read **1,234 / 64,564** and **479 / 20,904**: moved by commits between
+`a69ae64c` and `c713da57`, none of which touched sustain's own logic — the
+cell-siting and belt-banding work upstream of it moved what a sustain plan
+costs. The agent's own change did not move them further; it only *found* that
+they had already moved.
+
+This is "a number in prose is a cache" at the scale of a whole night: every
+`/loop` prompt copied the figure forward as fact, and the figure was stale for
+an unknown number of iterations before anyone checked. **The rule the rest of
+this file states now has a concrete cost attached**: re-derive from the binary
+at the point of use, and put a re-measured number in this table — not just in
+a prompt — the moment it is checked, so the next reader has somewhere to find
+it besides another prompt.
+
+Also legitimately moved and disclosed as a finding, not silently re-pinned:
+`producing:logistic-science-pack:6` **571 → 559** at the same commit. A sixth
+science cell used to be sited where its supply chest could never be belted at
+all; `supply_chest_is_reachable` now refuses that site, so the plan sites five
+cells honestly rather than a sixth it could never have delivered from. Shorter
+by correctness, not by chance.
 
 ### `gathered:crude-oil` is the one that keeps going wrong, twice over
 

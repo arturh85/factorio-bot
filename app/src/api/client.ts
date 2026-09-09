@@ -25,6 +25,7 @@ import {
     Job,
     Provenance,
     RunDetail,
+    RunFlowResponse,
     RunLanesResponse,
     RunMapResponse,
     RunSamplesResponse,
@@ -181,6 +182,16 @@ export function getRunSamples(
  */
 export function getRunMap(id: string, opts?: {from?: number; to?: number}): Promise<RunMapResponse> {
     return request<RunMapResponse>(`/api/v1/runs/${encodeURIComponent(id)}/map`, {
+        query: {from: opts?.from, to: opts?.to}
+    });
+}
+
+/**
+ * The flow graph's own keyframes -- one per milestone boundary, plus the
+ * run's opening one. Each entry is a full snapshot, not a delta.
+ */
+export function getRunFlow(id: string, opts?: {from?: number; to?: number}): Promise<RunFlowResponse> {
+    return request<RunFlowResponse>(`/api/v1/runs/${encodeURIComponent(id)}/flow`, {
         query: {from: opts?.from, to: opts?.to}
     });
 }

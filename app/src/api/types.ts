@@ -951,6 +951,55 @@ export interface RunMapResponse {
     skipped: number;
 }
 
+/** A modelled flow rate for one item, items per second. */
+export interface FlowExportRate {
+    item: string;
+    per_second: number;
+}
+
+/**
+ * One flow-graph node: a machine, chest, drill or lab the flow graph
+ * tracks.
+ *
+ * `id` is scoped to the one `FlowExport` it came from -- stable within that
+ * document, meaningless across two. Join two exports on `position`, never
+ * on `id`.
+ */
+export interface FlowExportNode {
+    id: number;
+    position: Position;
+    name: string;
+    kind: string;
+    recipe: string | null;
+    miner_ore: string | null;
+}
+
+/**
+ * One flow-graph edge. `lanes` has one entry for a single-lane connection
+ * (a pipe, most belts) and two for a belt whose left and right lane carry
+ * different items.
+ */
+export interface FlowExportEdge {
+    from: number;
+    to: number;
+    lanes: FlowExportRate[][];
+}
+
+/** A point-in-time snapshot of the flow graph -- one line of `flow.jsonl`. */
+export interface FlowExport {
+    tick: number;
+    nodes: FlowExportNode[];
+    edges: FlowExportEdge[];
+}
+
+/** `GET /api/v1/runs/{id}/flow` response. */
+export interface RunFlowResponse {
+    flow: FlowExport[];
+    /** Lines that did not parse. Reported rather than swallowed, matching
+     *  `RunMapResponse.skipped`. */
+    skipped: number;
+}
+
 /**
  * One scheduled step, as the planner intended it -- carried on
  * `EventKind`'s `plan_created` variant so a run's record shows what was

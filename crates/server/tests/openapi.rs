@@ -99,6 +99,11 @@ const QUERY_OPERATIONS: &[QueryOperation] = &[
         "get",
         &[("from", false), ("to", false)],
     ),
+    (
+        "/api/v1/runs/{id}/flow",
+        "get",
+        &[("from", false), ("to", false)],
+    ),
 ];
 
 /// Operations that exist only in a build that has an interpreter.
@@ -141,6 +146,7 @@ const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
     ("get", "/api/v1/runs/{id}/lanes"),
     ("get", "/api/v1/runs/{id}/samples"),
     ("get", "/api/v1/runs/{id}/map"),
+    ("get", "/api/v1/runs/{id}/flow"),
     ("get", "/api/v1/runs/{id}/video"),
     ("get", "/api/v1/runs/{id}/video/ticks"),
     ("get", "/api/v1/runs/{id}/video/file"),
@@ -158,6 +164,7 @@ const OPERATIONS_WITH_A_PATH_PARAMETER: &[(&str, &str)] = &[
     ("get", "/api/v1/runs/{id}/lanes"),
     ("get", "/api/v1/runs/{id}/samples"),
     ("get", "/api/v1/runs/{id}/map"),
+    ("get", "/api/v1/runs/{id}/flow"),
     ("get", "/api/v1/runs/{id}/video"),
     ("get", "/api/v1/runs/{id}/video/ticks"),
     ("get", "/api/v1/runs/{id}/video/file"),

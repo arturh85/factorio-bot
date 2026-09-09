@@ -496,6 +496,77 @@ async fn the_map_can_be_sliced_by_tick() {
 }
 
 #[tokio::test]
+async fn a_run_with_no_flow_file_reports_an_empty_list_rather_than_404() {
+    // A run recorded before this feature existed, or one that never reached
+    // a keyframe.
+    let ws = workspace("noflow");
+    seed_run(&ws, "planning", MILESTONES, None, None);
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/planning/flow").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a run recorded before the flow graph existed is not an error"
+    );
+    assert_eq!(body["flow"].as_array().unwrap().len(), 0);
+    assert_eq!(body["skipped"], 0);
+}
+
+#[tokio::test]
+async fn a_runs_archived_flow_is_served_and_reports_what_did_not_parse() {
+    let ws = workspace("flow");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    std::fs::write(
+        ws.join("runs").join("alpha").join("flow.jsonl"),
+        concat!(
+            r#"{"tick":100,"nodes":[],"edges":[]}"#,
+            "\n",
+            "not json",
+            "\n",
+        ),
+    )
+    .unwrap();
+    let (status, body) = get_json(state_with_workspace(&ws), "/api/v1/runs/alpha/flow").await;
+    assert_eq!(status, StatusCode::OK);
+    let flow = body["flow"].as_array().unwrap();
+    assert_eq!(flow.len(), 1);
+    assert_eq!(flow[0]["tick"], 100);
+    assert_eq!(
+        body["skipped"], 1,
+        "the unparseable line is reported, not hidden"
+    );
+}
+
+#[tokio::test]
+async fn the_flow_can_be_sliced_by_tick() {
+    let ws = workspace("flowslice");
+    seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);
+    std::fs::write(
+        ws.join("runs/alpha/flow.jsonl"),
+        concat!(
+            r#"{"tick":100,"nodes":[],"edges":[]}"#,
+            "\n",
+            r#"{"tick":500,"nodes":[],"edges":[]}"#,
+            "\n",
+            r#"{"tick":900,"nodes":[],"edges":[]}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let (_, body) = get_json(
+        state_with_workspace(&ws),
+        "/api/v1/runs/alpha/flow?from=200&to=600",
+    )
+    .await;
+    let ticks: Vec<u64> = body["flow"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["tick"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ticks, vec![500]);
+}
+
+#[tokio::test]
 async fn savepoints_are_listed_in_milestone_order_and_absent_is_empty() {
     let ws = workspace("savepoints");
     seed_run(&ws, "alpha", MILESTONES, Some(MANIFEST), None);

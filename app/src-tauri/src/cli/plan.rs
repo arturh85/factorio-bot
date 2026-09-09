@@ -109,6 +109,14 @@ writes that snapshot (a few tens of KB) so a test can check it in --
 be reproducible from master; --standing <path> reads one back. Both compose
 with --replan.
 
+--researched <technology> (repeatable) marks it researched on the acting force
+before planning -- a stated hypothesis, never a fact off a record, for a leg no
+archived dump reaches. The electric offtake arm needs `electronics` open AND a
+network standing: on the t=0 dump the flag alone changes nothing (20 burner
+arms either way), on a world with a plant standing it turns two arms electric
+and lays twelve poles, and the plant alone with the recipe closed keeps every
+arm a burner.
+
 No Factorio, no RCON, no workspace and no settings file are involved.";
 
 impl Subcommand for ThisCommand {
@@ -221,6 +229,15 @@ fn standing_args() -> Vec<Arg> {
       .value_parser(value_parser!(u64))
       .requires("standing-from-run")
       .help("with --standing-from-run: the game tick to take the world at"),
+    Arg::new("researched")
+      .long("researched")
+      .value_name("technology")
+      .action(ArgAction::Append)
+      .value_parser(value_parser!(String))
+      .help(
+        "mark this technology researched before planning (repeatable) -- a stated hypothesis, \
+         for a leg no archived dump reaches",
+      ),
     Arg::new("save-standing")
       .long("save-standing")
       .value_name("path")
@@ -434,6 +451,8 @@ pub(crate) struct Replan {
   pub start: Start,
   /// Where to write the snapshot the first round started from, if anywhere.
   pub save_standing: Option<PathBuf>,
+  /// Technologies to mark researched before the first round.
+  pub researched: Vec<String>,
   /// Rounds *after* the first plan. Zero is the plain command.
   pub rounds: u32,
   /// Only steps a schedule finishes by this tick are applied to the world
@@ -477,6 +496,9 @@ pub(crate) struct Round {
 /// refuses is an error naming the round, because a goal that plans from t=0
 /// and refuses from its own standing world is the failure this flag exists
 /// to make visible.
+// Eight parameters, and the eighth is the point: `notes` is an out-parameter
+// so a refusal still reports what stood, which a return value cannot do.
+#[allow(clippy::too_many_arguments)]
 fn plan_from_dump(
   world_path: &std::path::Path,
   specs: &[String],
@@ -485,12 +507,15 @@ fn plan_from_dump(
   steps: bool,
   bundle: bool,
   replan: &Replan,
-) -> Result<(Vec<Round>, Vec<String>)> {
+  notes: &mut Vec<String>,
+) -> Result<Vec<Round>> {
   let world = load_world(world_path)?;
 
   let goals = goals_from(specs, goal_json, bundle)?;
   let bots = roster_for(roster, &world)?;
-  let (mut world, mut standing, mut notes) = starting_world(world, replan)?;
+  // Through the out-parameter, so a refusal still says what stood: a
+  // replan refusal with the standing line lost would read as a t=0 refusal.
+  let (mut world, mut standing) = starting_world(world, replan, notes)?;
   let mut rounds = Vec::new();
   for round in 0..=replan.rounds {
     let state = PlanState::from_world(world.clone(), &bots);
@@ -576,7 +601,7 @@ fn plan_from_dump(
     if round == replan.rounds {
       break;
     }
-    let done = done_after(&net, &scheduled, replan, round, &mut notes)?;
+    let done = done_after(&net, &scheduled, replan, round, notes)?;
     let (after, built) = world_after(&state, &net, |id| done.contains(&id))
       .map_err(|err| miette!("could not apply plan {round} to the world: {err}"))?;
     standing = Some(built);
@@ -596,7 +621,7 @@ fn plan_from_dump(
       path.display()
     ));
   }
-  Ok((rounds, notes))
+  Ok(rounds)
 }
 
 /// The goals, as one bundle when asked.
@@ -643,8 +668,8 @@ fn roster_for(roster: Option<&str>, world: &FactorioSurface) -> Result<Vec<BotId
 fn starting_world(
   world: Arc<FactorioSurface>,
   replan: &Replan,
-) -> Result<(Arc<FactorioSurface>, Option<Standing>, Vec<String>)> {
-  let mut notes = Vec::new();
+  notes: &mut Vec<String>,
+) -> Result<(Arc<FactorioSurface>, Option<Standing>)> {
   let snapshot = match &replan.start {
     Start::Dump => None,
     Start::Snapshot(path) => Some(
@@ -665,6 +690,19 @@ fn starting_world(
       )
     }
   };
+  let snapshot = match (snapshot, replan.researched.is_empty()) {
+    (Some(mut snapshot), _) => {
+      snapshot
+        .researched
+        .extend(replan.researched.iter().cloned());
+      Some(snapshot)
+    }
+    (None, false) => Some(StandingSnapshot {
+      researched: replan.researched.clone(),
+      ..StandingSnapshot::default()
+    }),
+    (None, true) => None,
+  };
   if let Some(snapshot) = &snapshot {
     let (next, built) = world_with(&world, snapshot);
     notes.push(format!(
@@ -678,7 +716,13 @@ fn starting_world(
       snapshot.divergences,
       describe_standing(Some(&built))
     ));
-    if built.placed == 0 {
+    if built.researched < snapshot.researched.len() {
+      return Err(miette!(
+        "--researched named a technology the dump's force does not have ({})",
+        describe_standing(Some(&built))
+      ));
+    }
+    if built.placed == 0 && !snapshot.entities.is_empty() {
       return Err(miette!(
         "the standing snapshot put nothing on the dump ({}) -- a plan against it would be a \
          plan against t=0 wearing a run's name",
@@ -691,7 +735,7 @@ fn starting_world(
         .map_err(|err| miette!("could not write the snapshot to {}: {err}", path.display()))?;
       notes.push(format!("wrote the standing snapshot to {}", path.display()));
     }
-    return Ok((next, Some(built), notes));
+    return Ok((next, Some(built)));
   }
   if let Some(path) = &replan.save_standing {
     return Err(miette!(
@@ -700,7 +744,7 @@ fn starting_world(
       path.display()
     ));
   }
-  Ok((world, None, notes))
+  Ok((world, None))
 }
 
 /// Which of a round's actions count as executed before the next round.
@@ -749,8 +793,9 @@ fn done_after(
 fn describe_standing(standing: Option<&Standing>) -> String {
   match standing {
     Some(s) => format!(
-      "{} placed, {} recipe(s) set, {} chopped, {} ore tile(s) mined, {} action(s) not modelled",
-      s.placed, s.recipes_set, s.chopped, s.mined, s.unapplied
+      "{} placed, {} recipe(s) set, {} chopped, {} ore tile(s) mined, {} researched, {} not \
+       applied",
+      s.placed, s.recipes_set, s.chopped, s.mined, s.researched, s.unapplied
     ),
     None => "the dump as it is".to_string(),
   }
@@ -820,13 +865,18 @@ fn run(args: &ArgMatches, _context: &mut Context) -> Result<()> {
   let replan = Replan {
     start,
     save_standing: args.get_one::<PathBuf>("save-standing").cloned(),
+    researched: args
+      .get_many::<String>("researched")
+      .map(|values| values.cloned().collect())
+      .unwrap_or_default(),
     rounds: args.get_one::<u32>("replan").copied().unwrap_or(0),
     done_by: args.get_one::<u32>("done-by").copied(),
     fail: args.get_one::<String>("fail").cloned(),
     dump_standing: args.get_one::<PathBuf>("dump-standing").cloned(),
   };
 
-  let (rounds, notes) = plan_from_dump(
+  let mut notes = Vec::new();
+  let planned = plan_from_dump(
     world_path,
     &specs,
     &goal_json,
@@ -834,11 +884,12 @@ fn run(args: &ArgMatches, _context: &mut Context) -> Result<()> {
     args.get_flag("steps"),
     args.get_flag("all"),
     &replan,
-  )?;
-
+    &mut notes,
+  );
   for note in &notes {
     eprintln!("{note}");
   }
+  let rounds = planned?;
   let several = rounds.len() > 1;
   for (index, round) in rounds.iter().enumerate() {
     if several {
@@ -890,7 +941,8 @@ mod tests {
     roster: Option<&str>,
     steps: bool,
   ) -> Result<(PlanReport, Vec<String>, Vec<String>)> {
-    let (mut rounds, notes) = super::plan_from_dump(
+    let mut notes = Vec::new();
+    let mut rounds = super::plan_from_dump(
       world_path,
       specs,
       goal_json,
@@ -898,6 +950,7 @@ mod tests {
       steps,
       false,
       &Replan::default(),
+      &mut notes,
     )?;
     let round = rounds.remove(0);
     let report = round.report.expect("a first round always has a plan");
@@ -911,7 +964,8 @@ mod tests {
     let dir = tempfile::tempdir().unwrap();
     let path = dumped_world(&dir);
     let goal = ["have:iron-plate:5".to_string()];
-    let (rounds, _) = super::plan_from_dump(
+    let mut notes_ignored = Vec::new();
+    let rounds = super::plan_from_dump(
       &path,
       &goal,
       &[],
@@ -922,6 +976,7 @@ mod tests {
         rounds: 1,
         ..Replan::default()
       },
+      &mut notes_ignored,
     )
     .expect("plans twice");
     assert_eq!(rounds.len(), 2);
@@ -946,7 +1001,8 @@ mod tests {
     let dir = tempfile::tempdir().unwrap();
     let path = dumped_world(&dir);
     let goal = ["have:iron-plate:5".to_string()];
-    let (rounds, _) = super::plan_from_dump(
+    let mut notes_ignored = Vec::new();
+    let rounds = super::plan_from_dump(
       &path,
       &goal,
       &[],
@@ -958,6 +1014,7 @@ mod tests {
         done_by: Some(0),
         ..Replan::default()
       },
+      &mut notes_ignored,
     )
     .expect("plans twice");
     let standing = rounds[1].standing.as_ref().unwrap();
@@ -992,7 +1049,8 @@ mod tests {
     .unwrap();
     let goal = ["have:iron-plate:5".to_string()];
     let saved = dir.path().join("standing.json");
-    let (rounds, notes) = super::plan_from_dump(
+    let mut notes = Vec::new();
+    let rounds = super::plan_from_dump(
       &path,
       &goal,
       &[],
@@ -1007,6 +1065,7 @@ mod tests {
         save_standing: Some(saved.clone()),
         ..Replan::default()
       },
+      &mut notes,
     )
     .expect("plans against the run's world");
     let standing = rounds[0]
@@ -1020,7 +1079,8 @@ mod tests {
     );
     assert!(saved.exists(), "the snapshot was written for checking in");
 
-    let (again, _) = super::plan_from_dump(
+    let mut again_notes = Vec::new();
+    let again = super::plan_from_dump(
       &path,
       &goal,
       &[],
@@ -1031,6 +1091,7 @@ mod tests {
         start: Start::Snapshot(saved),
         ..Replan::default()
       },
+      &mut again_notes,
     )
     .expect("plans against the saved snapshot");
     assert_eq!(
@@ -1055,7 +1116,8 @@ mod tests {
     let path = dumped_world(&dir);
     let standing_path = dir.path().join("standing.json");
     let goal = ["have:iron-plate:5".to_string()];
-    let (_, notes) = super::plan_from_dump(
+    let mut notes = Vec::new();
+    let _rounds = super::plan_from_dump(
       &path,
       &goal,
       &[],
@@ -1067,6 +1129,7 @@ mod tests {
         dump_standing: Some(standing_path.clone()),
         ..Replan::default()
       },
+      &mut notes,
     )
     .expect("plans twice");
     assert!(

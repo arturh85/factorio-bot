@@ -96,6 +96,14 @@ pub struct StandingSnapshot {
     pub bots: Vec<BotAt>,
     #[serde(default)]
     pub recipes: Vec<RecipeAt>,
+    /// Technologies to mark researched on the acting force before planning.
+    /// Never read off a record -- the record does not carry research -- so
+    /// this is a caller's hypothesis, stated: "the world as it stood, with
+    /// `electronics` open". It is what lets a leg no archived dump reaches
+    /// (an electric arm on a replan with the plant standing) be planned
+    /// against a real standing world rather than a fixture.
+    #[serde(default)]
+    pub researched: Vec<String>,
 }
 
 impl StandingSnapshot {
@@ -203,6 +211,7 @@ impl StandingSnapshot {
             entities,
             bots,
             recipes,
+            researched: Vec::new(),
         })
     }
 

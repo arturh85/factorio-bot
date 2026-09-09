@@ -16,7 +16,11 @@ export function headline(input: {samples: Sample[]; events: Event[]; splits: Spl
             const a = attributeInterval(samples, events, lo, mark, item);
             const rate = m.status === 'ok' && m.rateWindow !== null ? `${m.rateWindow.toFixed(0)}/min` : m.status.replace('_', ' ');
             const gen = i === 0 && firstGen !== null && firstGen.tick > lo ? `; no generator until ${formatGameTime(scale, firstGen.tick)}` : '';
-            return `${item} ${rate} at ${formatGameTime(scale, mark)} (${a.verdict}${gen})`;
+            // The count a verdict was computed over rides beside it -- see
+            // `ProductionBand.vue`'s `verdictWord` doc for why a verdict with
+            // no denominator is misread.
+            const verdict = `${a.verdict} · ${a.delta} ${a.delta === 1 ? 'item' : 'items'}`;
+            return `${item} ${rate} at ${formatGameTime(scale, mark)} (${verdict}${gen})`;
         });
         parts.push(`rates: ${rates.join(' · ')}`);
     }

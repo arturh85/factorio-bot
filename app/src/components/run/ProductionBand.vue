@@ -52,7 +52,11 @@ interface Row {
     // `source` rides with the verdict because an INFERRED verdict and a
     // MEASURED one are different claims and must not look alike: the
     // inference fallback has no machine counters behind it at all.
-    verdicts: {from: number; to: number; verdict: Verdict; source: Attribution['source']}[];
+    // `delta` rides too, for the same reason a label needs a denominator:
+    // `factory` over one item and `factory` over a thousand read identical
+    // without it (a real run, `run-1788926478-07032`, is `factory` at 20:00
+    // over exactly one pack).
+    verdicts: {from: number; to: number; verdict: Verdict; source: Attribution['source']; delta: number}[];
     marks: {tick: number; label: string}[];
     empty: boolean;
 }
@@ -64,7 +68,7 @@ const rows = computed<Row[]>(() => props.items.map((item, i) => {
     const peak = points.reduce<Row['peak']>((m, p) => (m === null || p.perMinute > m.perMinute ? p : m), null);
     const verdicts = attributionIntervals(props.samples, props.events, props.lo, props.hi, item)
         .filter((v) => v.verdict !== 'no output')
-        .map(({from, to, verdict, source}) => ({from, to, verdict, source}));
+        .map(({from, to, verdict, source, delta}) => ({from, to, verdict, source, delta}));
     // The tool's marks, off the analysis clock -- 5:00 here must be the same
     // tick the headline calls 5:00. A mark outside the drawn axis is dropped
     // rather than clamped onto its edge.
@@ -100,9 +104,16 @@ function verdictFill(v: Verdict): string {
     return 'var(--color-status-neutral)';
 }
 function verdictOpacity(v: Verdict): number { return v === 'factory' ? 0.18 : v === 'roster-fed' || v === 'hand-made' ? 1 : 0.25; }
-/** The word a reader sees -- an inference says so, in the word itself. */
-function verdictWord(v: {verdict: Verdict; source: Attribution['source']}): string {
-    return v.source === 'inference' ? `${v.verdict} (inferred)` : v.verdict;
+/**
+ * The word a reader sees -- an inference says so, in the word itself, and the
+ * count it was computed over rides beside it. A verdict with no denominator
+ * is misread: `factory` over one item and `factory` over a thousand look
+ * identical otherwise -- a real run, `run-1788926478-07032`, is `factory` at
+ * 20:00 over exactly one pack.
+ */
+function verdictWord(v: {verdict: Verdict; source: Attribution['source']; delta: number}): string {
+    const counted = `${v.verdict} · ${v.delta} ${v.delta === 1 ? 'item' : 'items'}`;
+    return v.source === 'inference' ? `${counted} (inferred)` : counted;
 }
 </script>
 
@@ -123,7 +134,7 @@ function verdictWord(v: {verdict: Verdict; source: Attribution['source']}): stri
     <text v-if="!hasForceSamples" :x="AXIS_WIDTH / 2" :y="height / 2 + 4" font-size="10" text-anchor="middle" fill="var(--color-ink-muted)">no production samples in this run</text>
     <template v-else>
     <template v-for="(row, i) in rows" :key="row.item">
-      <rect v-for="v in row.verdicts" :key="`${row.item}-${v.from}`" class="verdict" :data-verdict="v.verdict" :data-source="v.source"
+      <rect v-for="v in row.verdicts" :key="`${row.item}-${v.from}`" class="verdict" :data-verdict="v.verdict" :data-source="v.source" :data-delta="v.delta"
             :x="x(v.from)" :y="i * ROW" :width="x(v.to) - x(v.from)" :height="ROW"
             :fill="verdictFill(v.verdict)" :opacity="verdictOpacity(v.verdict)"
             :stroke="v.source === 'inference' ? 'var(--color-ink-muted)' : undefined"

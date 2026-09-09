@@ -51,9 +51,12 @@ vi.mock('@/api/client', () => ({
     getRunVideo: async () => { throw new Error('this run recorded no video'); },
     getRunVideoTicks: async () => { throw new Error('this run recorded no video'); },
     getRunEvents: async () => ({events: run.events, skipped: 0}),
-    // Phase 2 enrichments this page does not render yet -- resolved rather
-    // than left undefined, so `openRun`'s `Promise.allSettled` array can be
-    // built at all. None of this file's assertions touch them.
+    // The page renders chips off provenance and plan counts off the replay
+    // (see the seed-chip and plan-chip tests below); savepoints render a
+    // resume chip nothing here asserts on. Resolved rather than left
+    // undefined so `openRun`'s `Promise.allSettled` array can be built at
+    // all -- the fixed values below are just what this file does not
+    // otherwise exercise.
     getRunProvenance: async () => ({
         schema: 1, run_id: RUN_ID, started_unix: 1788696619, started_tick: 0,
         seed: null, map_exchange_string: null, map: null, factorio: null, mods: null,
@@ -139,6 +142,25 @@ describe('RunPage', () => {
         await flushPromises();
         expect(row.key).toMatch(/^\d+$/);
         expect(w.findComponent(MapPanel).props('highlight')).toBe(positionKey(row.position));
+    });
+
+    it('shows the planner refusal behind the run\'s last stuck milestone', async () => {
+        const w = await mountPage();
+        const store = useRunsStore();
+        store.detail = {
+            ...DETAIL,
+            splits: [{index: 1, goal: 'sustain iron-plate', started_tick: 3242, ended_tick: 25216, outcome: 'stuck', elapsed_ticks: 21974}]
+        };
+        store.events = [
+            ...store.events,
+            {
+                kind: 'milestone_stuck', index: 1, outcome: 'stuck', best_steps: 12,
+                last_error: 'nothing can carry coal from the buffer at [32.5,-41.5] to the iron-chest at [27.5,-40.5]: no belt route, blocked by 1 tile(s): [30.5,-39.5]',
+                tick: 25216
+            }
+        ];
+        await flushPromises();
+        expect(w.get('[data-testid="stuck-reason"]').text()).toContain('no belt route, blocked by 1 tile');
     });
 
     it('reports a failed /samples fetch in every band that needs samples', async () => {

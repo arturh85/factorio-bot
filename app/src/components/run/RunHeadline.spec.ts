@@ -39,4 +39,14 @@ describe('RunHeadline', () => {
         const w = mount(RunHeadline, {props: {...base, provenance, provenanceError: null, savepoints: [{schema: 1, run_id: 'run-1', milestone_index: 1, tick: 300, created_unix: 1, bytes: 10, file: 'milestone-1.zip', mods: null}]}});
         expect(w.get('[data-chip="resume"] code').text()).toBe('--resume-from run-1:1');
     });
+    it('reads a negative lag as caught up, not behind', () => {
+        const w = mount(RunHeadline, {props: {...base, provenance, provenanceError: null, lagTicks: -36}});
+        const samples = w.get('[data-chip="samples"]');
+        expect(samples.text()).toContain('cover to end');
+        expect(samples.text()).not.toMatch(/-\d/);
+    });
+    it('reports a positive lag in ticks', () => {
+        const w = mount(RunHeadline, {props: {...base, provenance, provenanceError: null, lagTicks: 42}});
+        expect(w.get('[data-chip="samples"]').text()).toContain('lag 42 ticks');
+    });
 });

@@ -86,6 +86,22 @@ fn work_for(world: Arc<FactorioSurface>, goal: Goal) -> (usize, WorkCounts) {
     (net.len(), work)
 }
 
+/// Ceilings for the two composed bundles: (goals expanded, threat queries,
+/// preds, forks), twice what each read on the first binary that planned them
+/// (2026-09-09, this dump, four bots):
+///
+/// ```text
+///   goal                                        actions  goals  threats  preds   forks
+///   all{iron:12, copper:6, red:6}                 1,559  1,739   64,125  3,118  65,544
+///   all{iron:30, transport-belt:6}                1,501  1,740   62,610  3,002  59,413
+/// ```
+///
+/// Forks sit at 50% of these by construction; the old green row's 60,756
+/// ceiling stood at 81%, so the composed red bundle has more headroom than
+/// the lone green cell had, not less.
+const CEIL_RED: (u64, u64, u64, u64) = (3_478, 128_250, 6_236, 131_088);
+const CEIL_BELT: (u64, u64, u64, u64) = (3_480, 125_220, 6_004, 118_826);
+
 /// Every ceiling in one place, so one dump load covers all three goals.
 ///
 /// One test rather than three: loading an 864 MB dump takes longer than
@@ -140,6 +156,33 @@ fn the_three_map_json_baselines_stay_within_their_work_ceilings() {
     // 479/935/2,587 patches and 18,176/59,834/297,049 preds. The ceilings were
     // twice *those*, and are tightened here for the reason the file's own doc
     // gives: a ceiling that survives its own remedy is not measuring anything.
+    // **Re-keyed 2026-09-09, when the science cell lost its chests.** A red
+    // cell is belted from a standing stage-1 cell for each plate and REFUSES
+    // by name without one (`assembly_no_standing_source`), so a lone
+    // `producing:automation-science-pack:6` is no longer a plan; the number
+    // that matters is the composed bundle `continuous_supply.lua` runs --
+    // both sustains at the cell's own demand, then the cell. Green needs a
+    // gear cell `assembly_spec` cannot express and did not survive the same
+    // composition on this dump (no room within the ring), so the third case
+    // is the belt cell on one iron sustain, which is the same shape with one
+    // belted plate. Ceilings are twice what these read on the first binary
+    // that planned them (this worktree, `8d3cbe27` plus the change), except
+    // `resource_patches`, kept at 16 for the reason above.
+    let bundle = |item: &str, per_minute: u32, sustains: &[(&str, u32)]| {
+        let mut goals: Vec<Goal> = sustains
+            .iter()
+            .map(|(plate, rate)| Goal::Sustain {
+                item: (*plate).to_owned(),
+                per_minute: *rate,
+                window_ticks: 36_000,
+            })
+            .collect();
+        goals.push(Goal::Producing {
+            item: item.to_owned(),
+            per_minute,
+        });
+        Goal::All(goals)
+    };
     let cases: Vec<(&str, Goal, usize, WorkCounts)> = vec![
         (
             "researched:automation",
@@ -154,39 +197,31 @@ fn the_three_map_json_baselines_stay_within_their_work_ceilings() {
             },
         ),
         (
-            "producing:automation-science-pack:6",
-            Goal::Producing {
-                item: "automation-science-pack".to_owned(),
-                per_minute: 6,
-            },
-            316,
+            "all{sustain:iron-plate:12, sustain:copper-plate:6, producing:automation-science-pack:6}",
+            bundle(
+                "automation-science-pack",
+                6,
+                &[("iron-plate", 12), ("copper-plate", 6)],
+            ),
+            1_559,
             WorkCounts {
-                goals_expanded: 860,
+                goals_expanded: CEIL_RED.0,
                 resource_patches: 16,
-                threat_queries: 44_016,
-                preds: 1_264,
-                forks: 13_660,
+                threat_queries: CEIL_RED.1,
+                preds: CEIL_RED.2,
+                forks: CEIL_RED.3,
             },
         ),
         (
-            "producing:logistic-science-pack:6",
-            Goal::Producing {
-                item: "logistic-science-pack".to_owned(),
-                per_minute: 6,
-            },
-            // 571 until `assemble::supply_chest_is_reachable` (2026-09-09):
-            // the sixth cell at [43.5,-11.5] had its supply chest opening
-            // onto the plan's own plant gap at [43.5,-6.5] -- a belt tile no
-            // run could enter -- and is refused; the cells pack differently
-            // from there and the plan reads 559 / 52,298. See
-            // `docs/superpowers/notes/2026-09-09-the-ring-was-the-other-end.md`.
-            559,
+            "all{sustain:iron-plate:30, producing:transport-belt:6}",
+            bundle("transport-belt", 6, &[("iron-plate", 30)]),
+            1_501,
             WorkCounts {
-                goals_expanded: 2_642,
+                goals_expanded: CEIL_BELT.0,
                 resource_patches: 16,
-                threat_queries: 93_102,
-                preds: 4_004,
-                forks: 60_756,
+                threat_queries: CEIL_BELT.1,
+                preds: CEIL_BELT.2,
+                forks: CEIL_BELT.3,
             },
         ),
     ];

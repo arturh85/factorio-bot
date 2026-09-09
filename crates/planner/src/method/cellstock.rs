@@ -39,21 +39,23 @@
 //!
 //! # What is drawn, and why it is bounded
 //!
-//! A cell is charged once, with [`crate::method::assemble::CELL_CHARGE_TICKS`]
-//! worth of ingredients, and **nothing refills it**. So a cell yields
-//! `AssemblySpec::charge_products` items and then stops, and that number is
-//! what `BuildAssemblyCell` now records as an
+//! A cell yields what its sources deliver -- the
+//! [`crate::method::assemble::SupplyHorizon`], the fewest products any belted
+//! input's source will make before its ore is dug out, bounded by the hand
+//! charge ([`crate::method::assemble::CELL_CHARGE_TICKS`]) where a chest
+//! remains -- and that number is what `BuildAssemblyCell` records as an
 //! [`Effect::BufferGain`](crate::action::Effect::BufferGain) on the output
-//! chest at charge time. This method spends against exactly that ledger: it
-//! draws `min(need, buffered)` and emits the residual as the same goal again,
-//! which — the chest now empty in the overlay — falls through to `HandCraft`.
+//! chest when the cell is complete. This method spends against exactly that
+//! ledger: it draws `min(need, buffered)` and emits the residual as the same
+//! goal again, which — the chest now empty in the overlay — falls through to
+//! `HandCraft`.
 //!
-//! **That ledger is the honest bound and it is deliberately not widened.** A
-//! technology whose bill is larger than one charge (green science costs 75 red
-//! packs against a charge of 15) is partly machine-made and partly
-//! hand-crafted, and says so in the plan. Covering the whole bill means either
-//! more cells or a charge sized from demand rather than from a fixed tick
-//! budget; both are real rungs and neither is smuggled in here.
+//! **That ledger is the honest bound and it is deliberately not widened.**
+//! Until 2026-09-09 it was one charge -- fifteen red packs, whatever stood --
+//! so a technology costing 75 was mostly hand-crafted; a belted cell's ledger
+//! is its sources' ore, which on a real patch is hundreds of packs. What is
+//! still not modelled: a source slower than the cell's tempo, whose wait the
+//! lag below under-states (the tempo is the lower bound).
 //!
 //! # The timing claim
 //!
@@ -73,11 +75,10 @@
 //! **The lag is the cell's TEMPO times the count, and deliberately not
 //! `CELL_CHARGE_TICKS`.** `ticks_per_item * take` says "N items cost N of
 //! this machine's cycles", which is a fact about the recipe and the machine's
-//! `crafting_speed` and stays true whatever fills the feed chests. A cell
-//! belted from a producing machine rather than hand-charged invalidates the
-//! *ledger* above — `charge_products`, which is charge-once by construction —
-//! but not this edge. Whoever belts a cell has to revisit `BufferGain`, and
-//! need not revisit the wait.
+//! `crafting_speed` and stays true whatever feeds the machines. Belting the
+//! cell (2026-09-09) revisited the *ledger* above -- it is the sources' ore
+//! now, not `charge_products` -- and left this edge alone, as this paragraph
+//! said it would.
 //!
 //! **The id crosses a method boundary, which is the part that needed
 //! machinery.** The charge is emitted by `method::assemble` and the draw by
@@ -194,10 +195,14 @@ pub(crate) fn cell_output_loop(state: &PlanState, spec: &AssemblySpec) -> Option
             .iter()
             .map(|s| (*s).to_string()),
     );
-    // And the charge. `supplied` is what the supply chest holds; `feed_charges`
-    // is what the feed chests hold, empty for a one-machine cell.
+    // And what the cell eats: `supplied` and the intermediate's ingredients,
+    // whether they arrive in a chest a bot fills or on a belt from a standing
+    // cell. Either way they are what the cell is built to consume, and
+    // drawing the output to make them is the same loop by a shorter route.
     seed.push(spec.supplied.0.clone());
-    seed.extend(spec.feed_charges().into_iter().map(|(item, _)| item));
+    if let Some(made) = spec.intermediate.as_ref() {
+        seed.extend(made.ingredients.iter().map(|(item, _)| item.clone()));
+    }
 
     let index = crate::products::ProductIndex::from_state(state);
     // `from` records, for each item reached, the seed-side item whose recipe

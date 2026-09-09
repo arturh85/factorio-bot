@@ -110,3 +110,64 @@ pub fn assert_preconditions_hold_over_time(
         }
     }
 }
+
+/// Ore per tile under every source drill [`with_sources`] stands.
+pub const SOURCE_ORE_PER_TILE: u32 = 100;
+
+/// Stand a stage-1 cell for each `(ore, drill)` on `world`, each dropping its
+/// plates into a chest -- what a belted assembly cell is sourced from since
+/// 2026-09-09, when its smelted ingredients stopped arriving in chests a bot
+/// fills.
+///
+/// Per source, in the base world (ore lives in the entity graph, and a
+/// replan sees a source through the same door): a 4x4 patch of the ore at
+/// [`SOURCE_ORE_PER_TILE`] a tile, a burner drill on it facing north, the
+/// stone furnace it drops into two tiles north, a burner arm on the furnace's
+/// east face carrying the plates out, and the iron chest it drops them into.
+/// The same shape `crates/planner/src/method/assemble.rs`' own tests stand;
+/// duplicated here because an integration test cannot reach a crate-private
+/// helper.
+pub fn with_sources(
+    world: &factorio_bot_core::factorio::world::FactorioSurface,
+    sources: &[(&str, (f64, f64))],
+) {
+    use factorio_bot_core::factorio::util::add_to_rect;
+    use factorio_bot_core::types::{Direction, FactorioEntity as E, Rect};
+    let mut entities = Vec::new();
+    for (ore, (dx, dy)) in sources {
+        let drill = Position::new(*dx, *dy);
+        let mut patch = Vec::new();
+        factorio_bot_core::test_utils::spawn_ore(
+            &mut patch,
+            add_to_rect(&Rect::from_wh(4., 4.), &drill),
+            ore,
+        );
+        for tile in &mut patch {
+            tile.amount = Some(SOURCE_ORE_PER_TILE);
+        }
+        entities.extend(patch);
+        entities.push(E::new_burner_mining_drill(&drill, Direction::North));
+        entities.push(E::new_stone_furnace(
+            &Position::new(*dx, dy - 2.),
+            Direction::North,
+        ));
+        // Picks up from the furnace to its west, drops into the chest to its
+        // east: an arm's `direction` names the side it picks up from.
+        entities.push(E::new_named_inserter(
+            "burner-inserter".into(),
+            &Position::new(dx + 1.5, dy - 2.5),
+            Direction::West,
+        ));
+        let chest = Position::new(dx + 2.5, dy - 2.5);
+        entities.push(E {
+            name: "iron-chest".into(),
+            entity_type: "container".into(),
+            bounding_box: add_to_rect(&Rect::from_wh(0.703125, 0.703125), &chest),
+            position: chest,
+            ..Default::default()
+        });
+    }
+    world
+        .update_chunk_entities(entities)
+        .expect("a fixture world accepts stage-1 cells");
+}

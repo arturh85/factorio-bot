@@ -497,6 +497,10 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::SustainNoFuelSource { .. }
         | PlannerError::SustainNoRouteForFuel { .. }
         | PlannerError::AssemblyNoRouteForSupply { .. }
+        // A verdict about the world: no standing cell delivers a belted
+        // ingredient. A script acts on it by composing the goal with the
+        // `sustain` the message names.
+        | PlannerError::AssemblyNoStandingSource { .. }
         | PlannerError::SustainNoOfftake { .. }
         | PlannerError::SolarBankShort { .. }
         | PlannerError::SolarBankNotSizable { .. }

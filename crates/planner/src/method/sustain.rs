@@ -1395,17 +1395,36 @@ fn modelled_delivery(state: &PlanState, cells: &[Cell], ore: &str) -> String {
 /// Deterministic without a float tie-break reaching the ordering: distances are
 /// compared with `total_cmp` and equal ones fall back to the position, which is
 /// the same rule the buffer search two functions along uses.
-fn nearest_belt_of(steps: &[Step], at: &Position) -> Option<FactorioEntity> {
+fn nearest_belt_of(state: &PlanState, steps: &[Step], at: &Position) -> Option<FactorioEntity> {
     const BELT: &str = "transport-belt";
-    let mut best: Option<(f64, FactorioEntity)> = None;
+    // Every belt this expansion laid -- and every STANDING belt an arm this
+    // expansion placed picks coal off. A second `Sustain` in one plan (the
+    // iron-and-copper bundle a chest-free science cell needs) shares the
+    // first's coal source, and its haul met the first's belts already
+    // running past its new chest's door: `connect::standing_run` finished
+    // it with two arms and no belt, so the slice held no belt to tap while
+    // a coal belt stood one tile from the unload arm. Measured 2026-09-09 on
+    // seed 31337 in both orders (copper's arm at `[28.5,-46.5]`, iron's at
+    // `[-5.5,-28.5]`). The belt under an arm this expansion placed carries
+    // what that arm unloads, which here is only ever coal.
+    let mut candidates: Vec<FactorioEntity> = Vec::new();
     for step in steps {
         let Step::Act(action) = step else { continue };
         let crate::action::ActionKind::Place { entity } = &action.kind else {
             continue;
         };
-        if entity.name != BELT {
-            continue;
+        if entity.name == BELT {
+            candidates.push((**entity).clone());
+        } else if let Some(pickup) = state.pickup_position(entity)
+            && let Some(under) = state
+                .entity_at(&pickup)
+                .filter(|e| e.name == BELT && Pos::from(&e.position) == Pos::from(&pickup))
+        {
+            candidates.push(under);
         }
+    }
+    let mut best: Option<(f64, FactorioEntity)> = None;
+    for entity in candidates {
         let d = (entity.position.x() - at.x()).hypot(entity.position.y() - at.y());
         let better = match &best {
             None => true,
@@ -1416,7 +1435,7 @@ fn nearest_belt_of(steps: &[Step], at: &Position) -> Option<FactorioEntity> {
             },
         };
         if better {
-            best = Some((d, (**entity).clone()));
+            best = Some((d, entity));
         }
     }
     best.map(|(_, entity)| entity)
@@ -1695,15 +1714,16 @@ fn belt_cell(
         // candidates to a nearest-wins search. Every belt this method
         // places carries coal, which is what makes any of them a legal
         // tap; that caveat is unchanged and is stated below.
-        let tap =
-            nearest_belt_of(steps, &offtake.arm).ok_or_else(|| PlannerError::SustainNoOfftake {
+        let tap = nearest_belt_of(&ctx.state, steps, &offtake.arm).ok_or_else(|| {
+            PlannerError::SustainNoOfftake {
                 item: spec.item.clone(),
                 machine: ARM.into(),
                 at: offtake.arm.to_string(),
                 why: "the cell's coal runs laid no belt to branch the offtake arm's own \
                       fuel off"
                     .into(),
-            })?;
+            }
+        })?;
         steps.extend(feed(ctx, &tap, &arm_entity, reserved)?);
     }
     // # The two burners, in whichever order both can be fed
@@ -2073,6 +2093,32 @@ impl Method for Sustain {
             .filter_map(|cell| standing_offtake(&ctx.state, &cell.furnace))
             .map(|offtake| offtake.sink)
             .collect();
+        // **And every other furnace's plate chest, whatever it smelts.** Two
+        // `Sustain`s in one plan -- `all{ sustain(iron), sustain(copper),
+        // producing(red) }`, the bundle a chest-free science cell needs --
+        // share one coal source, and the second's cell then ranked the
+        // first's plate chest as its nearest coal buffer: a chest an arm
+        // already fills, so `fed_by_machine` read it as fed, no coal run was
+        // laid, and the tap search over this expansion's empty slice refused
+        // with the sentence above. Measured 2026-09-09 on seed 31337 in both
+        // orders (`the burner-inserter at [30.5,-45.5] makes copper-plate ...
+        // laid no belt`; iron's arm at `[-5.5,-28.5]` the other way round).
+        // The list above knew only this item's cells; a plate chest is a
+        // plate chest.
+        for furnace in ctx
+            .state
+            .entities_within(&source.buffer, PLANT_ADOPT_RADIUS)
+            .into_iter()
+            .filter(|entity| entity.name == FURNACE)
+        {
+            if let Some(offtake) = standing_offtake(&ctx.state, &furnace.position)
+                && !plate_chests
+                    .iter()
+                    .any(|chest| Pos::from(chest) == Pos::from(&offtake.sink))
+            {
+                plate_chests.push(offtake.sink);
+            }
+        }
         let mut index = 0usize;
         while index < cells.len() {
             let cell = cells[index].clone();

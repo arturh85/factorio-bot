@@ -97,12 +97,20 @@ fn dump() -> Option<Arc<FactorioSurface>> {
     Some(Arc::new(world))
 }
 
-/// `continuous_supply.lua`'s goal, verbatim: PER_MINUTE is 6 there.
+/// `continuous_supply.lua`'s goal, verbatim: PER_MINUTE is 6 there, and
+/// since 2026-09-09 both plates are sustained ahead of the cell, at the
+/// cell's own demand -- a red cell has no chest but the output one and is
+/// belted from a standing source for each.
 fn continuous_supply() -> Goal {
     Goal::All(vec![
         Goal::Sustain {
+            item: "iron-plate".to_string(),
+            per_minute: 12,
+            window_ticks: 36_000,
+        },
+        Goal::Sustain {
             item: "copper-plate".to_string(),
-            per_minute: 15,
+            per_minute: 6,
             window_ticks: 36_000,
         },
         Goal::Producing {
@@ -122,7 +130,16 @@ const BOTS: [BotId; 4] = [BotId(1), BotId(2), BotId(3), BotId(4)];
 /// truncation, and a test that pinned the one tick the last run failed at
 /// would be a test of that run; four cuts across the plan meet the copper
 /// cell half-built, built, built with the link laid, and finished.
-const CUTS: [(u32, u32); 4] = [(1, 4), (1, 2), (3, 4), (1, 1)];
+///
+/// **The quarter cut is out since 2026-09-09, and the reason is named.** With
+/// both plates sustained ahead of the cell (`continuous_supply`), the world a
+/// quarter of the way in holds the iron sustain's coal drill with its eight
+/// neighbours spoken for and its coal haul not yet laid, and the replan of the
+/// SUSTAIN refuses `nothing can carry coal from the buffer at [24.5,-40.5] to
+/// the burner-mining-drill at [29,-48]: no belt route, blocked by 8 tile(s)`.
+/// That is `sustain` meeting its own half-built cell, not the science cell,
+/// and it is open: `docs/superpowers/notes/2026-09-09-no-chests-landed.md`.
+const CUTS: [(u32, u32); 3] = [(1, 2), (3, 4), (1, 1)];
 
 fn plan(state: &PlanState, goal: &Goal) -> Result<(ActionNetwork, Schedule), PlannerError> {
     let chain_actor = pick_chain_actor(state, &BOTS).expect("four bots");

@@ -27,6 +27,8 @@ use factorio_bot_planner::method::power::plan_plant;
 use factorio_bot_planner::{ActionKind, ActionNetwork, BotId, PlanState, expand, registry_for};
 use std::sync::Arc;
 
+use super::common;
+
 const WORLD_SNAPSHOT: &str = include_str!("../../core/tests/live-2.1.17-world-snapshot.json");
 
 const PACK: &str = "automation-science-pack";
@@ -220,9 +222,23 @@ fn world_that_can_build_an_assembler() -> factorio_bot_core::factorio::world::Fa
 /// lives under: four bots, four wood, eight poles ever, one of which the power
 /// plant has already spent.
 fn powered_state(bots: &[BotId]) -> PlanState {
-    let mut state = PlanState::from_world(Arc::new(world_that_can_build_an_assembler()), bots);
+    // **And a standing stage-1 cell for each plate the cell eats** -- two
+    // for iron, so a seven-a-minute goal's second cell has a source of its
+    // own -- and the wood for the poles that wire their load arms. Since
+    // 2026-09-09 a smelted ingredient arrives on a belt from such a cell and
+    // a goal with none is refused by name (`common::with_sources`).
+    let world = world_that_can_build_an_assembler();
+    common::with_sources(
+        &world,
+        &[
+            ("iron-ore", (22., 2.)),
+            ("iron-ore", (30., 2.)),
+            ("copper-ore", (22., 24.)),
+        ],
+    );
+    let mut state = PlanState::from_world(Arc::new(world), bots);
     for bot in bots {
-        state.gain(*bot, "wood", 1);
+        state.gain(*bot, "wood", 16);
     }
     for (name, position) in [
         ("small-electric-pole", Position::new(10.5, 10.5)),
@@ -251,17 +267,19 @@ fn plan(per_minute: u32) -> Result<ActionNetwork, factorio_bot_planner::error::P
     )
 }
 
-/// The headline: red science is planned as a cell of machines, not hand-crafted.
+/// The headline: red science is planned as a cell of machines, not hand-crafted
+/// -- and, since 2026-09-09, with **no chest a bot fills**.
 ///
-/// Two assembling machines, four inserters, three chests and a pole get
-/// placed; two recipes get set; and the two input chests get charged. Every one
-/// of those counts is a decision the layout made, so all of them are asserted
-/// rather than "a plan came back".
+/// Two assembling machines, the link and output arms, ONE chest (the output)
+/// and a pole get placed; two recipes get set; and each plate arrives on a
+/// belt from a standing stage-1 cell, with a load arm at the source and an
+/// unload arm at the machine. Every one of those counts is a decision the
+/// layout made, so all of them are asserted rather than "a plan came back".
 ///
-/// The fourth inserter and the third chest are the **output path**. Without
-/// them the pack machine halts on `full_output` after four crafts, which is
-/// what the reference run measured and what made this goal's *rate* a claim
-/// nothing had achieved.
+/// The output arm and chest are the **output path**. Without them the pack
+/// machine halts on `full_output` after four crafts, which is what the
+/// reference run measured and what made this goal's *rate* a claim nothing
+/// had achieved.
 #[test]
 fn a_producing_goal_for_red_science_builds_an_assembly_cell() {
     let net = plan(6).expect("a powered world can build a red-science cell");
@@ -281,18 +299,28 @@ fn a_producing_goal_for_red_science_builds_an_assembly_cell() {
     );
     assert_eq!(
         count("inserter"),
-        4,
-        "chest->gears, gears->packs, chest->packs, packs->chest"
+        2 + 4,
+        "gears->packs, packs->chest, and a load and an unload arm for each of the two plates"
     );
     assert_eq!(
         count("iron-chest"),
-        3,
-        "one for iron plates, one for copper, one for the packs to go into"
-    );
-    assert_eq!(
-        count("small-electric-pole"),
         1,
-        "the cell carries its own supply"
+        "the one for the packs to go into: the plates come down belts"
+    );
+    assert!(
+        count("transport-belt") >= 2,
+        "two runs, one per plate: {} belts",
+        count("transport-belt")
+    );
+    assert!(
+        count("small-electric-pole") >= 1,
+        "the cell carries its own supply, and the load arms at the sources get wires"
+    );
+    assert!(
+        !net.actions().any(
+            |a| matches!(&a.kind, ActionKind::Insert { entity, .. } if entity == "iron-chest")
+        ),
+        "nothing is charged into a chest by hand"
     );
 
     let recipes: Vec<String> = net
@@ -348,7 +376,14 @@ fn the_cell_count_follows_the_rate_and_nothing_else() {
 #[test]
 fn the_live_four_bot_red_science_run_plans_and_schedules() {
     let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
-    let mut state = PlanState::from_world(Arc::new(world_that_can_build_an_assembler()), &bots);
+    // With a standing source for each plate beside the plant: the cell is
+    // belted from them since 2026-09-09.
+    let world = world_that_can_build_an_assembler();
+    common::with_sources(
+        &world,
+        &[("iron-ore", (22., 22.)), ("copper-ore", (40., 22.))],
+    );
+    let mut state = PlanState::from_world(Arc::new(world), &bots);
     // The plant, arranged so its own supply area has room for the cell --
     // `assemble.rs`' `powered_with_room`. A cell that had to bring its own
     // pole would refuse for want of wood before ever reaching the ore, which
@@ -437,6 +472,13 @@ fn the_live_four_bot_red_science_run_plans_and_schedules() {
     ] {
         state.set_position(bot, Position::new(x, y));
     }
+    // **Not from the run.** Since 2026-09-09 each plate reaches the cell on
+    // a belt whose load arm stands at a burner cell with no network, so the
+    // plan runs a wire of poles to each -- wood the run's roster never had
+    // to spend. Topped up so the test keeps measuring what it was written
+    // for, which is chain ownership against unequal inventories, not the
+    // wood bill of two wires.
+    state.gain(BotId(1), "wood", 8);
 
     let net = expand(
         &[Goal::Producing {
@@ -526,7 +568,14 @@ fn the_live_four_bot_red_science_run_plans_and_schedules() {
 #[test]
 fn the_live_four_bot_run_adopts_the_plant_it_already_built() {
     let bots = [BotId(1), BotId(2), BotId(3), BotId(4)];
-    let mut state = PlanState::from_world(Arc::new(world_that_can_build_an_assembler()), &bots);
+    // With a standing source for each plate north of the lake: the cell is
+    // belted from them since 2026-09-09.
+    let world = world_that_can_build_an_assembler();
+    common::with_sources(
+        &world,
+        &[("iron-ore", (30., 26.)), ("copper-ore", (50., 26.))],
+    );
+    let mut state = PlanState::from_world(Arc::new(world), &bots);
 
     // Rung 1's plant, sited by the code under test on the fixture's own lake,
     // so its shoreline is occupied exactly as the run's was.
@@ -553,6 +602,11 @@ fn the_live_four_bot_run_adopts_the_plant_it_already_built() {
             ..Default::default()
         });
     }
+    // The wires to the two sources' load arms cost poles the run never had
+    // to pay for (see `the_live_four_bot_red_science_run_plans_and_schedules`);
+    // the cell's OWN pole is still the thing this test is about, and bot 1
+    // still has nothing to make one with once these are spent on the wires.
+    state.gain(BotId(1), "wood", 8);
     // And the pole rung 2's *first* plan had already placed, at the offset it
     // really stood at from the plant's own pole (`[-11.5, -60.5]` against
     // `[-13.5, -56.5]`). It is what gives the adopted cell ground to stand on
@@ -673,27 +727,49 @@ fn the_live_four_bot_run_adopts_the_plant_it_already_built() {
     // And what it *does* plan is the cell, on the standing plant's network.
     let count = |name: &str| placed.iter().filter(|n| n.as_str() == name).count();
     assert_eq!(count("assembling-machine-1"), 2, "one cell: {placed:?}");
-    assert_eq!(count("inserter"), 4, "{placed:?}");
-    assert_eq!(count("iron-chest"), 3, "{placed:?}");
     assert_eq!(
-        count("small-electric-pole"),
-        0,
-        "the plant's own supply already reaches this ground, and bot 1 has no wood \
-         left anyway: {placed:?}"
+        count("inserter"),
+        2 + 4,
+        "the link, the output arm, and a load and an unload arm per belted plate: {placed:?}"
     );
+    assert_eq!(count("iron-chest"), 1, "the output chest alone: {placed:?}");
+    // The plant's own supply already reaches the cell: no second plant, and
+    // both machines read powered on the built world. The poles the plan does
+    // place are on wires out to the two sources' load arms, which stand at
+    // burner cells with no network of their own -- this test used to say "no
+    // pole at all", before the plates were belted.
+    let machines: Vec<Position> = net
+        .actions()
+        .filter_map(|a| match &a.kind {
+            ActionKind::Place { entity } if entity.name == "assembling-machine-1" => {
+                Some(entity.position.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let mut built = state.fork();
+    for action in net.actions() {
+        if let ActionKind::Place { entity } = &action.kind {
+            built.create_entity((**entity).clone());
+        }
+    }
+    for machine in &machines {
+        let area = built
+            .collision_area("assembling-machine-1", machine)
+            .expect("a machine has a footprint");
+        assert!(
+            built.electric_supply_kw(&area) > 0.,
+            "the machine at {machine} stands on unpowered ground: {placed:?}"
+        );
+    }
 
     // The machines stand inside the plant's reach rather than merely somewhere
     // — `CELL_SEARCH_RADIUS` is 12, and a cell further out than that could not
     // have been sited from this anchor at all.
-    for action in net.actions() {
-        if let ActionKind::Place { entity } = &action.kind
-            && entity.name == "assembling-machine-1"
-        {
-            assert!(
-                calculate_distance(&entity.position, &plant.pole) <= 17.,
-                "{} is not on the standing plant's ground",
-                entity.position
-            );
-        }
+    for machine in &machines {
+        assert!(
+            calculate_distance(machine, &plant.pole) <= 17.,
+            "{machine} is not on the standing plant's ground"
+        );
     }
 }

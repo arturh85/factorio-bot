@@ -202,12 +202,26 @@ export function getRunProvenance(id: string): Promise<Provenance> {
  * The server publishes no schema for this body (it is whatever the executor
  * serialised), so the caller narrows it with `parseReplay` rather than
  * trusting a type here.
+ *
+ * A run archived before the replay was persisted, or one that never ran a
+ * plan, answers **404, not an empty document**: an empty replay would read as
+ * a run that planned nothing, which is a different fact from "this wasn't
+ * recorded".
  */
 export function getRunReplay(id: string): Promise<unknown> {
     return request<unknown>(`/api/v1/runs/${encodeURIComponent(id)}/replay`);
 }
 
-/** The milestone savepoints a run wrote. */
+/**
+ * The milestone savepoints a run wrote.
+ *
+ * A run with no savepoints directory answers an empty list, not an error --
+ * savepointing is opt-in, so "none" is the ordinary case. `skipped` counts
+ * metadata files that did not parse (a truncated or corrupt
+ * `milestone-N.json`); `missing_zip` names milestones whose metadata parsed
+ * fine but whose `.zip` is absent from disk -- excluded from `savepoints`
+ * itself because listing them would offer a resume that cannot happen.
+ */
 export function getRunSavepoints(id: string): Promise<RunSavepointsResponse> {
     return request<RunSavepointsResponse>(`/api/v1/runs/${encodeURIComponent(id)}/savepoints`);
 }

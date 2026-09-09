@@ -46,9 +46,24 @@ and record what that binary was built from.
 | `producing:logistic-science-pack:6` | `map.json` | 559 / 52,298 | `112e0fdf` |
 | `producing:iron-plate:261` | `map.json` | 194 / 33,645 | `71f9227c` |
 | `producing:transport-belt:6` | `map.json` | 319 / 119,396 | `71f9227c` |
-| `sustain:iron-plate:30:36000` | `map.json` | 1,234 / 64,564 | `112e0fdf` |
-| `sustain:copper-plate:15:36000` | `map.json` | 479 / 20,904 | `112e0fdf` |
-| `gathered:crude-oil` | **`map-31337-explored.json`** | **2,330 / 354,699** | `c0e51463` |
+| `sustain:iron-plate:30:36000` | `map.json` | 1,272 / 63,905 | `6eb0fa7b` (was 1,234 / 64,564 at `112e0fdf`) |
+| `sustain:copper-plate:15:36000` | `map.json` | 479 / 20,904 | `112e0fdf`, re-confirmed at `6eb0fa7b` |
+| `gathered:crude-oil` | **`map-31337-explored.json`** | **2,352 / 322,738** | `c385c409` (was 2,330 / 354,699 at `c0e51463`) |
+
+### `sustain:iron-plate` moved at `6eb0fa7b`, and it is a fix, not drift
+
+`produce::cell_ledger` stopped offering a furnace that an offtake arm empties
+to a hand (`docs/superpowers/notes/2026-09-09-the-take-races-the-arm.md`). On
+`c385c409` that plan had eleven `take .. iron-plate from the cell`, eight of
+them from the two furnaces the plan itself puts arms on -- takes that would
+have come back `removed 0` live, exactly as the copper ones did in
+`run-1788949638-11792`. With the fix those eight are hand smelts: +38 actions,
+-659 ticks. Seven other baselines unchanged on the same binary pair.
+
+`gathered:crude-oil` was re-measured at the same time and had **already
+moved** on master between `c0e51463` and `c385c409` -- identical on both
+binaries of that pair, so not this change's. Whoever moved it did not record
+it here; the row now carries the commit it was last seen at.
 
 ### The sustain baselines drifted for hours because they lived only in prose
 

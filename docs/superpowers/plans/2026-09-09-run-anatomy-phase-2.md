@@ -965,7 +965,7 @@ git commit -F /tmp/msg -- app/src/components/run/CursorBar.vue app/src/component
 
 ---
 
-### Task 10: Gate, browser check, note
+### Task 10: Gate, browser check, note (run LAST, after Task 11)
 
 **Files:**
 - Create: `docs/superpowers/notes/2026-09-09-run-anatomy-phase-2.md`
@@ -1020,6 +1020,70 @@ EOF
 git add -- docs/superpowers/notes/2026-09-09-run-anatomy-phase-2.md
 git commit -F /tmp/msg -- docs/superpowers/notes/2026-09-09-run-anatomy-phase-2.md
 ```
+
+---
+
+### Task 11: An abandoned step is a lane, not a dropped settle
+
+**Files:**
+- Modify: `crates/core/src/record/lanes.rs` (+ its `#[cfg(test)] mod tests`), `app/src/components/run/LaneBand.vue`, `LaneBand.spec.ts`, `app/src/lib/runIdle.ts`
+
+**Interfaces:**
+- Produces: `derive_lanes` emits, for an `ActionSettled` whose `status == "abandoned"` and which matches no open dispatch, a `Lane { bot, id: Some(id), action: <the error text, or "abandoned">, from_tick: tick, to_tick: Some(tick), status: Some("abandoned"), error }` — a zero-length lane at the settle tick. A settle with no dispatch and any other status stays dropped (that is a genuinely broken record, and `run_analysis.py` reports it). `laneSegments` gives such a lane `verb: 'other'` and `instant: true`; `LaneBand` draws `status === 'abandoned'` as a hollow 1.6-wide mark (`fill="none"`, `stroke="var(--color-ink-muted)"`, `stroke-dasharray="1 1"`) with a title prefixed `never dispatched: `, and `idleIntervals` does NOT count it as work.
+
+- [ ] **Step 1: Write the failing tests**
+
+Rust, in `lanes.rs`'s tests module (copy the neighbouring test's way of building an `Event`):
+```rust
+    #[test]
+    fn an_abandoned_settle_without_a_dispatch_becomes_a_zero_length_lane() {
+        let events = vec![Event {
+            tick: 500,
+            kind: EventKind::ActionSettled {
+                id: 7, bot: 1, status: "abandoned".into(), elapsed_ticks: None,
+                error: Some("abandoned: predecessor 5 failed".into()), failure: None,
+            },
+        }];
+        let lanes = derive_lanes(&events);
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].from_tick, 500);
+        assert_eq!(lanes[0].to_tick, Some(500));
+        assert_eq!(lanes[0].status.as_deref(), Some("abandoned"));
+        assert_eq!(lanes[0].id, Some(7));
+    }
+
+    #[test]
+    fn a_non_abandoned_settle_without_a_dispatch_is_still_dropped() {
+        let events = vec![Event {
+            tick: 500,
+            kind: EventKind::ActionSettled {
+                id: 7, bot: 1, status: "success".into(), elapsed_ticks: Some(3), error: None, failure: None,
+            },
+        }];
+        assert!(derive_lanes(&events).is_empty());
+    }
+```
+TS, in `LaneBand.spec.ts`:
+```ts
+    it('draws an abandoned step as a hollow mark that does not count as work', () => {
+        const lanes = [{bot: 1, id: 9, action: 'abandoned: predecessor 5 failed', from_tick: 5000, to_tick: 5000, status: 'abandoned', error: 'abandoned: predecessor 5 failed'}];
+        const w = mount(LaneBand, {props: {scale, clock: scale, cursor: run.lo, lanes, events: []}});
+        const seg = w.get('rect.segment');
+        expect(seg.attributes('fill')).toBe('none');
+        expect(seg.find('title').text()).toContain('never dispatched');
+        expect(w.text()).toContain('idle 100%');
+    });
+```
+
+- [ ] **Step 2: Run to verify failure** — `nix develop -c cargo test -p factorio-bot-core --lib lanes` and `cd app && pnpm vitest run src/components/run/LaneBand.spec.ts` — Expected: FAIL (0 lanes; segment filled).
+
+- [ ] **Step 3: Implement** — in `derive_lanes`'s `ActionSettled` arm, when the `find` returns `None` and `status == "abandoned"`, push `Lane { bot: *bot, id: Some(*id), action: error.clone().unwrap_or_else(|| "abandoned".into()), from_tick: event.tick, to_tick: Some(event.tick), status: Some(status.clone()), error: error.clone() }`, with a doc comment: an abandoned step settles without dispatching, by design (the executor writes the tail of a plan that never ran), so it is a real record and not a broken join. In `runIdle.ts`'s `idleIntervals`, exclude lanes with `status === 'abandoned'` from `busy` (they are not work). In `LaneBand.vue`, branch the segment's `fill`/`stroke`/`stroke-dasharray` on `s.status === 'abandoned'` and prefix its title with `never dispatched: `.
+
+- [ ] **Step 4: Run to verify pass** — both commands, plus `pnpm vitest run src/lib/runIdle.spec.ts` (the fixture's 85 gaps and 6,984 ticks must be unchanged — it has no abandoned lanes) and `pnpm lint`.
+
+- [ ] **Step 5: Commit**
+
+Format with `rustfmt --edition 2024 crates/core/src/record/lanes.rs`; message (quoted-heredoc file, `git commit -F`): subject `feat(record): an abandoned step is a zero-length lane, drawn as "never dispatched"`, body: an abandoned step settles without a dispatch by design; `derive_lanes` dropped it as a broken join, so the tail of a truncated plan was invisible in the lanes exactly as it had been in the events before `abandoned` existed. Paths: `crates/core/src/record/lanes.rs app/src/components/run/LaneBand.vue app/src/components/run/LaneBand.spec.ts app/src/lib/runIdle.ts`.
 
 ---
 

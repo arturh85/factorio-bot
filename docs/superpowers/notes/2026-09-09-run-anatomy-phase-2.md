@@ -43,9 +43,33 @@ iron-chest at [27.5,-40.5]: no belt route, blocked by 1 tile(s): [30.5,-39.5]
 ```
 
 The ribbon segment for that stuck interval was marked stuck; the lanes showed
-`plan 2 · ids restart here · 13:17`. `/replay` answered 404 for this run
-because it predates replay persistence, so the page shows no plan chip for
-it.
+`plan 2 · ids restart here · 13:17`.
+
+`/replay` answered 404 for this run for **two** reasons, and only the first
+was known at the time. It predates replay persistence — and, until the fix
+below, a CLI run would never have written one anyway: `emit_replay` opened
+with `let Some(sink) = sink else { return; }`, so the `write_replay` under it
+was unreachable without an output sink, and every CLI path (`factorio-bot
+lua`, the REPL) passes `None` for the sink. Every replay test supplied one, so
+the suite could not see it. Fixed in this wave: the early return now requires
+*both* destinations to be absent. So the 404 here does not distinguish "old
+run" from "recorded by a path that never wrote it", and a freshly recorded CLI
+run is the confirmation to look for.
+
+Two things the chip must say, and now does. **`replay.json` holds the LAST
+`goal.run` batch of the run, not the whole run** — every batch overwrites it
+and the supervisor plans once per milestone — so the chip reads `last plan`
+rather than `plan`, with the same sentence in `getRunReplay`'s doc and the
+store's. And a `/replay` or `/savepoints` fetch that FAILED is now drawn as a
+dashed warn chip carrying the reason, exactly as provenance's is; before this
+a server without `/replay` rendered identically to a run that planned nothing.
+
+The lane marker for a `planning_timed` with no `plan_created` after it was
+labelled `replan refused` and now reads **`no plan recorded after planning`**.
+The record cannot tell a refusal from a log that ended there — a killed run
+writes the same shape, and 9 of this project's 24 archived runs end on a plan
+line with nothing after it — so the label says what it sees and the actual
+refusal keeps being reported by the milestone's stuck reason, which knows it.
 
 For `run-1788696619-00325` the chips were filled with `mods not captured`
 (older provenance, predating the mods field) plus a

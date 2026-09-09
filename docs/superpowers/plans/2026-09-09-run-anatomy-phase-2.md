@@ -1095,3 +1095,27 @@ Format with `rustfmt --edition 2024 crates/core/src/record/lanes.rs`; message (q
 - **Parked Phase 1 items**: CursorBar clock and LaneBand denominator → T9; evidence per lane and the analysis fold-in are named as Phase 3 with the reason.
 - **Type consistency**: `Provenance`/`Savepoint` field names identical in Rust (T1/T5), TS (T6), store (T7), chips (T8); `replayCounts` shape identical in T7 and T8; `clock: TickScale` matches Phase 1's prop name.
 - **Constraint check**: no new files under `crates/*/tests/`; all cargo under `nix develop -c`; every wire change goes through the snapshot.
+
+---
+
+## Addenda landed during execution
+
+Deviations from the plan above, each ruled by the controller during the whole-branch
+review rather than planned here. Listed so the plan and the branch agree about what
+shipped.
+
+- **`MilestoneRibbon` reasons, and the stuck-reason line.** A segment carries why the
+  milestone is where it is, and `RunPage` shows the last planner refusal under the
+  headline — the fact that made `run-1788926478-07032`'s stuck milestone readable.
+- **Verdict denominators.** A verdict carries the count it was computed over, so
+  `roster-fed` is quotable rather than merely displayed.
+- **`refusedReplans` → the `planning-unanswered` marker.** The label retracts from
+  `replan refused` to `no plan recorded after planning`: the record cannot separate a
+  refusal from a log that ended there, and 9 of 24 archived runs end that way.
+- **The replay and savepoint error chips.** A `/replay` or `/savepoints` fetch that
+  failed is drawn with its reason, exactly as provenance's already was, instead of
+  rendering as "this run planned nothing" / "this run saved nothing".
+- **The replay-without-sink fix.** `emit_replay` returned early on a missing sink, so
+  `write_replay` was unreachable from every CLI path — which are precisely the paths
+  that record a run. T4 persisted the replay; this is what made the persistence
+  reachable outside the viewer.

@@ -50,6 +50,8 @@ mod oil_category_gate;
 mod ore_underfoot;
 #[path = "placement_occupancy.rs"]
 mod placement_occupancy;
+#[path = "replan_haul.rs"]
+mod replan_haul;
 #[path = "planning_work_ceilings.rs"]
 mod planning_work_ceilings;
 #[path = "product_index_live_capture.rs"]

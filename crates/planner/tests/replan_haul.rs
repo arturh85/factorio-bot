@@ -1,0 +1,213 @@
+//! A replan against the world `run-1788926478-07032` left standing.
+//!
+//! An offline plan from the t=0 dump cannot reach the replan path (see
+//! `docs/superpowers/notes/2026-09-09-offline-cannot-see-the-replan.md`), so
+//! this puts the run's own keyframe -- every non-resource entity the model
+//! held at tick 56,168, the tick the supervisor replanned and refused -- onto
+//! the t=0 dump, with the bots where `samples.jsonl` had them, and asks the
+//! planner the questions the run asked.
+//!
+//! The run ended `stuck` on
+//!
+//! ```text
+//! nothing can carry coal from the buffer at [32.5,-41.5] to the iron-chest
+//! at [27.5,-40.5]: no belt route, blocked by 1 tile(s): [30.5,-39.5]
+//! ```
+//!
+//! and the record shows that tile EMPTY in every keyframe. Reproduced here
+//! byte for byte on the first attempt, with nothing reserved at all: the
+//! buffer sits in a pocket the cell's own belts seal on the surface, the
+//! route out tunnels west, and the search's route stood on `[30.5, -39.5]`
+//! twice -- as a belt heading south and as the west-facing entry half of
+//! its own jump -- and named its own doubled tile as the obstacle. Fixed in
+//! `route_belt_with_tunnels`, which now repairs a self-meeting route.
+//!
+//! Like `planning_work_ceilings`, it needs `workspace/scripts/map.json` and
+//! says so loudly when it cannot run.
+
+use factorio_bot_core::factorio::world::FactorioSurface;
+use factorio_bot_core::types::{FactorioEntity, Position};
+use factorio_bot_planner::method::connect::connect_steps_reserving;
+use factorio_bot_planner::{
+    ActionKind, BotId, ExpansionCtx, Goal, PlanState, Step, expand, pick_chain_actor, registry_for,
+};
+use serde::Deserialize;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+#[derive(Deserialize)]
+struct Fixture {
+    entities: Vec<Standing>,
+    bots: Vec<Bot>,
+}
+
+#[derive(Deserialize)]
+struct Standing {
+    name: String,
+    position: Position,
+    direction: u8,
+}
+
+#[derive(Deserialize)]
+struct Bot {
+    id: u8,
+    position: Position,
+    inventory: std::collections::BTreeMap<String, u32>,
+}
+
+fn dump() -> Option<FactorioSurface> {
+    let path: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../workspace/scripts/map.json")
+        .canonicalize()
+        .ok()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    Some(factorio_bot_core::serde_json::from_str(&raw).expect("map.json is a world dump"))
+}
+
+fn fixture() -> Fixture {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/run-1788926478-07032-tick56168.json");
+    serde_json::from_str(&std::fs::read_to_string(path).expect("the fixture is in the tree"))
+        .expect("the fixture parses")
+}
+
+/// The t=0 dump with the run's standing entities and its bots where they
+/// were, as the replan saw them.
+fn standing_world() -> Option<(PlanState, Vec<BotId>)> {
+    let mut world = dump()?;
+    let fixture = fixture();
+    let globals = Arc::get_mut(&mut world.globals).expect("a freshly loaded dump is unshared");
+    for bot in &fixture.bots {
+        let mut player = globals
+            .players
+            .get_mut(&bot.id)
+            .expect("the dump knows the bot");
+        player.position = bot.position.clone();
+        player.main_inventory = bot.inventory.clone();
+    }
+    let bots: Vec<BotId> = fixture.bots.iter().map(|b| BotId(b.id)).collect();
+    let world = Arc::new(world);
+    let mut state = PlanState::from_world(world.clone(), &bots);
+    for standing in &fixture.entities {
+        let entity_type = world
+            .globals
+            .entity_prototypes
+            .get(&standing.name)
+            .map(|p| p.entity_type.clone())
+            .unwrap_or_default();
+        state.create_entity(FactorioEntity {
+            name: standing.name.clone(),
+            entity_type,
+            position: standing.position.clone(),
+            direction: standing.direction,
+            ..Default::default()
+        });
+    }
+    Some((state, bots))
+}
+
+fn absent() {
+    eprintln!(
+        "SKIPPED: workspace/scripts/map.json is not present, so the replan against the \
+         standing world was NOT checked. This is not a pass."
+    );
+}
+
+/// The run's goal, as `scripts/continuous_supply.lua` states it.
+fn goal() -> Goal {
+    Goal::All(vec![
+        Goal::Sustain {
+            item: "copper-plate".into(),
+            per_minute: 15,
+            window_ticks: 36_000,
+        },
+        Goal::Producing {
+            item: "automation-science-pack".into(),
+            per_minute: 6,
+        },
+    ])
+}
+
+/// The haul the run refused, asked of `connect` directly with nothing
+/// reserved -- the same call `method::sustain::feed` makes, and the one the
+/// refusal came from. It routes, and the route stands on every tile once.
+#[test]
+fn the_coal_haul_of_run_1788926478_07032_routes_out_of_its_pocket() {
+    let Some((state, bots)) = standing_world() else {
+        absent();
+        return;
+    };
+    let chain_actor = pick_chain_actor(&state, &bots).expect("the roster has a chain actor");
+    let buffer = state
+        .entity_at(&Position::new(32.5, -41.5))
+        .expect("the fed buffer stands");
+    let local = state
+        .entity_at(&Position::new(27.5, -40.5))
+        .expect("the local chest stands");
+    let mut ctx = ExpansionCtx::new(state.fork(), chain_actor);
+    let steps = connect_steps_reserving(
+        &mut ctx,
+        &buffer,
+        &local,
+        &"coal".into(),
+        "burner-inserter",
+        &[],
+    )
+    .unwrap_or_else(|refusal| panic!("the haul refuses again: {refusal}"));
+
+    let mut placed: Vec<String> = steps
+        .iter()
+        .filter_map(|step| match step {
+            Step::Act(action) => match &action.kind {
+                ActionKind::Place { entity } => Some(entity.position.to_string()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    let laid = placed.len();
+    placed.sort();
+    placed.dedup();
+    assert_eq!(
+        placed.len(),
+        laid,
+        "a tile holds one entity, so the haul places on every tile once: {placed:?}"
+    );
+    assert!(
+        steps.iter().any(|step| matches!(step, Step::Act(action)
+            if matches!(&action.kind, ActionKind::Place { entity }
+                if entity.name == "underground-belt"))),
+        "the pocket is sealed on the surface, so the haul tunnels out"
+    );
+}
+
+/// The whole replan. **This does not assert that it plans**: with the haul
+/// routed, the expansion goes on to the refusals already on record as open
+/// -- the plate cell's exit sealed by its own coal ring wider than a jump,
+/// and a replan that does not recognise its half-built supply link. What it
+/// asserts is that the refusal that killed the run is gone: whatever the
+/// planner says now, it does not name `[30.5, -39.5]`, and it does not
+/// refuse the haul.
+#[test]
+fn the_replan_of_run_1788926478_07032_no_longer_dies_on_one_empty_tile() {
+    let Some((state, bots)) = standing_world() else {
+        absent();
+        return;
+    };
+    let chain_actor = pick_chain_actor(&state, &bots).expect("the roster has a chain actor");
+    match expand(&[goal()], &state, &registry_for(&bots), chain_actor) {
+        Ok(net) => eprintln!("the replan plans: {} actions", net.len()),
+        Err(err) => {
+            let text = err.to_string();
+            eprintln!("the replan refuses further along, as recorded open: {text}");
+            assert!(
+                !text.contains("[30.5, -39.5]"),
+                "the run's refusal is back: {text}"
+            );
+            assert!(
+                !text.contains("carry coal from the buffer at [32.5, -41.5]"),
+                "the haul refuses again: {text}"
+            );
+        }
+    }
+}

@@ -541,3 +541,243 @@ fn a_single_obstacle_is_walked_round_not_tunnelled_under() {
         shape(&route)
     );
 }
+
+/// The pocket `run-1788926478-07032` refused out of, transcribed cell for
+/// cell from the grid `method::connect` handed the search at the moment of
+/// the replan (the window's cells within 20 x 20 of the haul, shifted by
+/// `(-20, +50)` so the start at `(10, 8)` is the record's `[30.5, -41.5]`
+/// and `(5, 9)` its `[25.5, -40.5]`). A two-wide corridor runs south along
+/// a one-tile belt column, sealed on every other side by the cell's own
+/// coal ring, with the destination on the column's far side. The only way
+/// out is a jump west across the column, and a jump is launched straight,
+/// so a run heading south must hook round to face west first. The hook
+/// that turns north lands its entry half on a tile the run already stands
+/// on; the hook that turns south is exactly as cheap and legal. The search
+/// used to return the first and then refuse, naming the doubled tile --
+/// empty ground -- as "blocked".
+///
+/// Transcribed rather than sketched because a sketch of the same corridor
+/// routed cleanly on the old search: which hook wins is a tie broken by cell
+/// order, and only the real grid breaks it the wrong way.
+fn sealed_corridor() -> Vec<bool> {
+    let mut grid = open_grid();
+    for (x, y) in [
+        (2, 0),
+        (3, 0),
+        (4, 0),
+        (5, 0),
+        (6, 0),
+        (14, 0),
+        (15, 0),
+        (16, 0),
+        (2, 1),
+        (3, 1),
+        (4, 1),
+        (5, 1),
+        (6, 1),
+        (7, 1),
+        (8, 1),
+        (9, 1),
+        (10, 1),
+        (11, 1),
+        (12, 1),
+        (14, 1),
+        (15, 1),
+        (16, 1),
+        (4, 2),
+        (5, 2),
+        (6, 2),
+        (7, 2),
+        (8, 2),
+        (12, 2),
+        (14, 2),
+        (15, 2),
+        (16, 2),
+        (4, 3),
+        (5, 3),
+        (6, 3),
+        (7, 3),
+        (8, 3),
+        (9, 3),
+        (12, 3),
+        (14, 3),
+        (15, 3),
+        (16, 3),
+        (4, 4),
+        (5, 4),
+        (6, 4),
+        (7, 4),
+        (8, 4),
+        (9, 4),
+        (10, 4),
+        (11, 4),
+        (12, 4),
+        (14, 4),
+        (15, 4),
+        (16, 4),
+        (4, 5),
+        (5, 5),
+        (6, 5),
+        (7, 5),
+        (9, 5),
+        (14, 5),
+        (15, 5),
+        (16, 5),
+        (4, 6),
+        (5, 6),
+        (6, 6),
+        (7, 6),
+        (9, 6),
+        (10, 6),
+        (11, 6),
+        (12, 6),
+        (14, 6),
+        (15, 6),
+        (16, 6),
+        (4, 7),
+        (5, 7),
+        (6, 7),
+        (7, 7),
+        (9, 7),
+        (12, 7),
+        (14, 7),
+        (15, 7),
+        (16, 7),
+        (5, 8),
+        (7, 8),
+        (9, 8),
+        (10, 8),
+        (11, 8),
+        (12, 8),
+        (13, 8),
+        (14, 8),
+        (15, 8),
+        (16, 8),
+        (6, 9),
+        (7, 9),
+        (8, 9),
+        (9, 9),
+        (11, 9),
+        (12, 9),
+        (15, 9),
+        (16, 9),
+        (7, 10),
+        (8, 10),
+        (9, 10),
+        (12, 10),
+        (13, 10),
+        (14, 10),
+        (15, 10),
+        (16, 10),
+        (7, 11),
+        (8, 11),
+        (9, 11),
+        (16, 11),
+        (9, 12),
+        (16, 12),
+        (9, 13),
+        (16, 13),
+        (9, 14),
+        (16, 14),
+        (9, 15),
+        (11, 15),
+        (16, 15),
+        (9, 16),
+        (16, 16),
+        (9, 17),
+        (10, 17),
+        (11, 17),
+        (12, 17),
+        (13, 17),
+        (14, 17),
+        (15, 17),
+        (16, 17),
+        (9, 18),
+        (11, 18),
+        (9, 19),
+        (11, 19),
+        (12, 19),
+        (15, 19),
+    ] {
+        block(&mut grid, x, y);
+    }
+    grid
+}
+
+#[test]
+fn a_run_that_would_meet_itself_is_repaired_rather_than_refused() {
+    let grid = sealed_corridor();
+    let route = route_belt(&grid, (0.0, 0.0), (10, 8), (5, 9), Some(5))
+        .expect("the column is one tile wide and a jump crosses it");
+
+    let mut cells: Vec<(i64, i64)> = route
+        .tiles
+        .iter()
+        .map(|t| (t.position.x().floor() as i64, t.position.y().floor() as i64))
+        .collect();
+    let laid = cells.len();
+    cells.sort_unstable();
+    cells.dedup();
+    assert_eq!(
+        cells.len(),
+        laid,
+        "a tile holds one entity, so no cell may appear twice: {:?}",
+        route
+            .tiles
+            .iter()
+            .map(|t| format!("{} {:?} {:?}", t.position, t.direction, t.kind))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        route
+            .tiles
+            .iter()
+            .any(|t| t.kind == TileKind::UndergroundEntry),
+        "the pocket is sealed on the surface, so the route tunnels"
+    );
+    for tile in route.tiles.iter().skip(1) {
+        let (x, y) = (
+            tile.position.x().floor() as usize,
+            tile.position.y().floor() as usize,
+        );
+        assert!(
+            !grid[cell_index(x, y)],
+            "the route stands on free ground only: {tile:?}"
+        );
+    }
+}
+
+#[test]
+fn a_refusal_names_the_map_and_never_the_route_itself() {
+    // The same corridor with the ground west of the column walled off
+    // full-height, except one cell on the direct line -- so the widest run
+    // on that line is under the reach and the search falls through to
+    // `NoPath` rather than `SpanTooLong`. Nothing routes: a jump can surface
+    // in the gap and may then only step straight, into the wall. The tiles
+    // named are obstacles on the grid, never the search's own cells.
+    let mut grid = sealed_corridor();
+    for x in 4..=8 {
+        for y in 0..GRID {
+            if (x, y) != (6, 8) {
+                block(&mut grid, x, y);
+            }
+        }
+    }
+    let err = route_belt(&grid, (0.0, 0.0), (10, 8), (2, 8), Some(5))
+        .expect_err("the wall west of the column has no way through");
+    match err {
+        RouteError::SpanTooLong { needed, max } => {
+            panic!("the gap keeps the direct line's widest run under the reach: {needed} > {max}")
+        }
+        RouteError::NoPath { blocked } => {
+            assert!(!blocked.is_empty(), "the frontier touched the wall");
+            for tile in &blocked {
+                let (x, y) = (tile.x().floor() as usize, tile.y().floor() as usize);
+                assert!(
+                    grid[cell_index(x, y)],
+                    "{tile} is named as blocked and is free ground"
+                );
+            }
+        }
+    }
+}

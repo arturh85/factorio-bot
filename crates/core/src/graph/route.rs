@@ -238,6 +238,34 @@ pub fn route_belt(
 ///
 /// Neither rule changes a surface-only search: both only gate moves that
 /// involve a jump.
+///
+/// # A route that meets itself is repaired, not refused
+///
+/// The state space is `(cell, facing, surfaced)`, so A* is free to return to
+/// a cell it already stands on with a different facing -- and with a jump on
+/// offer it will, because a jump is only launched straight: a run that
+/// needs to dive west out of a corridor it entered heading south turns a
+/// three-tile hook to arrive facing west, and the hook that turns back
+/// north lands its entry half on a tile the run already laid a belt on.
+/// Measured on `run-1788926478-07032`: the haul out of a sealed coal pocket
+/// came back as ten tiles with `[30.5, -39.5]` both a south-facing belt and
+/// a west-facing entry, and the refusal named that one tile as "blocked" --
+/// a tile the record showed EMPTY, and one the planner's own route was
+/// standing on twice. The replan died on it with eighty steps abandoned.
+///
+/// So a route whose own tiles collide ([`self_crossing`]) is not the answer
+/// and not a refusal either. **The move that doubled the tile is forbidden
+/// and the search runs again.** Not the tile: closing the cell was tried
+/// first and moved the hook one row south per round, five rounds without
+/// converging, because the hook that turns *south* instead is exactly as
+/// cheap and only loses the tie -- forbidding the one step that lands on
+/// the doubled cell is what lets the tied legal hook win. Each round
+/// forbids a move the last route took, so every round's route is new and
+/// [`SELF_CROSSING_REPAIRS`] bounds the work. When the rounds run out, or
+/// a round finds nothing at all, the refusal names the obstacles the last
+/// frontier touched on the caller's grid -- never the route's own cells,
+/// which are not obstacles and send a reader looking for one that is not
+/// there.
 pub fn route_belt_with_tunnels(
     blocked: &[bool],
     tunnels: &[u8],
@@ -246,8 +274,117 @@ pub fn route_belt_with_tunnels(
     to: (usize, usize),
     max_underground_distance: Option<u8>,
 ) -> Result<Route, RouteError> {
-    let max_underground = max_underground_distance;
     debug_assert_eq!(tunnels.len(), GRID * GRID, "one tunnel byte per cell");
+    // Empty on the first round, so a route that never meets itself -- every
+    // route this function returned before repairs existed -- is the first
+    // search's answer, byte-identical.
+    let mut forbidden: Vec<Move> = Vec::new();
+    let mut reached: Vec<bool> = vec![false; GRID * GRID];
+    for _ in 0..=SELF_CROSSING_REPAIRS {
+        let (found, frontier) = search_once(
+            blocked,
+            tunnels,
+            origin,
+            from,
+            to,
+            max_underground_distance,
+            &forbidden,
+        );
+        reached = frontier;
+        let Some(route) = found else {
+            break;
+        };
+        let Some(hits) = self_crossing(&route, origin) else {
+            return Ok(route);
+        };
+        let before = forbidden.len();
+        forbidden.extend(doubling_moves(&route, origin, &hits));
+        if forbidden.len() == before {
+            // Nothing new to forbid, so the next round would be this one
+            // again. Unreachable while `doubling_moves` names a move for
+            // every hit; stated so a change there cannot loop here.
+            break;
+        }
+    }
+
+    if let Some(max) = max_underground_distance {
+        // A wall `w` tiles wide needs a pair `w + 1` apart, in the
+        // prototype's unit.
+        let needed = widest_blocked_run(blocked, from, to) + 1;
+        if needed > u32::from(max) {
+            return Err(RouteError::SpanTooLong { needed, max });
+        }
+    }
+
+    Err(RouteError::NoPath {
+        blocked: blocking_tiles(blocked, origin, &reached),
+    })
+}
+
+/// How many times a self-crossing route is repaired and re-searched before
+/// the search gives up. Each round forbids a move the last route took, so
+/// this is a bound on work, not a condition for termination; the measured
+/// case needs one round, and eight keeps a pathological grid from spending a
+/// plan's budget here.
+const SELF_CROSSING_REPAIRS: usize = 8;
+
+/// A step or jump the search may not take: leaving `cell` in `direction`.
+type Move = ((usize, usize), Direction);
+
+/// The moves that put a route onto a cell it already uses: for every hit
+/// cell, each step or jump in `route` that lands on it after its first use,
+/// and each jump that runs beneath it. Deduplicated, in route order.
+fn doubling_moves(route: &Route, origin: (f64, f64), hits: &[(usize, usize)]) -> Vec<Move> {
+    let cell = |p: &Position| -> (usize, usize) {
+        let x = ((p.x() - origin.0) / crate::graph::enclosure::CELL) as usize;
+        let y = ((p.y() - origin.1) / crate::graph::enclosure::CELL) as usize;
+        (x, y)
+    };
+    let mut out: Vec<Move> = Vec::new();
+    let mut push = |m: Move| {
+        if !out.iter().any(|o| o.0 == m.0 && o.1 == m.1) {
+            out.push(m);
+        }
+    };
+    for hit in hits {
+        let mut seen = false;
+        for (i, tile) in route.tiles.iter().enumerate() {
+            if cell(&tile.position) != *hit {
+                continue;
+            }
+            if seen && i > 0 {
+                push((cell(&route.tiles[i - 1].position), tile.direction));
+            }
+            seen = true;
+        }
+        for (entry, exit) in route.underground_pairs() {
+            let spans = tunnel_cells(&route.tiles[entry].position, &route.tiles[exit].position)
+                .iter()
+                .any(|p| cell(p) == *hit);
+            if spans {
+                push((
+                    cell(&route.tiles[entry].position),
+                    route.tiles[entry].direction,
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// One A* pass over `blocked`: the cheapest route in the state space, which
+/// may meet itself -- [`route_belt_with_tunnels`] checks -- or `None`, and
+/// beside it every cell the search visited, for the refusal's honest naming.
+fn search_once(
+    blocked: &[bool],
+    tunnels: &[u8],
+    origin: (f64, f64),
+    from: (usize, usize),
+    to: (usize, usize),
+    max_underground_distance: Option<u8>,
+    forbidden: &[Move],
+) -> (Option<Route>, Vec<bool>) {
+    let max_underground = max_underground_distance;
     let mut best: Vec<u32> = vec![u32::MAX; GRID * GRID * 8];
     let mut came: Vec<Option<Predecessor>> = vec![None; GRID * GRID * 8];
     let mut heap = BinaryHeap::new();
@@ -271,23 +408,18 @@ pub fn route_belt_with_tunnels(
         reached[cell_index(node.cell.0, node.cell.1)] = true;
         if node.cell == to {
             let route = reconstruct(&came, origin, from, to, node.facing, node.surfaced);
-            return match self_crossing(&route, origin) {
-                None => Ok(route),
-                // The tiles named are the ones this route's own tunnel
-                // reserved and then wanted again on the surface (or beneath
-                // a second same-axis tunnel). A refusal rather than a
-                // repair: `pipe.rs` matches this enum exhaustively, so a
-                // new variant is not free, and the case is a maze-shaped
-                // rarity -- a jump lands only where a wall forces it and
-                // the search seldom returns to the far side of that wall.
-                Some(blocked) => Err(RouteError::NoPath { blocked }),
-            };
+            return (Some(route), reached);
         }
         let slot = state_index(node.cell, node.facing, node.surfaced);
         if node.cost > best[slot] {
             continue;
         }
         for (dir, (dx, dy)) in DIRECTIONS {
+            // A move a repair round forbade: neither the step nor the jump
+            // out of this cell in this direction is offered.
+            if forbidden.iter().any(|(c, d)| *c == node.cell && *d == dir) {
+                continue;
+            }
             // The normal move and the underground move are independent
             // options out of `node.cell` in this direction, not a fallback
             // chain: a blocked (or off-grid) immediate neighbour must not
@@ -407,18 +539,7 @@ pub fn route_belt_with_tunnels(
         }
     }
 
-    if let Some(max) = max_underground {
-        // A wall `w` tiles wide needs a pair `w + 1` apart, in the
-        // prototype's unit.
-        let needed = widest_blocked_run(blocked, from, to) + 1;
-        if needed > u32::from(max) {
-            return Err(RouteError::SpanTooLong { needed, max });
-        }
-    }
-
-    Err(RouteError::NoPath {
-        blocked: blocking_tiles(blocked, origin, &reached),
-    })
+    (None, reached)
 }
 
 /// The longest run of consecutive blocked cells on the straight (Bresenham)
@@ -611,10 +732,20 @@ pub fn tunnel_cells(entry: &Position, exit: &Position) -> Vec<Position> {
         .collect()
 }
 
-/// The tiles a route reserves for a tunnel and then wants again: a surface
-/// tile of the same route lying beneath one of its own tunnels, or two of
-/// its own same-axis tunnels sharing ground. `None` when the route is clean.
-fn self_crossing(route: &Route, origin: (f64, f64)) -> Option<Vec<Position>> {
+/// The cells a route wants twice: a tile it stands on more than once (the
+/// state space lets A* return to a cell with a different facing, and a tile
+/// holds one entity), a surface tile of its own lying beneath one of its own
+/// tunnels, or two of its own same-axis tunnels sharing ground. `None` when
+/// the route is clean.
+///
+/// The doubled-tile case is stated on its own since 2026-09-09. The tunnel
+/// cases were what this check was written for, and they happened to catch
+/// the measured instance -- a belt and the entry half of a pair on one cell
+/// -- only because [`tunnel_cells`] counts the halves themselves; a route
+/// doubling a tile some other way would have passed. A surface-only search
+/// cannot double a tile (a loop is never cheaper), so every hit here
+/// involves a jump.
+fn self_crossing(route: &Route, origin: (f64, f64)) -> Option<Vec<(usize, usize)>> {
     let mut reserved: Vec<(usize, usize)> = Vec::new();
     let mut hits: Vec<(usize, usize)> = Vec::new();
     let cell = |p: &Position| -> (usize, usize) {
@@ -622,6 +753,14 @@ fn self_crossing(route: &Route, origin: (f64, f64)) -> Option<Vec<Position>> {
         let y = ((p.y() - origin.1) / crate::graph::enclosure::CELL) as usize;
         (x, y)
     };
+    let mut stood: Vec<(usize, usize)> = Vec::new();
+    for tile in &route.tiles {
+        let c = cell(&tile.position);
+        if stood.contains(&c) {
+            hits.push(c);
+        }
+        stood.push(c);
+    }
     let pairs = route.underground_pairs();
     let mut axes: Vec<((usize, usize), u8)> = Vec::new();
     for (entry, exit) in &pairs {
@@ -649,9 +788,5 @@ fn self_crossing(route: &Route, origin: (f64, f64)) -> Option<Vec<Position>> {
     }
     hits.sort_unstable();
     hits.dedup();
-    Some(
-        hits.into_iter()
-            .map(|c| cell_to_position(origin, c))
-            .collect(),
-    )
+    Some(hits)
 }

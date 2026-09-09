@@ -307,6 +307,23 @@ pub fn route_belt_with_tunnels(
         }
     }
 
+    // A destination with nothing free beside it is sealed on ITS side, and
+    // the search just proved no jump lands on it either. Name its walls,
+    // never a span: the span below is read off the straight line from
+    // `from`, which says nothing about which end is shut. Three live runs
+    // read "an underground span of 7 tiles" as a wall round the source
+    // (`docs/superpowers/notes/2026-09-09-belt-banding-and-reachability-live.md`)
+    // when it was the sink's own four neighbours, one of them water.
+    let walls = walls_around(blocked, to);
+    if walls.len() == DIRECTIONS.len() {
+        return Err(RouteError::NoPath {
+            blocked: walls
+                .into_iter()
+                .map(|c| cell_to_position(origin, c))
+                .collect(),
+        });
+    }
+
     if let Some(max) = max_underground_distance {
         // A wall `w` tiles wide needs a pair `w + 1` apart, in the
         // prototype's unit.
@@ -624,6 +641,22 @@ fn heuristic(a: (usize, usize), b: (usize, usize)) -> u32 {
 /// empty result is honest here: it means the search reached the map edge
 /// without ever bordering a blocked cell, i.e. nothing on the grid stopped
 /// it.
+/// The orthogonal neighbours of `cell` that are blocked or off the grid
+/// (an edge counts as a wall: nothing enters from beyond the window). Four
+/// of them means no belt can ever be laid into `cell` on the surface.
+fn walls_around(blocked: &[bool], cell: (usize, usize)) -> Vec<(usize, usize)> {
+    DIRECTIONS
+        .iter()
+        .filter_map(|(_, (dx, dy))| match step(cell, *dx, *dy) {
+            Some(n) if blocked[cell_index(n.0, n.1)] => Some(n),
+            Some(_) => None,
+            // Off the grid: name the cell itself rather than invent a
+            // position outside the window.
+            None => Some(cell),
+        })
+        .collect()
+}
+
 fn blocking_tiles(blocked: &[bool], origin: (f64, f64), reached: &[bool]) -> Vec<Position> {
     let mut cells: Vec<(usize, usize)> = Vec::new();
     for y in 0..GRID {

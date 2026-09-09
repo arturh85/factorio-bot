@@ -54,6 +54,8 @@ mod placement_occupancy;
 mod replan_haul;
 #[path = "replan_on_standing_world.rs"]
 mod replan_on_standing_world;
+#[path = "replan_sealed_supply.rs"]
+mod replan_sealed_supply;
 #[path = "planning_work_ceilings.rs"]
 mod planning_work_ceilings;
 #[path = "product_index_live_capture.rs"]

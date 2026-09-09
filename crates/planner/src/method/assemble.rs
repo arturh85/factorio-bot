@@ -1357,7 +1357,64 @@ fn works(state: &PlanState, mut cell: Cell, spec: &AssemblySpec) -> Option<Cell>
         }
         crate::enclosure::EnclosurePrevention::Refuse => return None,
     }
+    if !supply_chest_is_reachable(&trial, &cell) {
+        return None;
+    }
     Some(cell)
+}
+
+/// Can a belt be laid INTO this cell's supply chest from open ground?
+///
+/// The supply chest is the one part of a cell that some other method's run
+/// has to reach -- `supply_link_steps` lays a belt into it from a cell that
+/// makes its ingredient -- and every other check here is about the cell's
+/// own ground. Measured in `run-1788936524-99544` (seed 31337, replan at
+/// tick 62,222): the science cell was sited on the shore beside the standing
+/// plant, its supply chest's three free-looking sides were the plant's pipe,
+/// water and its own inserter, and the one side left opened onto a two-tile
+/// pocket. The link refused, the run was `stuck`, and the refusal said
+/// "an underground span of 7 tiles" about a wall that was never on the
+/// source's side. The same question `method::sustain::choose_exit` asks of
+/// a plate chest's exit, asked of the chest a link arrives at: one side must
+/// have the arm's tile and the belt's tile free on the trial (the cell's own
+/// parts stand on it), and the belt's tile must reach the window's edge on
+/// the surface.
+///
+/// Asked of the trial with the cell standing rather than of the bare state,
+/// so a side the cell's own inserter takes is not counted. On clean ground
+/// every side qualifies and the search is unchanged; the four canonical
+/// baselines and the science bundle are byte-identical with this in place.
+fn supply_chest_is_reachable(trial: &PlanState, cell: &Cell) -> bool {
+    let Some(chest) = cell.at(Role::SupplyChest) else {
+        return true;
+    };
+    [(0., -1.), (1., 0.), (0., 1.), (-1., 0.)]
+        .into_iter()
+        .any(|(dx, dy)| {
+            let arm = Position::new(chest.position.x() + dx, chest.position.y() + dy);
+            let belt = Position::new(chest.position.x() + 2. * dx, chest.position.y() + 2. * dy);
+            if !trial.is_area_free(INSERTER, &arm) || !trial.is_area_free("transport-belt", &belt) {
+                return false;
+            }
+            // With the arm STANDING: the belt tile's way out must not be
+            // the tile the arm will occupy. In `run-1788936524-99544` the
+            // belt tile was the one-tile gap between the engine and the
+            // boiler, and its only free neighbour was the arm's tile.
+            let Some(area) = trial.collision_area_facing(INSERTER, &arm, Direction::North) else {
+                return false;
+            };
+            let mut with_arm = trial.fork();
+            with_arm.create_entity(FactorioEntity {
+                name: INSERTER.into(),
+                entity_type: "inserter".into(),
+                position: arm,
+                direction: 0,
+                bounding_box: area,
+                ..Default::default()
+            });
+            let ctx = crate::method::ExpansionCtx::new(with_arm, crate::ids::BotId(0));
+            crate::method::connect::belt_reaches_open_ground(&ctx, &belt)
+        })
 }
 
 /// Put `cell` into `state` the way the plan will: its missing parts created,

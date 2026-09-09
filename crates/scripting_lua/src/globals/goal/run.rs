@@ -933,7 +933,18 @@ async fn beat_batch_progress(
         // The disclosure counter, read once so the three numbers in the event
         // describe the same instant. See `EventKind::BatchProgress`.
         let ground = act.ground_generated();
-        live.record(EventKind::BatchProgress {
+        // Asked of the game, not read off the last command. The beat exists
+        // for the stretches where nothing is being sent -- a research wait
+        // is fifty-millisecond polls of an in-memory table for up to sixteen
+        // minutes -- and `LiveRecord::record`'s `last_tick` cannot move then.
+        // `run-1788964673-32436` wrote thirty-one beats stamped with one
+        // dispatch tick while the game ran 572,000 ticks, and the analyser
+        // read a frozen stamp as a frozen game. One round trip per thirty
+        // seconds is what `run::wait_out_lag` already spends for the same
+        // reason. `None` -- no clock, or an unanswered round trip -- falls
+        // back to the old stamp rather than dropping the beat.
+        let observed_tick = act.game_tick().await.ok().flatten();
+        let event = EventKind::BatchProgress {
             elapsed_ms,
             total: snap.total,
             dispatched: snap.dispatched,
@@ -952,7 +963,11 @@ async fn beat_batch_progress(
             ground_generate_calls: u32::try_from(ground.0).unwrap_or(u32::MAX),
             ground_generated_chunks: u32::try_from(ground.1).unwrap_or(u32::MAX),
             ground_generate_failures: u32::try_from(ground.2).unwrap_or(u32::MAX),
-        });
+        };
+        match observed_tick {
+            Some(tick) => live.record_at(tick, event),
+            None => live.record(event),
+        };
     }
 }
 
@@ -3037,6 +3052,53 @@ mod tests {
         assert!(
             beat["elapsed_ms"].as_u64().unwrap_or(0) >= 30_000,
             "elapsed_ms is wall clock since the batch began: {beat}"
+        );
+
+        gate_tx.send(true).expect("gate has a receiver");
+        join.await.expect("the run's task finished");
+    }
+
+    /// **A heartbeat's tick is the game's clock, not the last command's.**
+    ///
+    /// `run-1788964673-32436`: one research action in flight, nothing sent
+    /// for sixteen minutes, and thirty-one consecutive beats stamped with
+    /// the dispatch tick while the game ran 572,000 ticks. The analyser
+    /// read the frozen stamp as a frozen game -- `0 tps for 990 s`, `84 of
+    /// 600 tps, STARVED` -- and a note went out about a stall that never
+    /// happened. Here the stub has a clock the batch never advances (the
+    /// gate is shut, so no dispatch moves it) while the recorder's own
+    /// `last_tick` is 0; the beat must carry the clock's reading.
+    #[tokio::test(start_paused = true)]
+    async fn a_heartbeat_is_stamped_with_the_games_clock_not_the_last_command() {
+        let (live, _tmp, run_dir) = live_record();
+        let (gate_tx, gate_rx) = watch::channel(false);
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+        let stub = StubActuator {
+            entered: Some(entered_tx),
+            gate: Some(gate_rx),
+            ..StubActuator::new(Failure::Never).with_clock()
+        };
+        let (net, sched) = mining_plan();
+        let (_run, join) = spawn(
+            Arc::new(stub),
+            sched,
+            net,
+            ExecutionLog::default(),
+            None,
+            None,
+            Some(live),
+        );
+        entered_rx.recv().await.expect("an action was dispatched");
+        factorio_bot_core::tokio::time::sleep(BATCH_PROGRESS_INTERVAL + Duration::from_secs(5))
+            .await;
+
+        let beats = batch_progress_lines(&run_dir);
+        let beat = beats.first().expect("one heartbeat");
+        let tick = beat["tick"].as_u64().expect("a beat carries a tick");
+        assert!(
+            tick >= STUB_CLOCK_BASE,
+            "the beat is stamped with the clock the actuator answered ({STUB_CLOCK_BASE}+), \
+             not with the recorder's last-sent tick (0): {beat}"
         );
 
         gate_tx.send(true).expect("gate has a receiver");

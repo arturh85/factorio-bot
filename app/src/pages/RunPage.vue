@@ -12,7 +12,6 @@ import {useRunsStore} from '@/store/runsStore';
 import {compareSplits, formatTicks, formatWhen, startedUnixOf} from '@/lib/runTimeline';
 import {rateItems} from '@/lib/runRates';
 import {headline} from '@/lib/runHeadline';
-import {lagTicks} from '@/lib/runCoverage';
 import {machineRows, positionKey} from '@/lib/machineTimeline';
 import BandFrame from '@/components/run/BandFrame.vue';
 import TickAxis from '@/components/run/TickAxis.vue';
@@ -75,7 +74,6 @@ const sentence = computed(() => {
     // learn those marks are not `just analyse`'s.
     return windowIsFallback.value ? `no events recorded — window taken from the drawn axis · ${base}` : base;
 });
-const lag = computed(() => (win.value ? lagTicks(win.value.hi, store.samples) : null));
 const deltas = computed(() => store.reference === null ? null
     : new Map(compareSplits(store.detail?.splits ?? [], store.reference.splits).map((r) => [r.goal, r])));
 /**
@@ -113,7 +111,9 @@ const LEGEND = [
            read as "no events recorded", which is what an empty `sentence`
            would otherwise say. -->
       <p v-if="store.eventsError" class="px-3 py-2 text-sm text-warn-dark">{{ store.eventsError }}</p>
-      <RunHeadline v-else :summary="store.detail.summary" :provenance="null" :lag-ticks="lag" :headline="sentence" :roster="store.laneBotIds"/>
+      <RunHeadline v-else :summary="store.detail.summary" :provenance="store.provenance" :provenance-error="store.provenanceError"
+                   :lag-ticks="store.sampleLag" :headline="sentence" :roster="store.laneBotIds"
+                   :replay-counts="store.replayCounts" :savepoints="store.savepoints"/>
       <p class="px-5 py-1 text-xs text-ink-muted">
         {{ formatWhen(startedUnixOf(store.detail.summary)) }} ·
         <router-link :to="`/runs/${id}/analysis`" class="underline">overrun and divergence tables</router-link>

@@ -81,6 +81,40 @@ async function mountPage() {
 }
 
 describe('RunPage', () => {
+    it('reads the seed chip off store.provenance once it loads', async () => {
+        const w = await mountPage();
+        const store = useRunsStore();
+        store.provenance = {
+            schema: 1, run_id: RUN_ID, started_unix: 1788696619, started_tick: 0,
+            seed: '31337', map_exchange_string: null, map: null, factorio: '2.1.17',
+            mods: {base: '2.1.17', BotBridge: '0.0.1'}, git: null, profile: 'release',
+            roster_requested: [1, 2, 3, 4], workspace: null, resumed_from: null,
+            bot_mode: 'clients', game_speed: 1, peaceful: null
+        };
+        await flushPromises();
+        expect(w.get('[data-chip="seed"]').text()).toContain('31337');
+    });
+
+    it('flags the plan chip truncated once the replay carries an abandoned step', async () => {
+        const w = await mountPage();
+        const store = useRunsStore();
+        store.replay = {
+            planned_makespan: 10,
+            refused: null,
+            unmatched_walks: [],
+            steps: [{
+                index: 0, bot: 1, bot_step_index: 0, what: {kind: 'act', action: 1, label: 'x'},
+                planned_start_tick: 0, planned_end_tick: 1, observed_start_tick: null, observed_end_tick: null,
+                status: 'Abandoned', attempt_number: null, evidence: {kind: 'believed', why: 'predecessor failed'}, error: 'x'
+            }]
+        };
+        await flushPromises();
+        const plan = w.get('[data-chip="plan"]');
+        expect(plan.attributes('data-state')).toBe('truncated');
+        expect(plan.text()).toContain('1 abandoned');
+    });
+
+
     it('reads the headline and the milestone ribbon off ONE clock', async () => {
         const w = await mountPage();
         const store = useRunsStore();

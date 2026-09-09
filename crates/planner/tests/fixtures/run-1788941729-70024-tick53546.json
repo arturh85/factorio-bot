@@ -1,0 +1,1558 @@
+{
+  "run": "run-1788941729-70024",
+  "keyframe_tick": 53546,
+  "bots_sample_tick": 53520,
+  "divergences": 0,
+  "entities": [
+    {
+      "name": "stone-furnace",
+      "position": {
+        "x": -14.0,
+        "y": -13.0
+      },
+      "direction": 0
+    },
+    {
+      "name": "stone-furnace",
+      "position": {
+        "x": -17.0,
+        "y": -14.0
+      },
+      "direction": 0
+    },
+    {
+      "name": "stone-furnace",
+      "position": {
+        "x": -10.0,
+        "y": -21.0
+      },
+      "direction": 0
+    },
+    {
+      "name": "burner-mining-drill",
+      "position": {
+        "x": -9.0,
+        "y": -24.0
+      },
+      "direction": 4
+    },
+    {
+      "name": "stone-furnace",
+      "position": {
+        "x": -7.0,
+        "y": -24.0
+      },
+      "direction": 0
+    },
+    {
+      "name": "wooden-chest",
+      "position": {
+        "x": -10.5,
+        "y": -13.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "stone-furnace",
+      "position": {
+        "x": -10.0,
+        "y": -17.0
+      },
+      "direction": 0
+    },
+    {
+      "name": "stone-furnace",
+      "position": {
+        "x": -10.0,
+        "y": -15.0
+      },
+      "direction": 0
+    },
+    {
+      "name": "stone-furnace",
+      "position": {
+        "x": -9.0,
+        "y": -13.0
+      },
+      "direction": 0
+    },
+    {
+      "name": "stone-furnace",
+      "position": {
+        "x": 22.0,
+        "y": -51.0
+      },
+      "direction": 0
+    },
+    {
+      "name": "iron-chest",
+      "position": {
+        "x": 16.5,
+        "y": -26.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "stone-furnace",
+      "position": {
+        "x": 27.0,
+        "y": -46.0
+      },
+      "direction": 0
+    },
+    {
+      "name": "wooden-chest",
+      "position": {
+        "x": 20.5,
+        "y": -53.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "stone-furnace",
+      "position": {
+        "x": -26.0,
+        "y": -13.0
+      },
+      "direction": 0
+    },
+    {
+      "name": "stone-furnace",
+      "position": {
+        "x": 23.0,
+        "y": -48.0
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 28.5,
+        "y": -24.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -24.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -25.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -26.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -27.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -28.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -29.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "burner-inserter",
+      "position": {
+        "x": 16.5,
+        "y": -25.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "burner-mining-drill",
+      "position": {
+        "x": 16.0,
+        "y": -28.0
+      },
+      "direction": 8
+    },
+    {
+      "name": "burner-inserter",
+      "position": {
+        "x": 17.5,
+        "y": -26.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -26.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -27.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -28.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -29.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -30.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 17.5,
+        "y": -30.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 16.5,
+        "y": -30.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "burner-inserter",
+      "position": {
+        "x": 15.5,
+        "y": -29.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 15.5,
+        "y": -30.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "burner-inserter",
+      "position": {
+        "x": 32.5,
+        "y": -42.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "burner-inserter",
+      "position": {
+        "x": 28.5,
+        "y": -46.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "burner-mining-drill",
+      "position": {
+        "x": 27.0,
+        "y": -48.0
+      },
+      "direction": 8
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -34.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -30.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -31.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -32.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -33.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "stone-furnace",
+      "position": {
+        "x": 19.0,
+        "y": -56.0
+      },
+      "direction": 0
+    },
+    {
+      "name": "iron-chest",
+      "position": {
+        "x": 32.5,
+        "y": -41.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 16.5,
+        "y": -24.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 17.5,
+        "y": -24.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -24.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 19.5,
+        "y": -24.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 20.5,
+        "y": -24.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 21.5,
+        "y": -24.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 22.5,
+        "y": -24.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 23.5,
+        "y": -24.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 26.5,
+        "y": -24.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 27.5,
+        "y": -24.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "burner-inserter",
+      "position": {
+        "x": 18.5,
+        "y": -31.5
+      },
+      "direction": 8
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 25.5,
+        "y": -24.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 24.5,
+        "y": -24.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "iron-chest",
+      "position": {
+        "x": 29.5,
+        "y": -46.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "burner-inserter",
+      "position": {
+        "x": 28.5,
+        "y": -47.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "stone-furnace",
+      "position": {
+        "x": 34.0,
+        "y": -48.0
+      },
+      "direction": 0
+    },
+    {
+      "name": "burner-inserter",
+      "position": {
+        "x": 33.5,
+        "y": -41.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "burner-inserter",
+      "position": {
+        "x": 25.5,
+        "y": -48.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "small-electric-pole",
+      "position": {
+        "x": 33.5,
+        "y": -28.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -32.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -33.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -34.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -35.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -36.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -37.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -38.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -39.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -40.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -41.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -42.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -43.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -44.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -45.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -46.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "lab",
+      "position": {
+        "x": 34.5,
+        "y": -24.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "burner-inserter",
+      "position": {
+        "x": 32.5,
+        "y": -40.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "burner-inserter",
+      "position": {
+        "x": 28.5,
+        "y": -45.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 32.5,
+        "y": -39.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 33.5,
+        "y": -39.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 34.5,
+        "y": -39.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 35.5,
+        "y": -39.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 35.5,
+        "y": -40.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 35.5,
+        "y": -41.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 35.5,
+        "y": -42.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 35.5,
+        "y": -43.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 35.5,
+        "y": -44.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 35.5,
+        "y": -45.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 34.5,
+        "y": -45.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 33.5,
+        "y": -45.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 32.5,
+        "y": -45.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 31.5,
+        "y": -45.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 30.5,
+        "y": -45.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -45.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -38.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -35.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -36.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -37.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -39.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -40.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -41.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -42.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -43.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 30.5,
+        "y": -43.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 31.5,
+        "y": -43.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 32.5,
+        "y": -43.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -47.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -48.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 18.5,
+        "y": -49.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 19.5,
+        "y": -49.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 20.5,
+        "y": -49.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 21.5,
+        "y": -49.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 22.5,
+        "y": -49.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 23.5,
+        "y": -49.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 24.5,
+        "y": -49.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 25.5,
+        "y": -49.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 26.5,
+        "y": -49.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 27.5,
+        "y": -49.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 28.5,
+        "y": -49.5
+      },
+      "direction": 8
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 28.5,
+        "y": -48.5
+      },
+      "direction": 8
+    },
+    {
+      "name": "inserter",
+      "position": {
+        "x": 31.5,
+        "y": -29.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "inserter",
+      "position": {
+        "x": 35.5,
+        "y": -29.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "inserter",
+      "position": {
+        "x": 33.5,
+        "y": -27.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "inserter",
+      "position": {
+        "x": 32.5,
+        "y": -29.5
+      },
+      "direction": 8
+    },
+    {
+      "name": "pipe",
+      "position": {
+        "x": 42.5,
+        "y": -23.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "offshore-pump",
+      "position": {
+        "x": 45.5,
+        "y": -26.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "pipe",
+      "position": {
+        "x": 44.5,
+        "y": -26.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "pipe",
+      "position": {
+        "x": 44.5,
+        "y": -25.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "boiler",
+      "position": {
+        "x": 44.0,
+        "y": -23.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 34.5,
+        "y": -41.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 34.5,
+        "y": -42.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 34.5,
+        "y": -43.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 34.5,
+        "y": -44.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 33.5,
+        "y": -44.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 32.5,
+        "y": -44.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 31.5,
+        "y": -44.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 30.5,
+        "y": -44.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 29.5,
+        "y": -44.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 28.5,
+        "y": -44.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 27.5,
+        "y": -44.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 26.5,
+        "y": -44.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 25.5,
+        "y": -44.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 24.5,
+        "y": -44.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 24.5,
+        "y": -45.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 24.5,
+        "y": -46.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 24.5,
+        "y": -47.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 24.5,
+        "y": -48.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "iron-chest",
+      "position": {
+        "x": 31.5,
+        "y": -30.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "iron-chest",
+      "position": {
+        "x": 35.5,
+        "y": -30.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "iron-chest",
+      "position": {
+        "x": 32.5,
+        "y": -30.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "stone-furnace",
+      "position": {
+        "x": 20.0,
+        "y": -52.0
+      },
+      "direction": 0
+    },
+    {
+      "name": "small-electric-pole",
+      "position": {
+        "x": 31.5,
+        "y": -34.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "small-electric-pole",
+      "position": {
+        "x": 31.5,
+        "y": -40.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "small-electric-pole",
+      "position": {
+        "x": 29.5,
+        "y": -47.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "small-electric-pole",
+      "position": {
+        "x": 30.5,
+        "y": -32.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "steam-engine",
+      "position": {
+        "x": 39.5,
+        "y": -23.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "inserter",
+      "position": {
+        "x": 30.5,
+        "y": -46.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "inserter",
+      "position": {
+        "x": 31.5,
+        "y": -31.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 31.5,
+        "y": -32.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 36.5,
+        "y": -38.5
+      },
+      "direction": 8
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 36.5,
+        "y": -37.5
+      },
+      "direction": 8
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 36.5,
+        "y": -36.5
+      },
+      "direction": 8
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 36.5,
+        "y": -35.5
+      },
+      "direction": 8
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 36.5,
+        "y": -34.5
+      },
+      "direction": 8
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 36.5,
+        "y": -33.5
+      },
+      "direction": 8
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 36.5,
+        "y": -32.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 35.5,
+        "y": -32.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 34.5,
+        "y": -32.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 33.5,
+        "y": -32.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 32.5,
+        "y": -32.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 31.5,
+        "y": -46.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 32.5,
+        "y": -46.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 33.5,
+        "y": -46.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 34.5,
+        "y": -46.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 35.5,
+        "y": -46.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 36.5,
+        "y": -46.5
+      },
+      "direction": 8
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 36.5,
+        "y": -45.5
+      },
+      "direction": 8
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 36.5,
+        "y": -44.5
+      },
+      "direction": 8
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 36.5,
+        "y": -43.5
+      },
+      "direction": 8
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 36.5,
+        "y": -42.5
+      },
+      "direction": 8
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 36.5,
+        "y": -41.5
+      },
+      "direction": 8
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 36.5,
+        "y": -40.5
+      },
+      "direction": 8
+    },
+    {
+      "name": "transport-belt",
+      "position": {
+        "x": 36.5,
+        "y": -39.5
+      },
+      "direction": 8
+    }
+  ],
+  "bots": [
+    {
+      "id": 1,
+      "position": {
+        "x": 28.3046875,
+        "y": -41.22265625
+      },
+      "inventory": {
+        "burner-mining-drill": 1,
+        "coal": 144,
+        "electronic-circuit": 6,
+        "iron-gear-wheel": 10,
+        "iron-plate": 18,
+        "small-electric-pole": 4,
+        "stone": 212,
+        "transport-belt": 10,
+        "wood": 3
+      }
+    },
+    {
+      "id": 2,
+      "position": {
+        "x": -2.2265625,
+        "y": -18.28125
+      },
+      "inventory": {
+        "coal": 1,
+        "stone": 20,
+        "wood": 3
+      }
+    },
+    {
+      "id": 3,
+      "position": {
+        "x": -1.2578125,
+        "y": -16.6640625
+      },
+      "inventory": {
+        "burner-mining-drill": 1,
+        "coal": 27,
+        "small-electric-pole": 1,
+        "stone": 23
+      }
+    },
+    {
+      "id": 4,
+      "position": {
+        "x": 27.2265625,
+        "y": -34.23046875
+      },
+      "inventory": {
+        "burner-mining-drill": 1,
+        "coal": 28,
+        "copper-plate": 15,
+        "iron-plate": 30,
+        "stone": 27,
+        "wood": 1
+      }
+    }
+  ],
+  "recipes": [],
+  "researched": []
+}

@@ -180,9 +180,11 @@ pub(crate) fn furnace_and_lab_on_open_ground() -> (ExpansionCtx, FactorioEntity,
 /// [`furnace_and_lab_on_open_ground`], with a `stone-wall` column at
 /// `x = 8.5` spanning `y` from -30 to 30 — past the 24-tile radius of the
 /// `enclosure::window` centred on `(5.0, 5.0)` on either side, so every row
-/// inside that window has its `x = 8.5` cell blocked and no route can cross
-/// it. The walled-destination control: `connect_steps` between the two
-/// machines must refuse.
+/// inside that window has its `x = 8.5` cell blocked and no surface route
+/// can cross it. Until 2026-09-09 this was the walled-destination control
+/// and `connect_steps` refused on it; now the one-wide wall is exactly what
+/// an underground pair is for, and [`furnace_and_lab_behind_a_wide_wall`]
+/// is the control that still refuses.
 ///
 /// The column sits strictly between the two machines' own footprints (the
 /// furnace ends at `x = 5.9`, the lab starts at `x = 11.3`), so it blocks the
@@ -195,6 +197,90 @@ pub(crate) fn furnace_and_lab_behind_a_wall() -> (ExpansionCtx, FactorioEntity, 
     for y in -30..=30 {
         entities.push(stone_wall(&Position::new(8.5, f64::from(y) + 0.5)));
     }
+    (connect_ctx(entities), furnace, lab)
+}
+
+/// [`furnace_and_lab_behind_a_wall`]'s wall, five columns wide: `x = 6.5`
+/// through `10.5`, every row from -30 to 30. The cells between the two
+/// machines are `x 6..=10` (the furnace ends at cell 5, the lab starts at
+/// 11), so the wall fills them all, and crossing it needs a pair six apart
+/// -- one more than the fixture's `underground-belt` prototype allows
+/// (`max_underground_distance = 5`). The wide-wall control: `connect_steps`
+/// must refuse **by span**, naming the number, not by a bare `NoRoute`.
+pub(crate) fn furnace_and_lab_behind_a_wide_wall() -> (ExpansionCtx, FactorioEntity, FactorioEntity)
+{
+    let furnace = FactorioEntity::new_stone_furnace(&Position::new(5.0, 5.0), Direction::North);
+    let lab = lab(&Position::new(12.5, 5.5));
+    let mut entities = vec![furnace.clone(), lab.clone()];
+    for x in 6..=10 {
+        for y in -30..=30 {
+            entities.push(stone_wall(&Position::new(
+                f64::from(x) + 0.5,
+                f64::from(y) + 0.5,
+            )));
+        }
+    }
+    (connect_ctx(entities), furnace, lab)
+}
+
+/// An `iron-chest` at its real collision box (`0.703125` tiles), a 1x1 on a
+/// tile centre.
+fn iron_chest(position: &Position) -> FactorioEntity {
+    FactorioEntity {
+        name: "iron-chest".into(),
+        entity_type: "container".into(),
+        position: position.clone(),
+        bounding_box: add_to_rect(&Rect::from_wh(0.703125, 0.703125), position),
+        ..Default::default()
+    }
+}
+
+/// The furnace at `(5.0, 5.0)` and an `iron-chest` at `(12.5, 2.5)` whose
+/// cheapest approach runs along the chest's own west side.
+///
+/// Walls close the chest's north (`(12.5, 1.5)`) and east (`(13.5, 2.5)`)
+/// sides, so the sink's first free perimeter pair is its SOUTH: arm at
+/// `(12.5, 3.5)`, belt at `(12.5, 4.5)`. A wall along `y = 3.5` from
+/// `x = 6.5` to `9.5` closes every short way down to that row, so the ten-tile
+/// route -- east along `y = 2.5` to `(11.5, 2.5)`, south past the chest's
+/// west side, east onto `(12.5, 4.5)` -- runs through the chest's west
+/// neighbour and the tile beyond it, and every other route is eight tiles
+/// longer. That is the route the measured haul took on seed 31337, spending
+/// the side the next run needed. With the chest's other sides closed to the
+/// route, it takes the long way round.
+pub(crate) fn furnace_and_chest_hugged_on_the_way_in()
+-> (ExpansionCtx, FactorioEntity, FactorioEntity) {
+    let furnace = FactorioEntity::new_stone_furnace(&Position::new(5.0, 5.0), Direction::North);
+    let chest = iron_chest(&Position::new(12.5, 2.5));
+    let mut entities = vec![furnace.clone(), chest.clone()];
+    entities.push(stone_wall(&Position::new(12.5, 1.5)));
+    entities.push(stone_wall(&Position::new(13.5, 2.5)));
+    for x in 6..=9 {
+        entities.push(stone_wall(&Position::new(f64::from(x) + 0.5, 3.5)));
+    }
+    (connect_ctx(entities), furnace, chest)
+}
+
+/// The furnace at `(5.0, 5.0)` and a `lab` at `(7.5, 5.5)` right beside it,
+/// with one `stone-wall` at `(8.5, 2.5)` for a standing underground pair to
+/// cross (the test creates the pair: `input` at `(6.5, 2.5)`, `output` at
+/// `(10.5, 2.5)`, facing east, so the span holds the free cells `(7.5, 2.5)`
+/// and `(9.5, 2.5)` and the wall).
+///
+/// The lab's north perimeter is scanned `x = 6.5, 7.5, 8.5`: the first pair
+/// is blocked by the input half, the third by the wall -- and the second,
+/// arm at `(7.5, 3.5)` and belt at `(7.5, 2.5)`, is free ground **beneath
+/// the tunnel**. Nothing but the span reservation keeps a run from ending
+/// there.
+pub(crate) fn furnace_and_lab_beside_a_standing_span()
+-> (ExpansionCtx, FactorioEntity, FactorioEntity) {
+    let furnace = FactorioEntity::new_stone_furnace(&Position::new(5.0, 5.0), Direction::North);
+    let lab = lab(&Position::new(7.5, 5.5));
+    let entities = vec![
+        furnace.clone(),
+        lab.clone(),
+        stone_wall(&Position::new(8.5, 2.5)),
+    ];
     (connect_ctx(entities), furnace, lab)
 }
 

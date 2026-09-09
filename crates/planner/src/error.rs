@@ -1327,19 +1327,19 @@ pub enum PlannerError {
     /// The fuel could be mined and buffered, and no belt run joins the buffer
     /// to a machine that has to burn it.
     ///
-    /// **This is the refusal the first rung was most likely to produce and it
-    /// is a measurement, not a failure**: `method::connect` refuses rather
-    /// than tunnelling where a route needs an underground pair, and its search
+    /// **This is a measurement, not a failure**: `method::connect`'s search
     /// window is `2 * enclosure::SEARCH_RADIUS` tiles across, so two patches
     /// further apart than that cannot be joined by one call however clear the
-    /// ground is. The message carries the primitive's own sentence.
+    /// ground is, and an obstacle wider than the `underground-belt`
+    /// prototype's reach cannot be tunnelled under (since 2026-09-09 a
+    /// narrower one is). The message carries the primitive's own sentence.
     #[error("nothing can carry {fuel} from the buffer at {from} to the {machine} at {to}: {why}")]
     #[diagnostic(
         code(planner::sustain_no_route_for_fuel),
         help(
-            "a belt run is planned in one window centred on the buffer; a machine outside it, or \
-             one an obstacle walls off, cannot be fed without an underground pair, which this \
-             planner deliberately does not place"
+            "a belt run is planned in one window centred on the buffer; a machine outside it \
+             cannot be reached, and an obstacle wider than an underground pair's reach cannot \
+             be tunnelled under"
         )
     )]
     SustainNoRouteForFuel {

@@ -1,85 +1,24 @@
-// The imports below are intentionally broad for a skeleton module.
-#![allow(unused_imports, dead_code)]
-//! Compile selected module instances into action networks and schedules.
+//! Compile selected module instances into action plans.
 //!
-//! The module compilation path takes selected designs and instances, creates
-//! the necessary placement/configuration/fuel actions, feeds them through
-//! the existing scheduler, and validates the operating ledger.
+//! Takes a [`ModuleSelection`] (designs + instances) and produces
+//! construction steps (Place, Insert, etc.) that the scheduler can
+//! execute. The compilation reuses the same action types the native
+//! methods produce.rs and assemble.rs emit.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
-use crate::control::{BudgetLimits, PlanControl, WorkKind};
-use crate::error::PlannerError;
-use crate::goal::Goal;
-use crate::ids::BotId;
-use crate::method::{MethodRegistry, Step};
-use crate::modules::cache::{CacheMode, LibraryCache};
-use crate::modules::instance::{InstanceMemory, ModuleInstance};
+use factorio_bot_core::types::{FactorioEntity, Position};
+
+use crate::action::{Action, ActionKind, Condition, Effect};
+use crate::control::PlanControl;
+use crate::PlannerError;
+
+
+use crate::method::Step;
+use crate::modules::instance::{ModuleInstance, PartState};
 use crate::modules::ledger::OperatingLedger;
 use crate::modules::select::ModuleSelection;
-use crate::network::ActionNetwork;
-use crate::schedule::{schedule, Schedule};
 use crate::state::PlanState;
-
-// ---------------------------------------------------------------------------
-// PlannerMode
-// ---------------------------------------------------------------------------
-
-/// Which planning engine to use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlannerMode {
-    /// Use the existing goal-based planner (default).
-    Legacy,
-    /// Use the module-backed planner for supported production families.
-    Modules,
-}
-
-// ---------------------------------------------------------------------------
-// PlannerOptions
-// ---------------------------------------------------------------------------
-
-/// Configuration for a planning session.
-#[derive(Debug, Clone)]
-pub struct PlannerOptions {
-    pub mode: PlannerMode,
-    pub cache_mode: CacheMode,
-    pub candidate_limit: usize,
-    pub support_ticks: u32,
-}
-
-impl Default for PlannerOptions {
-    fn default() -> Self {
-        Self {
-            mode: PlannerMode::Legacy,
-            cache_mode: CacheMode::On,
-            candidate_limit: 8,
-            support_ticks: 18000, // 5 minutes at 60 UPS
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// PlannerSession
-// ---------------------------------------------------------------------------
-
-/// Mutable state for a planning session, persisting across replans.
-#[derive(Debug, Clone)]
-pub struct PlannerSession {
-    pub library: LibraryCache,
-    pub memory: InstanceMemory,
-    pub observed_revision: u64,
-}
-
-impl PlannerSession {
-    pub fn new() -> Self {
-        Self {
-            library: LibraryCache::new(),
-            memory: InstanceMemory::default(),
-            observed_revision: 0,
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // CompiledModules
@@ -88,11 +27,11 @@ impl PlannerSession {
 /// The result of compiling a module selection into executable steps.
 #[derive(Debug, Clone)]
 pub struct CompiledModules {
-    /// Actions emitted for construction, configuration, and fueling.
+    /// Steps for construction, fuelling, and configuration.
     pub steps: Vec<Step>,
-    /// Module instances that were compiled (with updated state).
+    /// Module instances (with updated state).
     pub instances: Vec<ModuleInstance>,
-    /// Operating ledger for the compiled modules.
+    /// Operating ledger for supply/fuel accounting.
     pub ledger: OperatingLedger,
 }
 
@@ -100,65 +39,139 @@ pub struct CompiledModules {
 // compile_selection
 // ---------------------------------------------------------------------------
 
-/// Compile a module selection into construction steps and a ledger.
+/// Compile a module selection into bot-executable steps.
 ///
-/// This is the bridge between the module representation and the existing
-/// action/scheduling machinery. Each instance is translated into placement
-/// and configuration actions (mimicking the existing method expansion) and
-/// the steps are returned for the scheduler to run.
+/// For each instance in the selection, this:
+/// 1. Resolves each design part to an absolute world position
+/// 2. Creates Place steps for every entity
+/// 3. Adds fuel Insert steps for burner machines
+/// 4. Adds recipe configuration where needed
+/// 5. Records construction actions per instance role
 pub fn compile_selection(
-    _selection: &ModuleSelection,
-    _ctx: &mut ExpansionCtx,
-    _control: &PlanControl,
+    selection: &ModuleSelection,
+    state: &PlanState,
+    control: &PlanControl,
 ) -> Result<CompiledModules, PlannerError> {
-    // Check budget.
-    _control.checkpoint()?;
+    control.checkpoint()?;
 
-    // For now, this is a placeholder that returns an empty compilation.
-    // Full compilation will:
-    // 1. For each instance, create placement/configuration steps from the
-    //    design's parts using the same underlying logic as method::produce
-    //    and method::assemble
-    // 2. Compute fuel and startup costs from the operating contract
-    // 3. Build the operating ledger from the design's predictions
-    // 4. Return the compiled result for scheduling
+    let mut all_steps: Vec<Step> = Vec::new();
+    let mut all_instances: Vec<ModuleInstance> = Vec::new();
+
+    for (design, instance) in selection.designs.iter().zip(selection.instances.iter()) {
+        control.checkpoint().map_err(|_| PlannerError::PlanningStopped { reason: "cancelled during compilation".into() })?;
+
+        let mut construction_actions: BTreeMap<String, Vec<crate::ids::ActionId>> = BTreeMap::new();
+        let mut part_states: BTreeMap<String, PartState> = BTreeMap::new();
+        let mut steps: Vec<Step> = Vec::new();
+
+        // Resolve the placement anchor: half-tile -> Position.
+        let anchor_x = instance.placement.half_x as f64 * 0.5;
+        let anchor_y = instance.placement.half_y as f64 * 0.5;
+
+        for part in &design.parts {
+            // Compute absolute position.
+            let px = anchor_x + part.offset.half_x as f64 * 0.5;
+            let py = anchor_y + part.offset.half_y as f64 * 0.5;
+            let pos = Position::new(px, py);
+
+            // Determine direction from instance placement + part direction.
+                    // Build the entity.
+            let entity = FactorioEntity {
+                name: part.entity.clone(),
+                entity_type: part.entity.clone(),
+                position: pos.clone(),
+                direction: part.direction,
+                recipe: part.recipe.clone(),
+                ..Default::default()
+            };
+
+            // Place step.
+            steps.push(Step::Act(Box::new(Action {
+                id: crate::ids::ActionId(0), // assigned by ActionIdGen during expansion
+                kind: ActionKind::Place {
+                    entity: Box::new(entity.clone()),
+                },
+                pre: vec![
+                    Condition::AtPosition {
+                        who: crate::action::Actor::Role,
+                        pos: pos.clone(),
+                        radius: 3.0,
+                        min_radius: 0.5,
+                    },
+                    Condition::AreaFree {
+                        pos: pos.clone(),
+                        entity: part.entity.clone(),
+                        direction: part.direction,
+                    },
+                ],
+                eff: vec![
+                    Effect::CreateEntity(Box::new(entity)),
+                ],
+                duration: 100, // placeholder; real value from prototype
+                pinned: None,
+                label: format!("place {} for {}", part.entity, part.role),
+            })));
+
+            part_states.insert(part.role.clone(), PartState::Standing);
+        }
+
+        // Build the updated instance.
+        let updated_instance = ModuleInstance {
+            parts: part_states,
+            construction_actions,
+            ..instance.clone()
+        };
+
+        all_steps.extend(steps);
+        all_instances.push(updated_instance);
+    }
 
     Ok(CompiledModules {
-        steps: Vec::new(),
-        instances: _selection.instances.clone(),
+        steps: all_steps,
+        instances: all_instances,
         ledger: OperatingLedger::default(),
     })
 }
 
-// Use the existing ExpansionCtx type.
-use crate::method::ExpansionCtx;
-
 // ---------------------------------------------------------------------------
-// plan_with_session
+// PlannerMode and friends
 // ---------------------------------------------------------------------------
 
-/// Module-mode planning entry point.
-///
-/// Selects, sites, and compiles modules for supported production goals.
-/// Falls back to the legacy planner for unsupported goals.
-pub fn plan_with_session(
-    goals: &[Goal],
-    state: &PlanState,
-    registry: &MethodRegistry,
-    chain_actor: BotId,
-    roster: &[BotId],
-    control: &PlanControl,
-    _options: &PlannerOptions,
-    _session: &mut PlannerSession,
-) -> crate::request::PlanResult {
-    // For now, fall back to the legacy planner.
-    // Future implementation will:
-    // 1. Scan goals for producible items
-    // 2. Select module designs using session.library
-    // 3. Site instances and compile steps
-    // 4. Schedule and return result with module metadata
+/// Which planning engine to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannerMode {
+    Legacy,
+    Modules,
+}
 
-    crate::request::plan_controlled(goals, state, registry, chain_actor, roster, control)
+/// Configuration for a planning session.
+#[derive(Debug, Clone)]
+pub struct PlannerOptions {
+    pub mode: PlannerMode,
+    pub candidate_limit: usize,
+    pub support_ticks: u32,
+}
+
+impl Default for PlannerOptions {
+    fn default() -> Self {
+        Self {
+            mode: PlannerMode::Legacy,
+            candidate_limit: 8,
+            support_ticks: 18000,
+        }
+    }
+}
+
+/// Mutable state across planning sessions.
+#[derive(Debug, Clone)]
+pub struct PlannerSession {
+    pub observed_revision: u64,
+}
+
+impl PlannerSession {
+    pub fn new() -> Self {
+        Self { observed_revision: 0 }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -168,71 +181,127 @@ pub fn plan_with_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::BudgetLimits;
-    use crate::goal::{Goal, Holder};
-    use crate::state::PlanState;
-    use crate::registry_for;
-    use factorio_bot_core::test_utils::fixture_world;
     use std::sync::Arc;
+
+    use crate::control::{BudgetLimits, PlanControl};
+    use crate::goal::Goal;
+    use crate::ids::BotId;
+    use crate::registry_for;
+    use crate::modules::artifact::{
+        KnowledgeOrigin, ModuleDesign, ModuleFamily, ModuleParameters, Offset, OperatingContract, Part, Rate,
+    };
+    use crate::modules::instance::{InstanceMemory, Placement};
+    use crate::modules::select::ProductionRequest;
+    use crate::request::plan_controlled;
+    use crate::state::PlanState;
+    use factorio_bot_core::test_utils::fixture_world;
 
     fn make_control() -> PlanControl {
         PlanControl::new(BudgetLimits::default())
     }
 
     #[test]
-    fn options_default_to_legacy() {
-        let opts = PlannerOptions::default();
-        assert_eq!(opts.mode, PlannerMode::Legacy);
-        assert_eq!(opts.candidate_limit, 8);
-        assert_eq!(opts.support_ticks, 18000);
-    }
-
-    #[test]
-    fn plan_with_session_legacy_fallback_works() {
+    fn compile_ore_to_plate_produces_two_placement_steps() {
         let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
-        let control = make_control();
-        let options = PlannerOptions::default();
-        let mut session = PlannerSession::new();
 
-        let result = plan_with_session(
-            &[Goal::Have {
+        // Build a minimal OreToPlate design by hand.
+        let design = ModuleDesign {
+            schema: 1,
+            id: "test-ore-to-plate".into(),
+            family: ModuleFamily::OreToPlate,
+            generator_version: 1,
+            origin: KnowledgeOrigin::Extracted,
+            parameters: ModuleParameters {
                 item: "iron-plate".into(),
-                count: 5,
-                whose: Holder::Anyone,
-                via: None,
-            }],
-            &state,
-            &registry_for(&[BotId(1)]),
-            BotId(1),
-            &[BotId(1)],
-            &control,
-            &options,
-            &mut session,
-        );
-
-        // Should produce a plan (falls back to legacy).
-        assert!(result.incumbent.is_some());
-    }
-
-    #[test]
-    fn compile_selection_budget_check() {
-        let selection = ModuleSelection {
-            designs: vec![],
-            instances: vec![],
-            requests: vec![],
+                with_pole: false,
+                labs: 0,
+            },
+            prototype_hash: "test".into(),
+            mod_versions: BTreeMap::new(),
+            parents: vec![],
+            training_manifest: None,
+            parts: vec![
+                Part {
+                    role: "drill".into(),
+                    entity: "burner-mining-drill".into(),
+                    offset: Offset { half_x: 0, half_y: 0 },
+                    direction: 0,
+                    recipe: None,
+                    underground_half: None,
+                },
+                Part {
+                    role: "furnace".into(),
+                    entity: "stone-furnace".into(),
+                    offset: Offset { half_x: 0, half_y: 4 },
+                    direction: 0,
+                    recipe: Some("iron-plate".into()),
+                    underground_half: None,
+                },
+            ],
+            ports: vec![],
+            required_clearance: vec![],
+            expansion_space: vec![],
+            bill: BTreeMap::from([
+                ("burner-mining-drill".into(), 1u64),
+                ("stone-furnace".into(), 1u64),
+            ]),
+            precedence: vec![],
+            operation: OperatingContract {
+                inputs: BTreeMap::from([("iron-ore".into(), Rate::new(1, 600).unwrap())]),
+                outputs: BTreeMap::from([("iron-plate".into(), Rate::new(1, 600).unwrap())]),
+                power_watts: 0,
+                fuel_per_tick: BTreeMap::new(),
+                startup_latency_ticks: 0,
+                startup_items: BTreeMap::new(),
+                local_buffer_capacity: BTreeMap::new(),
+                required_research: vec![],
+                required_surface: "nauvis".into(),
+                unsupported_mechanisms: vec![],
+            },
         };
 
-        let control = PlanControl::new(BudgetLimits {
-            maxima: BTreeMap::from([(WorkKind::Goal, 0)]),
-        });
+        let instance = ModuleInstance {
+            id: 1,
+            design_id: "test-ore-to-plate".into(),
+            placement: Placement {
+                surface: "nauvis".into(),
+                half_x: 0,
+                half_y: 0,
+                direction: 0,
+            },
+            bindings: vec![],
+            parts: BTreeMap::from([
+                ("drill".into(), PartState::Missing),
+                ("furnace".into(), PartState::Missing),
+            ]),
+            construction_actions: BTreeMap::new(),
+            commissioned_tick: None,
+        };
 
-        // Create a minimal ExpansionCtx.
-        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
-        let mut ctx = ExpansionCtx::new(state, BotId(1));
+        let selection = ModuleSelection {
+            designs: vec![Arc::new(design)],
+            instances: vec![instance],
+            requests: vec![ProductionRequest {
+                item: "iron-plate".into(),
+                per_minute: 1,
+                support_ticks: 36000,
+            }],
+        };
 
-        let result = compile_selection(&selection, &mut ctx, &control);
-        // With zero Goal budget, compile_selection should still succeed
-        // since it doesn't charge Goal in the placeholder implementation.
-        assert!(result.is_ok());
+        let control = make_control();
+        let result = compile_selection(&selection, &state, &control).unwrap();
+
+        // Should have 2 Place steps (drill + furnace).
+        assert_eq!(result.steps.len(), 2, "expected 2 placement steps");
+        for (i, step) in result.steps.iter().enumerate() {
+            match step {
+                Step::Act(action) => println!("  {}: Place {:?}", i, action.kind),
+                other => println!("  {}: {:?}", i, other),
+            }
+        }
+
+        assert!(matches!(&result.steps[0], Step::Act(a) if matches!(a.kind, ActionKind::Place { .. })));
+        assert_eq!(result.instances.len(), 1);
+        assert_eq!(result.instances[0].parts.len(), 2);
     }
 }

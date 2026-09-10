@@ -90,6 +90,11 @@ pub enum PlanEvent {
     PhaseEntered(PlanPhase),
     /// A planning phase completed.
     PhaseLeft(PlanPhase),
+    /// A new best incumbent was found during expansion.
+    Incumbent {
+        /// The makespan of the incumbent, in game ticks.
+        makespan: u32,
+    },
 }
 
 /// Observer callback for planning events.

@@ -204,7 +204,7 @@ pub(crate) fn furnace_and_lab_behind_a_wall() -> (ExpansionCtx, FactorioEntity, 
     let furnace = FactorioEntity::new_stone_furnace(&Position::new(5.0, 5.0), Direction::North);
     let lab = lab(&Position::new(12.5, 5.5));
     let mut entities = vec![furnace.clone(), lab.clone()];
-    for y in -30..=30 {
+    for y in -50..=50 {
         entities.push(stone_wall(&Position::new(8.5, f64::from(y) + 0.5)));
     }
     (connect_ctx(entities), furnace, lab)
@@ -223,7 +223,7 @@ pub(crate) fn furnace_and_lab_behind_a_wide_wall() -> (ExpansionCtx, FactorioEnt
     let lab = lab(&Position::new(12.5, 5.5));
     let mut entities = vec![furnace.clone(), lab.clone()];
     for x in 6..=10 {
-        for y in -30..=30 {
+        for y in -50..=50 {
             entities.push(stone_wall(&Position::new(
                 f64::from(x) + 0.5,
                 f64::from(y) + 0.5,

@@ -109,7 +109,7 @@ const VANILLA_CHARACTER_COLLISION_HALF_SIDE: f64 = 0.19921875;
 /// two frozen bots were refused paths to points 4.2 tiles away. A window this
 /// size contains that case with room to spare while staying a fixed, small
 /// amount of work (see [`CELL`]).
-pub const SEARCH_RADIUS: f64 = 24.0;
+pub const SEARCH_RADIUS: f64 = 32.0;
 
 /// The side of one fill cell, in tiles: **one tile**, because that is the
 /// grid the game's pathfinder searches on for every path the mod requests

@@ -3757,8 +3757,8 @@ mod fabricate_fluid_tests {
     /// let it through to report 1,248 route failures on clear ground.
     #[test]
     fn supplies_sixty_apart_are_past_the_band_and_say_so() {
-        let state = sulfur_state_with_petroleum_at(Position::new(24.5, 86.5));
-        let error = expand(state, &sulfur_goal()).expect_err("60 is past 2 * 24");
+        let state = sulfur_state_with_petroleum_at(Position::new(24.5, 96.5));
+        let error = expand(state, &sulfur_goal()).expect_err("72 is past 2 * 32");
         let text = error.to_string();
         assert!(
             text.contains("too far apart") && !text.contains("no pipe route"),

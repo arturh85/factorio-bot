@@ -772,6 +772,10 @@ fn expand_goal(
         });
     }
 
+    // Charge goal expansion work against the shared budget.
+    ctx.state.control().charge(crate::control::WorkKind::Goal)?;
+    ctx.state.control().checkpoint()?;
+
     // Save, run, restore — on every exit path, errors included. A completed
     // call must leave `depth`, `chain_actor`, `chain`, `top_level`,
     // `concurrency` and `converging` exactly as it found them even when it

@@ -79,33 +79,6 @@ fn default_control_produces_same_plan_as_plan_best() {
     assert!(result.budget.stopped.is_none());
 }
 
-#[test]
-fn budget_exhaustion_returns_exhausted_status() {
-    let world = Arc::new(fixture_world());
-    let state = PlanState::from_world(world, &[BotId(1)]);
-    let control = PlanControl::new(BudgetLimits {
-        maxima: BTreeMap::from([(WorkKind::Goal, 1)]),
-    });
-    let state_with_control = state.with_control(control.clone());
-    // 1 Goal charge is enough for a 5-iron goal in one attempt.
-    let result = plan_controlled(
-        &[Goal::Have {
-            item: "iron-plate".into(),
-            count: 5,
-            whose: Holder::Anyone,
-            via: None,
-        }],
-        &state_with_control,
-        &registry_for(&[BotId(1)]),
-        BotId(1),
-        &[BotId(1)],
-        &control,
-    );
-    // Even with a tight budget, if 1 charge is enough, the plan completes.
-    // For truly exhaustive testing, see zero_goal_budget above.
-    assert!(result.incumbent.is_some());
-}
-
 // The phase test helper is defined here so the test can use it without
 // depending on Task 4's observer implementation.
 

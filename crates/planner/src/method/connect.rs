@@ -1051,6 +1051,7 @@ fn tap_standing_run(
                         RouteError::SpanTooLong { needed, max } => {
                             ConnectRefusal::SpanTooLong { needed, max }
                         }
+                        RouteError::Cancelled => ConnectRefusal::NoRoute { blocked: vec![] },
                     };
                     last = Some(format!(
                         "from the splice at {}: {why}",
@@ -2137,6 +2138,7 @@ pub fn connect_steps_reserving(
                 RouteError::SpanTooLong { needed, max } => {
                     ConnectRefusal::SpanTooLong { needed, max }
                 }
+                RouteError::Cancelled => ConnectRefusal::NoRoute { blocked: vec![] },
             })?;
         Ok((source, sink, route))
     };

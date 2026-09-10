@@ -545,6 +545,10 @@ pub fn schedule(
     if bots.is_empty() {
         return Err(PlannerError::NoBots);
     }
+    // Charge scheduling work against the shared budget.
+    state.control().charge(crate::control::WorkKind::Assignment)?;
+    state.control().checkpoint()?;
+
     net.validate()?;
     let remaining = critical_path(net)?;
     let durations: BTreeMap<ActionId, Ticks> = net.actions().map(|a| (a.id, a.duration)).collect();

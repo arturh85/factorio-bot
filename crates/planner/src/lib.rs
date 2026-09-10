@@ -119,6 +119,8 @@ fn parse_conflict_position(condition: &str) -> Option<factorio_bot_core::types::
     Some(factorio_bot_core::types::Position::new(x, y))
 }
 
+const MAX_RETRY_DEPTH: u32 = 3;
+
 pub fn plan_best(
     goals: &[Goal],
     state: &PlanState,
@@ -172,6 +174,63 @@ pub fn plan_best(
                 let mut retry_state = state.clone();
                 retry_state.reserve_ground(&[pos], "conflict retry");
                 return plan_best(goals, &retry_state, registry, chain_actor, roster);
+            }
+        }
+    }
+    // When no plan succeeded due to a tile conflict, reserve the
+    // conflicting tile and retry (up to MAX_RETRY_DEPTH times).
+    // This gives the expansion a chance to route around the obstacle —
+    // a layout correction for builds placed too tightly.
+    if best.is_none() {
+        let mut retry_state = state.clone();
+        for _depth in 0..MAX_RETRY_DEPTH {
+            let conflict_tile = match &first_error {
+                Some(PlannerError::ChainOwnerInfeasible { condition, .. }) => {
+                    parse_conflict_position(condition)
+                }
+                Some(PlannerError::AssemblyNoRouteForSupply { why, .. }) => {
+                    parse_conflict_position(why)
+                }
+                _ => None,
+            };
+            match conflict_tile {
+                Some(pos) => {
+                    retry_state.reserve_ground(&[pos], "conflict retry");
+                    let mut best: Option<(ActionNetwork, Schedule)> = None;
+                    let mut first_error: Option<PlannerError> = None;
+                    for policy in DrainPolicy::ALL {
+                        let under = retry_state
+                            .clone()
+                            .with_drain_policy(policy)
+                            .with_fresh_policy_probe();
+                        let net = match expand(goals, &under, registry, chain_actor) {
+                            Ok(net) => net,
+                            Err(err) => {
+                                first_error.get_or_insert(err);
+                                continue;
+                            }
+                        };
+                        let settled = !under.drain_policy_mattered();
+                        match schedule(&net, &under, roster) {
+                            Ok(plan) => {
+                                if best.as_ref().is_none_or(|(_, b)| plan.makespan < b.makespan) {
+                                    best = Some((net, plan));
+                                }
+                            }
+                            Err(err) => {
+                                first_error.get_or_insert(err);
+                            }
+                        }
+                        if settled {
+                            break;
+                        }
+                    }
+                    if let Some((net, plan)) = best {
+                        let memory = memory::capture_intent(state, &net, &plan, 0);
+                        return Ok((net, plan, memory));
+                    }
+                }
+                None => break,
             }
         }
     }

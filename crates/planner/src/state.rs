@@ -1524,6 +1524,12 @@ pub struct PlanState {
     /// and nothing else, and `applicable` and `expand` must answer from the
     /// same policy or a method claims a goal it then refuses.
     drain_policy: DrainPolicy,
+    /// Shared planning budget and stop latch for this request.
+    ///
+    /// Set by [`PlanState::with_control`], or created with no work limits
+    /// in the standard constructors. Forks inherit it, so nested expansion
+    /// and rehearsals share the same budget.
+    control: crate::control::PlanControl,
     /// Set the moment a decision taken under [`PlanState::drain_policy`]
     /// would have come out differently under another policy.
     ///
@@ -2576,6 +2582,9 @@ impl PlanState {
             gathering_recorded: BTreeMap::new(),
             gathering_forecast: BTreeMap::new(),
             drain_policy: DrainPolicy::default(),
+            control: crate::control::PlanControl::new(
+                crate::control::BudgetLimits::default(),
+            ),
             policy_probe: Arc::new(AtomicBool::new(false)),
         };
         state.walled_in = state.find_walled_in();
@@ -2741,6 +2750,22 @@ impl PlanState {
     pub fn with_fresh_policy_probe(mut self) -> PlanState {
         self.policy_probe = Arc::new(AtomicBool::new(false));
         self
+    }
+
+    /// Replace the shared planning control.
+    ///
+    /// This is how the request-scoped control is installed before
+    /// `plan_controlled` calls `expand`. The state is consumed so the
+    /// caller cannot accidentally access the old control afterwards.
+    pub fn with_control(mut self, control: crate::control::PlanControl) -> PlanState {
+        self.control = control;
+        self
+    }
+
+    /// Access the shared planning control (for charging work units and
+    /// checking cancellation).
+    pub fn control(&self) -> &crate::control::PlanControl {
+        &self.control
     }
 
     /// Record that the decision just taken would have differed under another

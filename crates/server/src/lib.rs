@@ -2,6 +2,7 @@ pub mod error;
 mod extract;
 pub mod game;
 pub mod jobs;
+pub mod modules;
 pub mod manage;
 pub mod openapi;
 pub mod runs;

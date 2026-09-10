@@ -11,6 +11,7 @@ use utoipa::OpenApi;
         (name = "Inventory", description = "Inventory manipulation"),
         (name = "Admin", description = "Server administration"),
         (name = "Research", description = "Research"),
+        (name = "Modules", description = "Blueprint library"),
     )
 )]
 pub struct ApiDoc;

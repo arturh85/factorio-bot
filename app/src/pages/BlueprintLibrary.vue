@@ -62,14 +62,18 @@ interface ModuleDesign {
 }
 
 // ---------------------------------------------------------------------------
-// Hardcoded designs
+// Design state — fetched from API with hardcoded fallback
 // ---------------------------------------------------------------------------
 
-const designs: ModuleDesign[] = [
+import {ref, onMounted} from 'vue';
+
+const designs = ref<ModuleDesign[]>([]);
+const loading = ref(true);
+const error = ref<string | null>(null);
+
+const FALLBACK_DESIGNS: ModuleDesign[] = [
   {
-    schema: 1,
-    id: 'ore-to-plate-iron',
-    family: 'OreToPlate',
+    schema: 1, id: 'ore-to-plate-iron', family: 'OreToPlate',
     parameters: {item: 'iron-plate', with_pole: false, labs: 0},
     parts: [
       {role: 'drill', entity: 'burner-mining-drill', offset: {half_x: 0, half_y: 0}, direction: 4, recipe: null},
@@ -87,14 +91,11 @@ const designs: ModuleDesign[] = [
       fuel_per_tick: {coal: {numerator: 1, ticks: 4800}},
       startup_latency_ticks: 4800,
       startup_items: {coal: 10, 'iron-ore': 5},
-      required_research: [],
-      required_surface: 'nauvis'
+      required_research: [], required_surface: 'nauvis'
     }
   },
   {
-    schema: 1,
-    id: 'ore-to-plate-copper',
-    family: 'OreToPlate',
+    schema: 1, id: 'ore-to-plate-copper', family: 'OreToPlate',
     parameters: {item: 'copper-plate', with_pole: false, labs: 0},
     parts: [
       {role: 'drill', entity: 'burner-mining-drill', offset: {half_x: 0, half_y: 0}, direction: 4, recipe: null},
@@ -112,35 +113,57 @@ const designs: ModuleDesign[] = [
       fuel_per_tick: {coal: {numerator: 1, ticks: 4800}},
       startup_latency_ticks: 4800,
       startup_items: {coal: 10, 'copper-ore': 5},
-      required_research: [],
-      required_surface: 'nauvis'
+      required_research: [], required_surface: 'nauvis'
     }
   }
 ];
+
+onMounted(async () => {
+  try {
+    const res = await fetch('/api/v1/modules/designs');
+    if (res.ok) {
+      const data = await res.json();
+      designs.value = data.designs;
+    } else {
+      throw new Error(`HTTP ${res.status}`);
+    }
+  } catch {
+    error.value = 'Could not load from API, using fallback designs';
+    designs.value = FALLBACK_DESIGNS;
+  } finally {
+    loading.value = false;
+  }
+});
 
 // ---------------------------------------------------------------------------
 // SVG helpers
 // ---------------------------------------------------------------------------
 
 /** Compute bounding box of all parts in half-tile units. */
-function designBounds(parts: Part[]): {minX: number; minY: number; maxX: number; maxY: number} {
+function designBounds(parts: Part[], ports: Port[]): {minX: number; minY: number; maxX: number; maxY: number} {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const p of parts) {
     const x = p.offset.half_x;
     const y = p.offset.half_y;
-    // Each entity is roughly 2 half-tiles across
     minX = Math.min(minX, x - 1);
     minY = Math.min(minY, y - 1);
     maxX = Math.max(maxX, x + 2);
     maxY = Math.max(maxY, y + 2);
   }
-  for (const p of designs[0].ports) {
+  for (const p of ports) {
     minX = Math.min(minX, p.offset.half_x - 1);
     minY = Math.min(minY, p.offset.half_y - 1);
     maxX = Math.max(maxX, p.offset.half_x + 1);
     maxY = Math.max(maxY, p.offset.half_y + 1);
   }
   return {minX, minY, maxX, maxY};
+}
+
+/** SVG viewBox string for a design's parts and ports. */
+function designViewBox(parts: Part[], ports: Port[]): string {
+  const b = designBounds(parts, ports);
+  const pad = 1;
+  return `${b.minX - pad} ${b.minY - pad} ${b.maxX - b.minX + pad * 2} ${b.maxY - b.minY + pad * 2}`;
 }
 
 function labelForMode(mode: string): string {
@@ -168,10 +191,12 @@ function entityLabel(entity: string): string {
       Reusable factory module designs. Each card shows the entity layout, ports, and operating contract.
     </p>
 
-    <div class="grid gap-8">
+    <div v-if="loading" class="text-gray-500">Loading designs...</div>
+    <div v-else-if="error" class="mb-4 rounded border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-800">{{ error }}</div>
+    <div v-else class="grid gap-8">
       <div v-for="design in designs" :key="design.id"
            class="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
-        
+
         <!-- Header -->
         <div class="mb-4 flex items-start justify-between">
           <div>
@@ -187,10 +212,10 @@ function entityLabel(entity: string): string {
           <!-- SVG Plan View -->
           <div class="lg:col-span-2">
             <div class="mb-2 text-sm font-medium text-gray-600">Layout</div>
-            <svg :viewBox="`${designBounds(design.parts).minX - 1} ${designBounds(design.parts).minY - 1} ${designBounds(design.parts).maxX - designBounds(design.parts).minX + 2} ${designBounds(design.parts).maxY - designBounds(design.parts).minY + 2}`"
+            <svg :viewBox="designViewBox(design.parts, design.ports)"
                  class="w-full max-w-sm rounded border bg-gray-50"
                  xmlns="http://www.w3.org/2000/svg">
-              
+
               <!-- Grid background -->
               <defs>
                 <pattern id="grid" width="2" height="2" patternUnits="userSpaceOnUse">
@@ -198,14 +223,14 @@ function entityLabel(entity: string): string {
                 </pattern>
               </defs>
               <rect width="100%" height="100%" fill="url(#grid)"/>
-              
+
               <!-- Port indicators -->
               <g v-for="port in design.ports" :key="port.id">
                 <circle :cx="port.offset.half_x" :cy="port.offset.half_y" r="0.6" fill="#93c5fd" stroke="#3b82f6" stroke-width="0.15"/>
                 <text :x="port.offset.half_x" :y="port.offset.half_y + 0.2"
                       text-anchor="middle" font-size="0.6" fill="#1e40af">{{ labelForMode(port.mode).charAt(0) }}</text>
               </g>
-              
+
               <!-- Entity rectangles -->
               <g v-for="part in design.parts" :key="part.role">
                 <rect :x="part.offset.half_x - 1" :y="part.offset.half_y - 1"
@@ -272,3 +297,4 @@ function entityLabel(entity: string): string {
     </div>
   </div>
 </template>
+

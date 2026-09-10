@@ -26,6 +26,7 @@ pub fn build_router(state: AppState, web_root: Option<&str>) -> Router {
         .route("/api/v1/health", get(health))
         .merge(crate::game::router())
         .merge(crate::manage::router())
+        .merge(crate::modules::router())
         .merge(crate::runs::router())
         .with_state(state)
         .split_for_parts();

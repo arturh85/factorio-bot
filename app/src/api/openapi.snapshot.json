@@ -5953,6 +5953,17 @@
         ]
       }
     },
+    "/api/v1/modules/designs": {
+      "get": {
+        "operationId": "list_designs",
+        "responses": {
+          "200": {
+            "description": "Module designs"
+          }
+        },
+        "summary": "List all available module designs."
+      }
+    },
     "/api/v1/rcon": {
       "post": {
         "operationId": "send_rcon",
@@ -7351,6 +7362,10 @@
     {
       "description": "Research",
       "name": "Research"
+    },
+    {
+      "description": "Blueprint library",
+      "name": "Modules"
     }
   ]
 }

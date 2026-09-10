@@ -5,6 +5,7 @@ pub mod error;
 pub mod goal;
 pub mod ids;
 pub mod memory;
+pub mod modules;
 pub mod method;
 pub mod network;
 pub mod powered;

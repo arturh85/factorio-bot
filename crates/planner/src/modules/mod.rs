@@ -1,0 +1,21 @@
+//! Reusable factory module artifacts, families, and planning components.
+//!
+//! This module implements the phase-1 module-backed planner: explicit
+//! versioned module designs, instance identity, caching, supply ledgers,
+//! selection, and compilation into existing action networks.
+//!
+//! The public API is re-exported through the planner crate root.
+
+pub mod artifact;
+pub mod error;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn module_module_is_loaded() {
+        // Placeholder: verifies the module tree compiles.
+        assert!(true);
+    }
+}

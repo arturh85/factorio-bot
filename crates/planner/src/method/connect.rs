@@ -1983,7 +1983,7 @@ pub fn connect_steps_reserving(
 
     claim_footprint(&mut blocked, &from_footprint);
     claim_footprint(&mut blocked, &to_footprint);
-    let own_perimeter = |cell: (usize, usize)| {
+    let _own_perimeter = |cell: (usize, usize)| {
         [&from_footprint, &to_footprint]
             .into_iter()
             .any(|footprint| {

@@ -6,7 +6,7 @@
 use crate::experiment::manifest::{Manifest, ResolvedManifest, TrialKey, ManifestError};
 
 /// Outcome of a single trial.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TrialOutcome {
     Success,
     Failure,

@@ -8,6 +8,7 @@
 
 pub mod artifact;
 pub mod cache;
+pub mod compile;
 pub mod error;
 pub mod families;
 pub mod instance;

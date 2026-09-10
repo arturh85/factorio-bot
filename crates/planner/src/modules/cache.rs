@@ -63,7 +63,7 @@ pub enum CacheMode {
 ///
 /// Designs are keyed by their family/parameters/generator/prototype fingerprint.
 /// Site feasibility is cached separately and invalidated by world revision.
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct LibraryCache {
     /// Cached designs, keyed by content-hash DesignId.
     designs: BTreeMap<String, Arc<ModuleDesign>>,

@@ -233,7 +233,7 @@ pub fn write_report(
 
     // comparison.json
     let json_path = output_dir.join("comparison.json");
-    let json = serde_json::to_string_pretty(comparison)
+    let json = factorio_bot_core::serde_json::to_string_pretty(comparison)
         .map_err(|e| ReportError::IoError(e.to_string()))?;
     fs::write(&json_path, json)
         .map_err(|e| ReportError::IoError(e.to_string()))?;

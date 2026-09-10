@@ -10,6 +10,7 @@ pub mod artifact;
 pub mod cache;
 pub mod error;
 pub mod families;
+pub mod instance;
 pub mod ledger;
 
 #[cfg(test)]

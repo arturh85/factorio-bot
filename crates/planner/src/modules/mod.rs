@@ -8,6 +8,7 @@
 
 pub mod artifact;
 pub mod error;
+pub mod families;
 
 #[cfg(test)]
 mod tests {

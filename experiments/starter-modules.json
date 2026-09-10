@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "seeds": [31337, 104729, 130363, 155921, 196613, 262147, 327673, 393241, 458879, 524287],
+  "bots": [1, 4],
+  "tasks": ["automation", "red-delivery"],
+  "variants": ["legacy", "modules-cache-on", "modules-cache-off"],
+  "repetitions": 3,
+  "surface": "nauvis",
+  "peaceful": true,
+  "visibility": "explored-only",
+  "game_speed": 10,
+  "pause_during_planning": true,
+  "game_tick_limit": 216000,
+  "trial_wall_seconds": 1800,
+  "planning_deadline_ms": 120000,
+  "candidate_limit": 8,
+  "support_ticks": 18000,
+  "budget_maxima": {
+    "Goal": 100000,
+    "Site": 100000,
+    "RouteNode": 10000000,
+    "Assignment": 2000000,
+    "LookaheadPair": 10000000,
+    "GraphScan": 10000000,
+    "Retry": 8
+  },
+  "library_initial_state": "warm-artifacts-cold-placement",
+  "reset_policy": "same-prepared-save-per-case",
+  "sink_policy": "available-red-only-research-by-name"
+}

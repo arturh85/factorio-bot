@@ -8,6 +8,7 @@
 #[cfg(feature = "cli")]
 mod cli;
 mod context;
+mod experiment;
 mod paths;
 #[cfg(feature = "repl")]
 mod repl;

@@ -530,7 +530,8 @@ fn refusal_for(err: &PlannerError) -> Option<PlanRefusal> {
         | PlannerError::UnpoweredConsumer { .. }
         | PlannerError::UnpricedConsumer { .. }
         | PlannerError::GeneratorNotWired { .. }
-        | PlannerError::UnknownPrototypePlaced { .. } => false,
+        | PlannerError::UnknownPrototypePlaced { .. }
+        | PlannerError::PlanningStopped { .. } => false,
     };
     verdict.then(|| PlanRefusal {
         // Every variant carries a `#[diagnostic(code(...))]` today. The

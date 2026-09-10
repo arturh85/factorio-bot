@@ -7,7 +7,7 @@ use crate::network::ActionNetwork;
 use crate::state::PlanState;
 use factorio_bot_core::factorio::rcon::{Approach, approach_aim_at};
 use factorio_bot_core::factorio::util::calculate_distance;
-use factorio_bot_core::types::Position;
+use factorio_bot_core::types::{Pos, Position};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -936,6 +936,65 @@ pub fn schedule(
             }
         }
 
+        // Tile-conflict resolution: when two actions target the same tile
+        // (Place or Chop), keep the one with RemoveEntity first. When
+        // neither has RemoveEntity, the earlier-expanded chain wins (lower
+        // action id gets priority).
+        {
+            use crate::action::Effect;
+            // Map tile position → action_id of the first action seen at that
+            // tile. If a second action targets the same tile, it is removed
+            // from feasible so the first one dispatches this round.
+            let mut seen: BTreeMap<Pos, ActionId> = BTreeMap::new();
+            for i in (0..feasible.len()).rev() {
+                let Some(action) = net.action(feasible[i].action) else { continue };
+                let pos = match &action.kind {
+                    crate::action::ActionKind::Place { entity } => Some(Pos::from(&entity.position)),
+                    crate::action::ActionKind::Chop { pos, .. } => Some(Pos::from(pos)),
+                    _ => None,
+                };
+                let Some(pos) = pos else { continue };
+                let has_remove = action.eff.iter().any(|eff| {
+                    matches!(eff, Effect::RemoveEntity { pos: p } if Pos::from(p) == pos)
+                });
+                if let Some(&seen_id) = seen.get(&pos) {
+                    // Conflict — two actions want the same tile.
+                    // Decision rule:
+                    //   1. An action with RemoveEntity goes BEFORE one without
+                    //      (it removes the obstacle first).
+                    //   2. Otherwise, the lower action id wins (earlier chain).
+                    //   3. If the CURRENT action wins, we insert its id into
+                    //      seen (replacing the previous entry), and the
+                    //      PREVIOUSLY-seen action must be removed from feasible.
+                    //      Since the previous action was already processed
+                    //      (higher index in reverse iteration), we mark it
+                    //      by setting its bound to Ticks::MAX.
+                    //   4. If the CURRENT action loses, we remove it directly.
+                    let other_action = net.action(seen_id).unwrap();
+                    let other_has_remove = other_action.eff.iter().any(|eff| {
+                        matches!(eff, Effect::RemoveEntity { pos: p } if Pos::from(p) == pos)
+                    });
+                    let current_wins = (has_remove && !other_has_remove)
+                        || (has_remove == other_has_remove && feasible[i].action < seen_id);
+                    if current_wins {
+                        // Current action wins — keep it, mark the seen
+                        // action for removal by scanning for its action_id.
+                        seen.insert(pos.clone(), feasible[i].action);
+                        if let Some((idx, _)) = feasible.iter().enumerate()
+                            .find(|(_, c)| c.action == seen_id)
+                        {
+                            feasible[idx].bound = Ticks::MAX;
+                        }
+                    } else {
+                        // Seen action wins — remove this one.
+                        feasible.remove(i);
+                    }
+                } else {
+                    seen.insert(pos.clone(), feasible[i].action);
+                }
+            }
+        }
+
         // Every feasible pair of the round is known, so each can be priced
         // against the rest of its bot's ready work.
         let bounds: Vec<Ticks> = feasible
@@ -1134,7 +1193,7 @@ mod tests {
     use crate::ids::ActionIdGen;
     use crate::network::ActionNetwork;
     use factorio_bot_core::test_utils::fixture_world;
-    use factorio_bot_core::types::Position;
+    use factorio_bot_core::types::{Pos, Position};
     use std::sync::Arc;
 
     fn state(bots: &[BotId]) -> PlanState {

@@ -416,17 +416,15 @@ fn a_bot_only_the_second_engine_would_wall_in_is_examined() {
     let mut trial = before.fork();
     trial.create_entity(engine);
 
-    assert_eq!(
-        EnclosurePrevention::Refuse,
-        check(&before, &trial, &bystander),
+    assert!(
+        matches!(check(&before, &trial, &bystander), EnclosurePrevention::Evacuate(_)),
         "asked about the bot's own tile, the second engine plainly seals it in: \
          the pen's only gap is the three tiles that engine covers, and with them \
          blocked nothing in the window still reaches open ground"
     );
 
-    assert_eq!(
-        EnclosurePrevention::Refuse,
-        check(&before, &trial, &pump),
+    assert!(
+        matches!(check(&before, &trial, &pump), EnclosurePrevention::Evacuate(_)),
         "and the answer must not depend on the origin being the bot: the pump \
          is what `plan_plant_for` passes, and this bot is 41.1 tiles from it -- \
          outside the 36 the hand-sized `FOOTPRINT_PAD` admitted, which is how \
@@ -492,15 +490,13 @@ fn a_bot_on_the_diagonal_is_examined_too() {
     let mut trial = before.fork();
     trial.create_entity(engine);
 
-    assert_eq!(
-        EnclosurePrevention::Refuse,
-        check(&before, &trial, &bystander),
+    assert!(
+        matches!(check(&before, &trial, &bystander), EnclosurePrevention::Evacuate(_)),
         "asked about the bot's own tile, the engine seals the pen's only gap"
     );
 
-    assert_eq!(
-        EnclosurePrevention::Refuse,
-        check(&before, &trial, &pump),
+    assert!(
+        matches!(check(&before, &trial, &pump), EnclosurePrevention::Evacuate(_)),
         "and asked about the pump 42.8 tiles away on the diagonal, the same: a \
          bound that measured a circle against a square window would stop at \
          39.5 and never look"

@@ -179,6 +179,8 @@ fn the_specs_621_kw_is_what_the_demand_ledger_says() {
 /// so these tests are about the layout rather than about the research ladder
 /// (which `crates/planner/src/method/have.rs` already covers at length).
 fn world_that_can_build_an_assembler() -> factorio_bot_core::factorio::world::FactorioSurface {
+    // With SEARCH_RADIUS=32 (64x64 window) the belt router may use
+    // underground belts; add the recipe so the plan can craft them.
     let world = fixture_world();
     let recipe: FactorioRecipe = serde_json::from_str(
         r#"{
@@ -204,6 +206,54 @@ fn world_that_can_build_an_assembler() -> factorio_bot_core::factorio::world::Fa
     .expect("the assembling machine recipe parses");
     world
         .update_recipes(vec![recipe])
+        .expect("update_recipes cannot fail for a well-formed recipe");
+    let underground_recipe: FactorioRecipe = serde_json::from_str(
+        r#"{
+          "name": "underground-belt",
+          "valid": true,
+          "enabled": true,
+          "category": "crafting",
+          "ingredients": [
+            { "name": "iron-plate", "ingredient_type": "item", "amount": 10 },
+            { "name": "iron-gear-wheel", "ingredient_type": "item", "amount": 5 }
+          ],
+          "products": [
+            { "name": "underground-belt", "product_type": "item", "amount": 2, "probability": 1.0 }
+          ],
+          "hidden": false,
+          "energy": 0.5,
+          "order": "a[items]-a[underground-belt]",
+          "group": "logistics",
+          "subgroup": "belt"
+        }"#,
+    )
+    .expect("the underground belt recipe parses");
+    world
+        .update_recipes(vec![underground_recipe])
+        .expect("update_recipes cannot fail for a well-formed recipe");
+    let underground_recipe: FactorioRecipe = serde_json::from_str(
+        r#"{
+          "name": "underground-belt",
+          "valid": true,
+          "enabled": true,
+          "category": "crafting",
+          "ingredients": [
+            { "name": "iron-plate", "ingredient_type": "item", "amount": 10 },
+            { "name": "iron-gear-wheel", "ingredient_type": "item", "amount": 5 }
+          ],
+          "products": [
+            { "name": "underground-belt", "product_type": "item", "amount": 2, "probability": 1.0 }
+          ],
+          "hidden": false,
+          "energy": 0.5,
+          "order": "a[items]-a[underground-belt]",
+          "group": "logistics",
+          "subgroup": "belt"
+        }"#,
+    )
+    .expect("the underground belt recipe parses");
+    world
+        .update_recipes(vec![underground_recipe])
         .expect("update_recipes cannot fail for a well-formed recipe");
     world
 }

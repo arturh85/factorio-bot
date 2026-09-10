@@ -341,7 +341,7 @@ fn production_item_from_goal(goal: &Goal) -> Option<String> {
     match goal {
         Goal::Have { item, .. } | Goal::Produced { item, .. } | Goal::Producing { item, .. } => {
             match item.as_str() {
-                "iron-plate" | "copper-plate" => Some(item.clone()),
+                "iron-plate" | "copper-plate" | "automation-science-pack" => Some(item.clone()),
                 _ => None,
             }
         }

@@ -19,6 +19,7 @@ use crate::types::Position;
 use std::sync::Arc;
 
 pub mod planning;
+pub mod module_delivery;
 pub mod exposure;
 pub mod flow;
 pub mod lanes;

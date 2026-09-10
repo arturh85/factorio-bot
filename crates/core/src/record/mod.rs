@@ -18,6 +18,7 @@ use crate::graph::entity_graph::EntityGraph;
 use crate::types::Position;
 use std::sync::Arc;
 
+pub mod planning;
 pub mod exposure;
 pub mod flow;
 pub mod lanes;

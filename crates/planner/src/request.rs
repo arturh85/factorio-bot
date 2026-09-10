@@ -6,7 +6,10 @@
 //! [`PlanControl`] and preserves feasible incumbents. [`plan_best`] itself
 //! becomes a compatibility wrapper.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
+
+use factorio_bot_core::record::planning::PlanningRecord;
 use factorio_bot_core::types::Position;
 
 use crate::control::{BudgetLimits, BudgetReport, PlanControl, WorkKind};
@@ -140,6 +143,14 @@ pub fn plan_controlled(
     let mut first_error: Option<PlannerError> = None;
     let mut retry_seen: BTreeSet<TileKey> = BTreeSet::new();
 
+    // Phase tracking and wall-clock measurement.
+    let plan_start = Instant::now();
+    let mut phase_ms: BTreeMap<String, u64> = BTreeMap::new();
+
+    // Wrap the expansion phase.
+    let _expansion_phase = control.enter_phase(crate::control::PlanPhase::Expansion);
+    let expansion_start = Instant::now();
+
     // Expand and schedule under each drain policy.
     for policy in crate::method::produce::DrainPolicy::ALL {
         // Check the budget before each attempt.
@@ -174,6 +185,8 @@ pub fn plan_controlled(
         }
 
         let settled = !under.drain_policy_mattered();
+        let _scheduling_phase = control.enter_phase(crate::control::PlanPhase::Scheduling);
+        let scheduling_start = Instant::now();
         match schedule(&net, &under, roster) {
             Ok(plan) => {
                 if best
@@ -270,7 +283,13 @@ pub fn plan_controlled(
         }
     }
 
-    // Build the result.
+    // Record phase times and build the result.
+    phase_ms.insert("expansion".to_string(),
+        Instant::now().duration_since(expansion_start).as_millis() as u64);
+    let _planning_record = Some(PlanningRecord {
+        total_ms: Some(Instant::now().duration_since(plan_start).as_millis() as u64),
+        ..Default::default()
+    });
     let report = control.report();
     match (best, first_error) {
         (Some((net, plan)), _) => {

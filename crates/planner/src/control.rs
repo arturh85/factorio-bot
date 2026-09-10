@@ -79,6 +79,50 @@ impl std::fmt::Display for StopReason {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Plan events and observer
+// ---------------------------------------------------------------------------
+
+/// Event emitted during planning phases for measurement and observation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PlanEvent {
+    /// A planning phase started.
+    PhaseEntered(PlanPhase),
+    /// A planning phase completed.
+    PhaseLeft(PlanPhase),
+}
+
+/// Observer callback for planning events.
+pub type PlanObserver = Arc<dyn Fn(PlanEvent) + Send + Sync>;
+
+/// RAII guard returned by [`PlanControl::enter_phase`].
+///
+/// Emits `PhaseEntered` on construction and `PhaseLeft` on drop,
+/// including on error paths.
+pub struct PhaseGuard {
+    phase: PlanPhase,
+    observer: Option<PlanObserver>,
+}
+
+impl PhaseGuard {
+    fn new(phase: PlanPhase, observer: Option<PlanObserver>) -> Self {
+        if let Some(ref obs) = observer {
+            obs(PlanEvent::PhaseEntered(phase));
+        }
+        Self { phase, observer }
+    }
+}
+
+impl Drop for PhaseGuard {
+    fn drop(&mut self) {
+        if let Some(ref obs) = self.observer {
+            obs(PlanEvent::PhaseLeft(self.phase));
+        }
+    }
+}
+
+
+
 /// Snapshot of what has been consumed and whether the control has stopped.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct BudgetReport {
@@ -99,6 +143,7 @@ struct ControlState {
     // Cancellation closure. Debug is implemented manually so this field does
     // not force `dyn Fn() -> bool` to be Debug.
     cancelled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    observer: Option<PlanObserver>,
 }
 
 impl std::fmt::Debug for ControlState {
@@ -107,6 +152,7 @@ impl std::fmt::Debug for ControlState {
             .field("limits", &self.limits)
             .field("report", &self.report)
             .field("cancelled", &self.cancelled.is_some())
+            .field("observer", &self.observer.is_some())
             .finish()
     }
 }
@@ -117,6 +163,7 @@ impl Default for ControlState {
             limits: BudgetLimits::default(),
             report: BudgetReport::default(),
             cancelled: None,
+            observer: None,
         }
     }
 }
@@ -202,6 +249,7 @@ impl PlanControl {
                 limits,
                 report: BudgetReport::default(),
                 cancelled: None,
+                observer: None,
             })),
         }
     }
@@ -219,6 +267,7 @@ impl PlanControl {
                 limits,
                 report: BudgetReport::default(),
                 cancelled: Some(cancelled),
+                observer: None,
             })),
         }
     }
@@ -281,6 +330,27 @@ impl PlanControl {
     pub fn report(&self) -> BudgetReport {
         let state = self.inner.lock().unwrap();
         state.report.clone()
+    }
+
+    /// Install an observer that receives [`PlanEvent`] notifications.
+    ///
+    /// Observers are called outside the mutex lock and must not block.
+    pub fn with_observer(self, observer: PlanObserver) -> Self {
+        {
+            let mut state = self.inner.lock().unwrap();
+            state.observer = Some(observer);
+        }
+        self
+    }
+
+    /// Enter a planning phase, returning a [`PhaseGuard`] that emits a
+    /// balanced `PhaseEntered`/`PhaseLeft` pair on construction and drop.
+    pub fn enter_phase(&self, phase: PlanPhase) -> PhaseGuard {
+        let observer = {
+            let state = self.inner.lock().unwrap();
+            state.observer.clone()
+        };
+        PhaseGuard::new(phase, observer)
     }
 }
 
@@ -368,6 +438,18 @@ mod tests {
         // a is stopped because Site hit its limit; even unbounded kinds
         // are blocked once the control latches.
         assert!(a.charge(WorkKind::Goal).is_err());
+    }
+
+    #[test]
+    fn failed_phase_still_closes_its_observation_scope() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let control = PlanControl::new(BudgetLimits::default())
+            .with_observer(Arc::new(move |event| sink.lock().unwrap().push(event)));
+        {
+            let _phase = control.enter_phase(PlanPhase::Scheduling);
+        }
+        assert_eq!(seen.lock().unwrap().len(), 2);
     }
 
     #[test]

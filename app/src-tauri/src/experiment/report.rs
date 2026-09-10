@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Comparison report from experiment results.
 //!
 //! Produces paired comparisons between planner variants, trial summaries,
@@ -10,7 +11,6 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::experiment::manifest::TrialKey;
 use crate::experiment::runner::{TrialOutcome, TrialResult};
 
 // ---------------------------------------------------------------------------
@@ -19,6 +19,7 @@ use crate::experiment::runner::{TrialOutcome, TrialResult};
 
 /// Aggregated comparison of results across planner variants.
 #[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)]
 pub struct Comparison {
     /// Number of declared trials per (variant, task).
     pub declared_counts: BTreeMap<String, usize>,
@@ -38,6 +39,7 @@ pub struct Comparison {
 
 /// A paired time comparison between two variants for the same seed/roster/task.
 #[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)]
 pub struct PairedTime {
     pub seed: u32,
     pub bots: u32,
@@ -54,6 +56,7 @@ pub struct PairedTime {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum ReportError {
     MixedManifests(String),
     DuplicateRows(String),
@@ -82,6 +85,7 @@ impl std::error::Error for ReportError {}
 ///
 /// Groups results by variant, counts outcomes, and pairs successful trials
 /// by (seed, roster, task, repetition) for the first two variants found.
+#[allow(dead_code)]
 pub fn compare(results: &[TrialResult]) -> Result<Comparison, ReportError> {
     if results.is_empty() {
         return Ok(Comparison {
@@ -196,6 +200,7 @@ pub fn compare(results: &[TrialResult]) -> Result<Comparison, ReportError> {
 /// - `trials.csv` — one row per trial
 /// - `comparison.json` — aggregated results
 /// - `report.md` — human-readable summary
+#[allow(dead_code)]
 pub fn write_report(
     results: &[TrialResult],
     comparison: &Comparison,

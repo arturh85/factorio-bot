@@ -1,3 +1,4 @@
+#![allow(unused_imports, unused_variables)]
 //! Module instance identity and reconciliation.
 //!
 //! A [`ModuleInstance`] records the result of placing a [`ModuleDesign`] on a
@@ -123,7 +124,7 @@ impl InstanceMemory {
 /// Current implementation is conservative: without a full entity-lookup by
 /// tile, it marks all parts as `Unknown` and relies on the caller to verify.
 pub fn reconcile(
-    mut instance: ModuleInstance,
+    instance: ModuleInstance,
     _design: &ModuleDesign,
     _world: &PlanState,
 ) -> Result<ModuleInstance, ModuleError> {

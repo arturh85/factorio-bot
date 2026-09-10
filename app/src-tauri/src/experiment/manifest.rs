@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Experiment manifest: source declaration and resolved matrix.
 //!
 //! The source manifest (`experiments/starter-modules.json`) declares
@@ -13,6 +14,7 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub struct Manifest {
     pub schema: u32,
     pub seeds: Vec<u32>,
@@ -42,6 +44,7 @@ pub struct Manifest {
 
 /// Uniquely identifies one trial in the matrix.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct TrialKey {
     pub seed: u32,
     pub bots: u32,
@@ -55,6 +58,7 @@ pub struct TrialKey {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum ManifestError {
     InvalidField(String),
     MissingProvenance(String),
@@ -80,6 +84,7 @@ impl std::error::Error for ManifestError {}
 // ---------------------------------------------------------------------------
 
 /// Expand a manifest into the full list of trial keys.
+#[allow(dead_code)]
 pub fn expand_matrix(manifest: &Manifest) -> Result<Vec<TrialKey>, ManifestError> {
     // Validate limits.
     if manifest.seeds.is_empty() {
@@ -129,6 +134,7 @@ pub fn expand_matrix(manifest: &Manifest) -> Result<Vec<TrialKey>, ManifestError
 /// A manifest that has been prepared (resolved against the current
 /// environment) and is ready to run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ResolvedManifest {
     pub schema: u32,
     pub source: Manifest,

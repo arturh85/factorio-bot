@@ -1,3 +1,5 @@
+// The imports below are intentionally broad for a skeleton module.
+#![allow(unused_imports, dead_code)]
 //! Compile selected module instances into action networks and schedules.
 //!
 //! The module compilation path takes selected designs and instances, creates
@@ -146,8 +148,8 @@ pub fn plan_with_session(
     chain_actor: BotId,
     roster: &[BotId],
     control: &PlanControl,
-    options: &PlannerOptions,
-    session: &mut PlannerSession,
+    _options: &PlannerOptions,
+    _session: &mut PlannerSession,
 ) -> crate::request::PlanResult {
     // For now, fall back to the legacy planner.
     // Future implementation will:

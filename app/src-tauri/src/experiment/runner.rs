@@ -1,12 +1,14 @@
+#![allow(dead_code)]
 //! Isolated trial runner for frozen experiments.
 //!
 //! Executes each trial from the expanded matrix, managing process lifecycle
 //! and recording outcomes.
 
-use crate::experiment::manifest::{Manifest, ResolvedManifest, TrialKey, ManifestError};
+use crate::experiment::manifest::{ResolvedManifest, TrialKey, ManifestError};
 
 /// Outcome of a single trial.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum TrialOutcome {
     Success,
     Failure,
@@ -17,6 +19,7 @@ pub enum TrialOutcome {
 
 /// Record of one completed trial.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TrialResult {
     pub key: TrialKey,
     pub manifest_hash: String,
@@ -32,6 +35,7 @@ pub struct TrialResult {
 /// For each trial, spawns an isolated process (headless server + planner)
 /// with the trial's parameters, waits for completion or timeout, and
 /// records the outcome.
+#[allow(dead_code)]
 pub fn run_experiment(
     _manifest: &ResolvedManifest,
     _output_dir: &str,

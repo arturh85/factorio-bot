@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Select and site a bounded portfolio of module candidates.
 //!
 //! [`select_candidates`] chooses design variants and capacity counts for a
@@ -99,8 +100,8 @@ pub fn select_candidates(
 
     // Sort candidates by (family, parameters, design_id).
     candidates.sort_by(|a, b| {
-        let mut key = (&a.family, &a.parameters.item, &a.id);
-        let mut other = (&b.family, &b.parameters.item, &b.id);
+        let key = (&a.family, &a.parameters.item, &a.id);
+        let other = (&b.family, &b.parameters.item, &b.id);
         key.cmp(&other)
     });
 

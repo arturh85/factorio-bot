@@ -186,7 +186,7 @@ pub fn plan_controlled(
 
         let settled = !under.drain_policy_mattered();
         let _scheduling_phase = control.enter_phase(crate::control::PlanPhase::Scheduling);
-        let scheduling_start = Instant::now();
+        let _scheduling_start = Instant::now();
         match schedule(&net, &under, roster) {
             Ok(plan) => {
                 if best
@@ -259,7 +259,7 @@ pub fn plan_controlled(
                                         let _ = control.charge(WorkKind::Assignment);
                                         match schedule(&net, &under, roster) {
                                             Ok(plan) => {
-                                                let memory = crate::memory::capture_intent(
+                                                let _memory = crate::memory::capture_intent(
                                                     state, &net, &plan, 0);
                                                 best = Some((net, plan));
                                                 break;

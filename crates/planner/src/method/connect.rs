@@ -1256,7 +1256,10 @@ fn overlay_boxes(ctx: &ExpansionCtx, area: &Rect) -> Vec<Rect> {
     );
     // The circumradius of the window, so nothing inside the rectangle is
     // missed by a radius query: half the diagonal of a square of this side.
-    let radius = (area.width() / 2.).hypot(area.height() / 2.);
+    // Add PLACEMENT_HALF_BOX so entities whose expanded collision box reaches
+    // into the window from just outside are still found.
+    let plain = (area.width() / 2.).hypot(area.height() / 2.);
+    let radius = plain + PLACEMENT_HALF_BOX;
     ctx.state
         .entities_within(&centre, radius)
         .into_iter()

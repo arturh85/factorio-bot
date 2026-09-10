@@ -1210,7 +1210,7 @@ fn tap_steps(
         "tap the run from {} for {item}, one output on to where it went, one to {}",
         from.name, to.name
     );
-    let place = place_step(ctx, splitter, build, &note);
+    let place = place_step_position_free(ctx, splitter, build, &note);
     if let Step::Act(action) = &place {
         steps.push(Step::Link {
             from: chop_id,
@@ -1706,6 +1706,53 @@ fn place_step(ctx: &mut ExpansionCtx, entity: FactorioEntity, build: f64, note: 
     }));
     // The overlay half, exactly as `power.rs` does it: the next tile's
     // `AreaFree` must see what this one took.
+    ctx.state.create_entity(entity);
+    step
+}
+
+/// One `Place` action with `PositionFree` instead of `AreaFree`.
+///
+/// Used by [`tap_steps`] for the splitter that replaces a belt on the same
+/// tile: the chop action's `RemoveEntity` clears the exact position, so
+/// a full `AreaFree` (which checks collision-box overlap with neighbours)
+/// would incorrectly fail when an adjacent entity's box extends into this
+/// tile. `PositionFree` checks only the 1Ã1 tile, which is sufficient here
+/// because the tap always follows the chop on the same belt position.
+fn place_step_position_free(ctx: &mut ExpansionCtx, entity: FactorioEntity, build: f64, note: &str) -> Step {
+    let min_radius = ctx.state.placement_clearance(&entity.name).unwrap_or(0.0);
+    let step = Step::Act(Box::new(Action {
+        id: ctx.ids.next(),
+        kind: ActionKind::Place {
+            entity: Box::new(entity.clone()),
+        },
+        pre: vec![
+            Condition::AtPosition {
+                who: Actor::Role,
+                pos: entity.position.clone(),
+                radius: build,
+                min_radius,
+            },
+            Condition::PositionFree {
+                pos: entity.position.clone(),
+            },
+            Condition::HasItem {
+                who: Actor::Role,
+                item: entity.name.as_str().into(),
+                count: 1,
+            },
+        ],
+        eff: vec![
+            Effect::LoseItem {
+                who: Actor::Role,
+                item: entity.name.as_str().into(),
+                count: 1,
+            },
+            Effect::CreateEntity(Box::new(entity.clone())),
+        ],
+        duration: PLACE_TICKS,
+        pinned: None,
+        label: format!("place {} at {} -- {note}", entity.name, entity.position),
+    }));
     ctx.state.create_entity(entity);
     step
 }

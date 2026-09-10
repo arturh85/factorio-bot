@@ -66,14 +66,14 @@ pub struct Offset {
 // ---------------------------------------------------------------------------
 
 /// Which family of factory module this design belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ModuleFamily {
     OreToPlate,
     RedScience,
 }
 
 /// How the design was obtained.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum KnowledgeOrigin {
     /// Extracted from the existing native planner layout.
     Extracted,
@@ -142,7 +142,7 @@ pub struct Part {
 // ---------------------------------------------------------------------------
 
 /// Parameters that select a specific variant of a module family.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ModuleParameters {
     pub item: String,
     pub with_pole: bool,

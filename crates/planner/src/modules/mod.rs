@@ -12,6 +12,7 @@ pub mod error;
 pub mod families;
 pub mod instance;
 pub mod ledger;
+pub mod select;
 
 #[cfg(test)]
 mod tests {

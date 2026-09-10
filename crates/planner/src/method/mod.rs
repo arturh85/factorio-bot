@@ -1403,7 +1403,7 @@ fn reserve_chain_produce(
 /// goals with no action of the caller's waiting to consume them together, and
 /// a `Have` states a holding rather than a delivery, so two members asking for
 /// five gears each still describe one bot holding five.
-fn run_steps(
+pub(crate) fn run_steps(
     steps: Vec<Step>,
     ctx: &mut ExpansionCtx,
     net: &mut ActionNetwork,

@@ -8,8 +8,6 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::control::WorkKind;
-use crate::error::PlannerError;
 
 /// SHA-256 content hash of a module design's canonical form.
 pub type DesignId = String;

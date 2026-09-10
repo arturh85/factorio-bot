@@ -7,6 +7,7 @@
 //! The public API is re-exported through the planner crate root.
 
 pub mod artifact;
+pub mod cache;
 pub mod error;
 pub mod families;
 

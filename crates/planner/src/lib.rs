@@ -107,6 +107,18 @@ pub use state::{BotState, Buffer, PlanState};
 /// What remains is wall-clock time with the game's clock stopped
 /// (`Planner::plan_pause`), not game time, and it buys a number the planner
 /// could not otherwise see.
+/// Extract a tile position from a scheduler conflict message like
+/// "transport-belt fits at [3.5, -36.5] facing 4 -- occupied by splitter".
+fn parse_conflict_position(condition: &str) -> Option<factorio_bot_core::types::Position> {
+    let start = condition.find('[')?;
+    let end = condition.find(']')?;
+    let coords = &condition[start+1..end];
+    let mut parts = coords.splitn(2, ',');
+    let x = parts.next()?.trim().parse::<f64>().ok()?;
+    let y = parts.next()?.trim().parse::<f64>().ok()?;
+    Some(factorio_bot_core::types::Position::new(x, y))
+}
+
 pub fn plan_best(
     goals: &[Goal],
     state: &PlanState,
@@ -148,6 +160,19 @@ pub fn plan_best(
         }
         if settled {
             break;
+        }
+    }
+    // When no plan succeeded due to a tile conflict, reserve the
+    // conflicting tile and retry once. This gives the expansion a chance
+    // to route around the obstacle — a layout correction for builds
+    // placed too tightly.
+    if best.is_none() {
+        if let Some(PlannerError::ChainOwnerInfeasible { condition, .. }) = &first_error {
+            if let Some(pos) = parse_conflict_position(condition) {
+                let mut retry_state = state.clone();
+                retry_state.reserve_ground(&[pos], "conflict retry");
+                return plan_best(goals, &retry_state, registry, chain_actor, roster);
+            }
         }
     }
     match (best, first_error) {

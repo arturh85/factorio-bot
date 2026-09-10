@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {computed, onMounted, onUnmounted, ref, watch} from 'vue';
-import {Cog, Film, Home, Map as MapIcon, Network, Terminal} from '@lucide/vue';
+import {BookCopy, Cog, Film, Home, Map as MapIcon, Network, Terminal} from '@lucide/vue';
 import AppTopbar from './AppTopbar.vue';
 import AppMenu from './AppMenu.vue';
 import AppFooter from './AppFooter.vue';
@@ -22,6 +22,7 @@ const menu: MenuEntry[] = [
   {label: 'RCON', icon: Terminal, to: '/rcon'},
   {label: 'LUA Script', icon: Terminal, to: '/script'},
   {label: 'Tasks', icon: Network, to: '/tasks'},
+  {label: 'Blueprints', icon: BookCopy, to: '/blueprints'},
   {label: 'Map', icon: MapIcon, to: '/map'},
   {label: 'Runs', icon: Film, to: '/runs'}
 ]

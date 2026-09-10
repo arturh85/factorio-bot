@@ -51,6 +51,11 @@ const routes = [
         component: () => import('./pages/RunAnalysisPage.vue')
     },
     {
+        path: '/blueprints',
+        name: 'blueprints',
+        component: () => import('./pages/BlueprintLibrary.vue')
+    },
+    {
         path: '/map',
         name: 'map',
         component: () => import('./pages/MapPage.vue')

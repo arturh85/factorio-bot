@@ -1,8 +1,10 @@
 pub mod action;
+pub mod control;
 pub mod enclosure;
 pub mod error;
 pub mod goal;
 pub mod ids;
+pub mod memory;
 pub mod method;
 pub mod network;
 pub mod powered;
@@ -15,7 +17,6 @@ pub mod score;
 pub mod search;
 pub mod standing;
 pub mod state;
-pub mod memory;
 pub mod substance;
 
 /// Test-only worlds. Not part of the crate's API: research needs a world with
@@ -24,6 +25,7 @@ pub mod substance;
 mod test_world;
 
 pub use action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
+pub use control::{BudgetLimits, BudgetReport, PlanControl, PlanPhase, StopReason, WorkKind};
 pub use error::PlannerError;
 pub use goal::{Goal, Holder, Site};
 pub use ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGen, ItemId, Ticks};
@@ -112,7 +114,7 @@ pub use state::{BotState, Buffer, PlanState};
 fn parse_conflict_position(condition: &str) -> Option<factorio_bot_core::types::Position> {
     let start = condition.find('[')?;
     let end = condition.find(']')?;
-    let coords = &condition[start+1..end];
+    let coords = &condition[start + 1..end];
     let mut parts = coords.splitn(2, ',');
     let x = parts.next()?.trim().parse::<f64>().ok()?;
     let y = parts.next()?.trim().parse::<f64>().ok()?;

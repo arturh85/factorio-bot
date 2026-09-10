@@ -1544,14 +1544,16 @@ pub enum PlannerError {
     /// thing entirely. The wrapped
     /// [`crate::method::fabricate::FabricateRefusal`] names the machine, the
     /// recipe, its category and the fluid.
+    /// The plan was stopped by its shared budget or cancellation latch.
+    ///
+    /// This is not a failure of the plan's logic: it means the request has
+    /// consumed its allowed work or was externally cancelled. The caller
+    /// should check for an incumbent plan before treating this as a loss.
+    #[error("planning stopped: {reason}")]
+    PlanningStopped { reason: String },
+
     #[error("{0}")]
     #[diagnostic(transparent)]
-    ///
-    /// **Boxed**, and that is not cosmetic: `FabricateRefusal::NoFluidSource`
-    /// carries five owned strings and a [`crate::substance::FluidSource`], and
-    /// inlining it took `PlannerError` past `clippy::result_large_err` -- every
-    /// `Result<_, PlannerError>` in the crate would have paid for a refusal
-    /// almost nothing returns.
     CannotFabricate(#[from] Box<crate::method::fabricate::FabricateRefusal>),
 }
 

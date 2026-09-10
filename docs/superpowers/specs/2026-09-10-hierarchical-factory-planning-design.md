@@ -2,11 +2,11 @@
 
 Date: 2026-09-10
 
-Status: draft for written review; implementation not started.
+Status: approved in conversation on 2026-09-10; implementation not started.
 
 Source baseline: `82c22eee`. The owner approved the architectural direction in
-conversation and requested this Superpowers spec. The detailed contracts and
-rollout below are proposals for review.
+conversation and requested this Superpowers spec, then approved proceeding to
+implementation planning after the written spec was presented.
 
 ## 1. Outcome and scope
 
@@ -549,7 +549,8 @@ Factorio implementation will achieve the same performance:
 
 ## 13. Review and implementation boundary
 
-Review this written design before producing the phase 0–2 implementation plan.
+Written review is complete. The phase 0–2 implementation plan is
+[available here](../plans/2026-09-10-hierarchical-factory-planning.md).
 The recommended decisions are: incremental extraction, explicit conditional
 contracts, a shared planning budget, an unchanged baseline mode, and a frozen
 starter-production comparison before learned design or global optimization.

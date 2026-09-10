@@ -1915,7 +1915,15 @@ pub fn connect_steps_reserving(
     inserter: &str,
     reserved: &[Position],
 ) -> Result<Vec<Step>, ConnectRefusal> {
-    let (area, origin) = enclosure::window(&from.position);
+    // Centre on the midpoint so both endpoints are inside the search window,
+    // not just `from`. On long routes (e.g. 350-tile gather oil pipe run) a
+    // from-centred window leaves the destination outside the grid, making
+    // overlay entities near the destination invisible to the router.
+    let centroid = Position::new(
+        (from.position.x() + to.position.x()) / 2.,
+        (from.position.y() + to.position.y()) / 2.,
+    );
+    let (area, origin) = enclosure::window(&centroid);
     // `mut`: the two machine footprints and the six tiles derived below (an
     // anchor, an inserter and a belt cell at each end) all claim their cells
     // onto this same grid -- see the comments there.

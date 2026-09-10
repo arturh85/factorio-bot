@@ -119,7 +119,7 @@ fn parse_conflict_position(condition: &str) -> Option<factorio_bot_core::types::
     Some(factorio_bot_core::types::Position::new(x, y))
 }
 
-const MAX_RETRY_DEPTH: u32 = 3;
+const MAX_RETRY_DEPTH: u32 = 1;
 
 pub fn plan_best(
     goals: &[Goal],
@@ -196,38 +196,23 @@ pub fn plan_best(
             match conflict_tile {
                 Some(pos) => {
                     retry_state.reserve_ground(&[pos], "conflict retry");
-                    let mut best: Option<(ActionNetwork, Schedule)> = None;
-                    let mut first_error: Option<PlannerError> = None;
-                    for policy in DrainPolicy::ALL {
-                        let under = retry_state
-                            .clone()
-                            .with_drain_policy(policy)
-                            .with_fresh_policy_probe();
-                        let net = match expand(goals, &under, registry, chain_actor) {
-                            Ok(net) => net,
-                            Err(err) => {
-                                first_error.get_or_insert(err);
-                                continue;
-                            }
-                        };
-                        let settled = !under.drain_policy_mattered();
-                        match schedule(&net, &under, roster) {
+                    // Single attempt with the default policy — no policy
+                    // loop, because the reservation is what matters, not
+                    // the drain strategy.
+                    let under = retry_state.clone().with_fresh_policy_probe();
+                    match expand(goals, &under, registry, chain_actor) {
+                        Ok(net) => match schedule(&net, &under, roster) {
                             Ok(plan) => {
-                                if best.as_ref().is_none_or(|(_, b)| plan.makespan < b.makespan) {
-                                    best = Some((net, plan));
-                                }
+                                let memory = memory::capture_intent(state, &net, &plan, 0);
+                                return Ok((net, plan, memory));
                             }
                             Err(err) => {
-                                first_error.get_or_insert(err);
+                                first_error = Some(err);
                             }
+                        },
+                        Err(err) => {
+                            first_error = Some(err);
                         }
-                        if settled {
-                            break;
-                        }
-                    }
-                    if let Some((net, plan)) = best {
-                        let memory = memory::capture_intent(state, &net, &plan, 0);
-                        return Ok((net, plan, memory));
                     }
                 }
                 None => break,

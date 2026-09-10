@@ -413,6 +413,8 @@ pub struct AssemblySpec {
     ///
     /// This is what goes in the supply chest.
     pub supplied: (ItemId, u32),
+    /// Additional ingredients for recipes with 3+ inputs (chemical-science-pack).
+    pub extra_supplied: Vec<(ItemId, u32)>,
     /// The ingredient it can, and the machine that does it — `None` for a
     /// **one-machine** cell, whose single machine is fed from the supply chest
     /// and nothing else.
@@ -717,9 +719,12 @@ pub fn assembly_spec(state: &PlanState, item: &str) -> Option<AssemblySpec> {
         return None;
     }
     let ingredients = ingredients_of(&recipe);
-    let [(a, a_amount), (b, b_amount)] = ingredients.as_slice() else {
-        return None;
-    };
+    // Handle 2+ ingredients. First 2 follow the existing pattern;
+    // remaining go into extra_supplied for 3+ input recipes.
+    let mut iter = ingredients.iter();
+    let (a, a_amount) = iter.next()?;
+    let (b, b_amount) = iter.next()?;
+    let extra_supplied: Vec<(ItemId, u32)> = iter.map(|(i, a)| (i.clone(), *a)).collect();
     // Which of the two the cell builds a machine for. None means both arrive
     // in chests and no machine of the cell's does anything; both is decided by
     // depth, and a tie is a refusal -- see this function's own doc.
@@ -762,6 +767,7 @@ pub fn assembly_spec(state: &PlanState, item: &str) -> Option<AssemblySpec> {
         machine: MACHINE,
         recipe,
         supplied,
+        extra_supplied,
         intermediate: Some(intermediate),
         ticks_per_item,
         belted,
@@ -846,6 +852,7 @@ fn furnace_spec(state: &PlanState, item: &str, recipe: FactorioRecipe) -> Option
         machine: FURNACE,
         recipe,
         supplied: (input.clone(), *amount),
+        extra_supplied: vec![],
         intermediate: None,
         ticks_per_item,
         belted,
@@ -2938,6 +2945,13 @@ fn bill(spec: &AssemblySpec, cells: &[Cell], coal: u32) -> Vec<(ItemId, u32)> {
     let supply_charge = spec.supply_charge();
     if supply_charge > 0 {
         out.push((spec.supplied.0.clone(), supply_charge.saturating_mul(count)));
+    }
+    // Extra supplied items for recipes with 3+ inputs (chemical-science-pack).
+    for (item, per_product) in &spec.extra_supplied {
+        let charge = spec.charge_products().saturating_mul(*per_product);
+        if charge > 0 {
+            out.push((item.clone(), charge.saturating_mul(count)));
+        }
     }
     // Only the cells that could not adopt supply that already stands. A pole
     // in a bill nobody places is one of four wood, spent for nothing.
@@ -5652,8 +5666,8 @@ mod tests {
             "one ingredient, so the cell would have a chest and nothing to put in the other"
         );
         assert!(
-            assembly_spec(&s, "lab").is_none(),
-            "three ingredients, and the layout has two chests"
+            assembly_spec(&s, "lab").is_some(),
+            "three ingredients now work: the supply chest charges two types"
         );
         assert!(
             assembly_spec(&s, "transport-belt").is_some(),

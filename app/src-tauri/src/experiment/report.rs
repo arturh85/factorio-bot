@@ -296,6 +296,7 @@ pub fn write_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::experiment::manifest::TrialKey;
 
     fn make_result(
         variant: &str,

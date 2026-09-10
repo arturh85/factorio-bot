@@ -198,6 +198,7 @@ fn a_wall_wider_than_the_prototype_allows_is_refused_by_span() {
         }
         other => panic!("expected SpanTooLong, got {other:?}"),
     }
+            
 }
 
 #[test]
@@ -827,6 +828,9 @@ fn a_refusal_names_the_map_and_never_the_route_itself() {
                     "{tile} is named as blocked and is free ground"
                 );
             }
+        }
+        RouteError::Cancelled => {
+            panic!("route was cancelled unexpectedly");
         }
     }
 }

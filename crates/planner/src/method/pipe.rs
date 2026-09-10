@@ -1489,6 +1489,9 @@ pub(crate) fn route_between(
                          allows {max}"
                     ));
                 }
+                Err(RouteError::Cancelled) => {
+                    last = Some("route cancelled".to_string());
+                }
             }
         }
     }

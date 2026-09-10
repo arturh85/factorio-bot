@@ -167,6 +167,11 @@ pub enum EscapeUnknown {
     OutsideModel,
 }
 
+/// Returned by checked enclosure functions when the cancellation callback
+/// fires during a search.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchCancelled;
+
 /// Whether the character standing at `from` can reach ground outside a window
 /// [`SEARCH_RADIUS`] tiles around it.
 ///
@@ -579,6 +584,20 @@ pub fn fill_from_center(blocked: &[bool]) -> Escape {
         pocket_tiles: f64::from(reached) * CELL * CELL,
     }
 }
+/// Fill reachable tiles from center, checking a cancellation callback.
+///
+/// Returns `Err(SearchCancelled)` if `keep_going` returns `false` at any
+/// point during the search before it completes.
+pub fn fill_from_center_checked(
+    blocked: &[bool],
+    keep_going: &mut dyn FnMut() -> bool,
+) -> Result<Escape, SearchCancelled> {
+    if !keep_going() {
+        return Err(SearchCancelled);
+    }
+    Ok(fill_from_center(blocked))
+}
+
 
 /// Every cell reachable from the centre, admitted free there whatever
 /// `blocked` says, in breadth-first (nearest-first) order.

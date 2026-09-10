@@ -62,6 +62,8 @@ mod replan_sealed_supply;
 mod replan_taps_the_run;
 #[path = "planning_work_ceilings.rs"]
 mod planning_work_ceilings;
+#[path = "request_budget.rs"]
+mod request_budget;
 #[path = "product_index_live_capture.rs"]
 mod product_index_live_capture;
 #[path = "recipe_probability.rs"]

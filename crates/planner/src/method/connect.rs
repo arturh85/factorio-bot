@@ -1051,6 +1051,7 @@ fn tap_standing_run(
                         RouteError::SpanTooLong { needed, max } => {
                             ConnectRefusal::SpanTooLong { needed, max }
                         }
+                        RouteError::Cancelled => ConnectRefusal::NoRoute { blocked: vec![] },
                     };
                     last = Some(format!(
                         "from the splice at {}: {why}",
@@ -1982,7 +1983,7 @@ pub fn connect_steps_reserving(
 
     claim_footprint(&mut blocked, &from_footprint);
     claim_footprint(&mut blocked, &to_footprint);
-    let own_perimeter = |cell: (usize, usize)| {
+    let _own_perimeter = |cell: (usize, usize)| {
         [&from_footprint, &to_footprint]
             .into_iter()
             .any(|footprint| {
@@ -2137,6 +2138,7 @@ pub fn connect_steps_reserving(
                 RouteError::SpanTooLong { needed, max } => {
                     ConnectRefusal::SpanTooLong { needed, max }
                 }
+                RouteError::Cancelled => ConnectRefusal::NoRoute { blocked: vec![] },
             })?;
         Ok((source, sink, route))
     };

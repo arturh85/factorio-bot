@@ -1,8 +1,11 @@
 pub mod action;
+pub mod control;
 pub mod enclosure;
 pub mod error;
 pub mod goal;
 pub mod ids;
+pub mod memory;
+pub mod modules;
 pub mod method;
 pub mod network;
 pub mod powered;
@@ -15,7 +18,7 @@ pub mod score;
 pub mod search;
 pub mod standing;
 pub mod state;
-pub mod memory;
+pub mod request;
 pub mod substance;
 
 /// Test-only worlds. Not part of the crate's API: research needs a world with
@@ -24,6 +27,8 @@ pub mod substance;
 mod test_world;
 
 pub use action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
+pub use control::{BudgetLimits, BudgetReport, PlanControl, PlanPhase, StopReason, WorkKind};
+pub use request::{PlanResult, PlanStatus, PlannedMilestone, plan_controlled};
 pub use error::PlannerError;
 pub use goal::{Goal, Holder, Site};
 pub use ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGen, ItemId, Ticks};
@@ -107,20 +112,15 @@ pub use state::{BotState, Buffer, PlanState};
 /// What remains is wall-clock time with the game's clock stopped
 /// (`Planner::plan_pause`), not game time, and it buys a number the planner
 /// could not otherwise see.
-/// Extract a tile position from a scheduler conflict message like
-/// "transport-belt fits at [3.5, -36.5] facing 4 -- occupied by splitter".
-fn parse_conflict_position(condition: &str) -> Option<factorio_bot_core::types::Position> {
-    let start = condition.find('[')?;
-    let end = condition.find(']')?;
-    let coords = &condition[start+1..end];
-    let mut parts = coords.splitn(2, ',');
-    let x = parts.next()?.trim().parse::<f64>().ok()?;
-    let y = parts.next()?.trim().parse::<f64>().ok()?;
-    Some(factorio_bot_core::types::Position::new(x, y))
-}
-
-const MAX_RETRY_DEPTH: u32 = 1;
-
+/// Build the plan under every drain policy and keep the shorter schedule.
+///
+/// This is now a compatibility wrapper around [`plan_controlled`] with a
+/// default budget allowing one conflict retry (see [`plan_best_compat`]).
+///
+/// Deterministic: policies are tried in [`DrainPolicy`]'s own order and a tie
+/// keeps the earlier one, so [`DrainPolicy::Conservative`] wins any draw.
+///
+/// See [`plan_best_compat`] for the same semantics in result-type form.
 pub fn plan_best(
     goals: &[Goal],
     state: &PlanState,
@@ -128,103 +128,5 @@ pub fn plan_best(
     chain_actor: BotId,
     roster: &[BotId],
 ) -> Result<(ActionNetwork, Schedule, memory::ReplanMemory), PlannerError> {
-    let mut best: Option<(ActionNetwork, Schedule)> = None;
-    let mut first_error: Option<PlannerError> = None;
-    for policy in DrainPolicy::ALL {
-        let under = state
-            .clone()
-            .with_drain_policy(policy)
-            .with_fresh_policy_probe();
-        let net = match expand(goals, &under, registry, chain_actor) {
-            Ok(net) => net,
-            Err(err) => {
-                first_error.get_or_insert(err);
-                continue;
-            }
-        };
-        // Read before scheduling and only off a *complete* expansion: this
-        // says every remaining policy expands to the network just built, so
-        // whatever the schedule then makes of it, there is nothing left to
-        // compare against. See this function's doc for why that is a proof.
-        let settled = !under.drain_policy_mattered();
-        match schedule(&net, &under, roster) {
-            Ok(plan) => {
-                if best
-                    .as_ref()
-                    .is_none_or(|(_, best)| plan.makespan < best.makespan)
-                {
-                    best = Some((net, plan));
-                }
-            }
-            Err(err) => {
-                first_error.get_or_insert(err);
-            }
-        }
-        if settled {
-            break;
-        }
-    }
-    // When no plan succeeded due to a tile conflict, reserve the
-    // conflicting tile and retry once. This gives the expansion a chance
-    // to route around the obstacle — a layout correction for builds
-    // placed too tightly.
-    if best.is_none() {
-        if let Some(PlannerError::ChainOwnerInfeasible { condition, .. }) = &first_error {
-            if let Some(pos) = parse_conflict_position(condition) {
-                let mut retry_state = state.clone();
-                retry_state.reserve_ground(&[pos], "conflict retry");
-                return plan_best(goals, &retry_state, registry, chain_actor, roster);
-            }
-        }
-    }
-    // When no plan succeeded due to a tile conflict, reserve the
-    // conflicting tile and retry (up to MAX_RETRY_DEPTH times).
-    // This gives the expansion a chance to route around the obstacle —
-    // a layout correction for builds placed too tightly.
-    if best.is_none() {
-        let mut retry_state = state.clone();
-        for _depth in 0..MAX_RETRY_DEPTH {
-            let conflict_tile = match &first_error {
-                Some(PlannerError::ChainOwnerInfeasible { condition, .. }) => {
-                    parse_conflict_position(condition)
-                }
-                Some(PlannerError::AssemblyNoRouteForSupply { why, .. }) => {
-                    parse_conflict_position(why)
-                }
-                _ => None,
-            };
-            match conflict_tile {
-                Some(pos) => {
-                    retry_state.reserve_ground(&[pos], "conflict retry");
-                    // Single attempt with the default policy — no policy
-                    // loop, because the reservation is what matters, not
-                    // the drain strategy.
-                    let under = retry_state.clone().with_fresh_policy_probe();
-                    match expand(goals, &under, registry, chain_actor) {
-                        Ok(net) => match schedule(&net, &under, roster) {
-                            Ok(plan) => {
-                                let memory = memory::capture_intent(state, &net, &plan, 0);
-                                return Ok((net, plan, memory));
-                            }
-                            Err(err) => {
-                                first_error = Some(err);
-                            }
-                        },
-                        Err(err) => {
-                            first_error = Some(err);
-                        }
-                    }
-                }
-                None => break,
-            }
-        }
-    }
-    match (best, first_error) {
-        (Some((net, plan)), _) => {
-            let memory = memory::capture_intent(state, &net, &plan, 0);
-            Ok((net.clone(), plan.clone(), memory))
-        }
-        (None, Some(err)) => Err(err),
-        (None, None) => unreachable!("the policy list is not empty"),
-    }
+    request::plan_best_compat(goals, state, registry, chain_actor, roster)
 }

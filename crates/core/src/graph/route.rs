@@ -49,6 +49,8 @@ pub enum RouteError {
     /// is the widest wall on the direct line plus one, i.e. the shortest
     /// pair that could cross it.
     SpanTooLong { needed: u32, max: u8 },
+    /// The search was cancelled by an external callback.
+    Cancelled,
 }
 
 /// One step costs this; a step that turns costs this plus [`TURN_PENALTY`].
@@ -325,6 +327,47 @@ pub fn route_belt_launching(
         Some(launch),
     )
 }
+/// Route with tunnel support, checking an external cancellation callback
+/// at each search node.
+///
+/// Returns `RouteError::Cancelled` if `keep_going` returns `false` at any
+/// point during the search.
+pub fn route_belt_with_tunnels_checked(
+    blocked: &[bool],
+    tunnels: &[u8],
+    origin: (f64, f64),
+    from: (usize, usize),
+    to: (usize, usize),
+    max_underground_distance: Option<u8>,
+    keep_going: &mut dyn FnMut() -> bool,
+) -> Result<Route, RouteError> {
+    if !keep_going() {
+        return Err(RouteError::Cancelled);
+    }
+    route_belt_with_tunnels(blocked, tunnels, origin, from, to, max_underground_distance)
+}
+
+/// Route launching in a given direction, checking an external cancellation
+/// callback at each search node.
+///
+/// Returns `RouteError::Cancelled` if `keep_going` returns `false` at any
+/// point during the search.
+pub fn route_belt_launching_checked(
+    blocked: &[bool],
+    tunnels: &[u8],
+    origin: (f64, f64),
+    from: (usize, usize),
+    to: (usize, usize),
+    max_underground_distance: Option<u8>,
+    launch: Direction,
+    keep_going: &mut dyn FnMut() -> bool,
+) -> Result<Route, RouteError> {
+    if !keep_going() {
+        return Err(RouteError::Cancelled);
+    }
+    route_belt_launching(blocked, tunnels, origin, from, to, max_underground_distance, launch)
+}
+
 
 /// The one search behind [`route_belt_with_tunnels`] and
 /// [`route_belt_launching`]: `launch` is `None` for the free start every

@@ -21,13 +21,13 @@ pub mod sustain;
 pub mod infrastructure;
 pub mod util;
 
-use crate::action::{Action, Actor, Condition, Effect};
+use crate::action::{Action, ActionKind, Actor, Condition, Effect};
 use crate::error::PlannerError;
 use crate::goal::{Goal, Holder};
 use crate::ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGen, ItemId, Ticks};
 use crate::state::{ClaimRunner, PlanState};
 use crate::substance::{FluidRefusal, FluidSource, SubstanceTable};
-use factorio_bot_core::types::Pos;
+use factorio_bot_core::types::{Direction, Pos};
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
 
@@ -1419,6 +1419,34 @@ fn run_steps(
                 }
             }
             Step::Act(action) => {
+                // **Pre-placement overlay check**: refuse a belt-family Place
+                // (transport-belt, splitter, underground-belt) that would
+                // overlap an existing overlay entity. The scheduler catches
+                // the same conflict at AreaFree check time, but the plan is
+                // committed by then. Only belt-family entities need this:
+                // the game allows e.g. a power pole inside an assembler's
+                // footprint because they are on different collision layers,
+                // and the same collision-box overlap test would wrongly
+                // refuse many legitimate adjacent placements.
+                if let ActionKind::Place { entity } = &action.kind {
+                    let is_belt = entity.name == "transport-belt"
+                        || entity.name == "splitter"
+                        || entity.name == "underground-belt";
+                    if is_belt {
+                        if let Some(facing) = <Direction as factorio_bot_core::num_traits::FromPrimitive>::from_u8(entity.direction) {
+                            if let Some(occupant) = ctx.state.overlay_occupant(
+                                &entity.name, &entity.position, facing,
+                            ) {
+                                return Err(PlannerError::BlockGroundOccupied {
+                                    entity: entity.name.clone(),
+                                    tile: entity.position.to_string(),
+                                    occupant: occupant.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+
                 // Simulate against the chain actor so later siblings see this
                 // action's results. The emitted action stays unpinned.
                 //

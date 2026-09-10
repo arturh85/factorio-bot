@@ -1210,6 +1210,11 @@ fn tap_steps(
         "tap the run from {} for {item}, one output on to where it went, one to {}",
         from.name, to.name
     );
+    let splitter_pos = splice.splitter_position(origin);
+    let belt_pos = enclosure::cell_to_position(origin, splice.belt);
+    eprintln!("TRACE_TAP: splitter=[{:.1},{:.1}] belt=[{:.1},{:.1}]",
+        splitter_pos.x(), splitter_pos.y(), belt_pos.x(), belt_pos.y());
+    ctx.state.reserve_ground(&[splitter_pos, belt_pos], "tap splitter");
     let place = place_step_position_free(ctx, splitter, build, &note);
     if let Step::Act(action) = &place {
         steps.push(Step::Link {
@@ -1915,15 +1920,7 @@ pub fn connect_steps_reserving(
     inserter: &str,
     reserved: &[Position],
 ) -> Result<Vec<Step>, ConnectRefusal> {
-    // Centre on the midpoint so both endpoints are inside the search window,
-    // not just `from`. On long routes (e.g. 350-tile gather oil pipe run) a
-    // from-centred window leaves the destination outside the grid, making
-    // overlay entities near the destination invisible to the router.
-    let centroid = Position::new(
-        (from.position.x() + to.position.x()) / 2.,
-        (from.position.y() + to.position.y()) / 2.,
-    );
-    let (area, origin) = enclosure::window(&centroid);
+    let (area, origin) = enclosure::window(&from.position);
     // `mut`: the two machine footprints and the six tiles derived below (an
     // anchor, an inserter and a belt cell at each end) all claim their cells
     // onto this same grid -- see the comments there.
@@ -2003,10 +2000,10 @@ pub fn connect_steps_reserving(
     };
     let mut kept_exit: Vec<(usize, usize)> = Vec::new();
     for cell in ground_reserved {
-        if !own_perimeter(cell) {
-            blocked[enclosure::cell_index(cell.0, cell.1)] = true;
-        } else if from_perimeter(cell) {
+        if from_perimeter(cell) {
             kept_exit.push(cell);
+        } else {
+            blocked[enclosure::cell_index(cell.0, cell.1)] = true;
         }
     }
 

@@ -4138,6 +4138,39 @@ impl PlanState {
         }
     }
 
+    /// Like [`placement_occupant`] but only checks overlay entities, not the
+    /// base world, terrain, or characters. Use at expansion time to catch
+    /// cross-chain tile conflicts before the scheduler — the belt router's
+    /// 64x64 window cannot cover both ends of a 350-tile route, so overlay
+    /// entities near the destination escape the grid and the router places
+    /// through them.
+    ///
+    /// Unlike [`placement_occupant`], this skips an overlay entity whose name
+    /// and tile match the placement — the plan replacing its own entity at
+    /// the same position (e.g. belt → splitter within a tap) is not a
+    /// cross-chain conflict.
+    pub fn overlay_occupant(
+        &self,
+        name: &str,
+        position: &Position,
+        direction: Direction,
+    ) -> Option<Occupant> {
+        let area = self.collision_area_facing(name, position, direction)?;
+        let key = Pos::from(position);
+        for entity in self.added.values() {
+            if entity.name == name && Pos::from(&entity.position) == key {
+                continue; // our own replacement
+            }
+            if entity.name == GHOST_ENTITY_NAME {
+                continue;
+            }
+            if boxes_overlap(&self.footprint_of(entity), &area) {
+                return Some(Occupant::Entity(entity.name.clone()));
+            }
+        }
+        None
+    }
+
     /// [`placement_occupant`](Self::placement_occupant), for choosing a site
     /// rather than building at one already chosen -- the one caller that
     /// needs to know what is on the ground and NOT know who happens to be

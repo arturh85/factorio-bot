@@ -11,19 +11,18 @@ use factorio_bot_core::types::{FactorioEntity, Position};
 
 use crate::action::{Action, ActionKind, Condition, Effect};
 use crate::control::PlanControl;
-use crate::PlannerError;
 use crate::goal::Goal;
 
-use crate::ids::{ActionIdGen, BotId, ChainIdGen};
+use crate::ids::{ActionIdGen, BotId};
 use crate::memory::ReplanMemory;
 use crate::method::{run_steps, ExpansionCtx, MethodRegistry, Step};
-use crate::modules::artifact::{ModuleDesign, ModuleFamily, ModuleParameters};
+use crate::modules::artifact::ModuleDesign;
 use crate::modules::cache::{CacheMode, LibraryCache};
-use crate::modules::instance::{ModuleInstance, PartState};
+use crate::modules::instance::ModuleInstance;
 use crate::modules::ledger::OperatingLedger;
 use crate::modules::select::{select_candidates, site_candidates, ModuleSelection, ProductionRequest};
 use crate::network::ActionNetwork;
-use crate::schedule::{schedule, Schedule};
+use crate::schedule::schedule;
 use crate::state::PlanState;
 use std::sync::Arc;
 
@@ -88,11 +87,20 @@ pub struct CompiledModules {
 // ---------------------------------------------------------------------------
 
 /// Build Place steps for one module instance, using ids from the context.
+///
+/// For each part this produces:
+/// 1. A `Have` subgoal to acquire the entity (hand-craft or take from inventory)
+/// 2. A `Place` action to build it at the computed position
+/// 3. For burner entities, an `Insert` action to fuel it with coal
+/// 4. Where a recipe is specified, a `SetRecipe` action
 fn compile_module_placement(
     design: &ModuleDesign,
     instance: &ModuleInstance,
     ids: &mut ActionIdGen,
 ) -> Vec<Step> {
+    use crate::action::InventorySlot;
+    use crate::goal::{Goal, Holder};
+
     let mut steps: Vec<Step> = Vec::new();
 
     let anchor_x = instance.placement.half_x as f64 * 0.5;
@@ -103,6 +111,15 @@ fn compile_module_placement(
         let py = anchor_y + part.offset.half_y as f64 * 0.5;
         let pos = Position::new(px, py);
 
+        // --- 1. Acquisition subgoal: have this entity ---
+        steps.push(Step::Subgoal(Goal::Have {
+            item: part.entity.clone(),
+            count: 1,
+            whose: Holder::Anyone,
+            via: None,
+        }));
+
+        // --- 2. Placement action ---
         let entity = FactorioEntity {
             name: part.entity.clone(),
             entity_type: part.entity.clone(),
@@ -137,9 +154,65 @@ fn compile_module_placement(
             pinned: None,
             label: format!("place {} for {}", part.entity, part.role),
         })));
+
+        // --- 3. Fuel Insert step for burner machines ---
+        if is_burner_entity(&part.entity) {
+            steps.push(Step::Act(Box::new(Action {
+                id: ids.next(),
+                kind: ActionKind::Insert {
+                    pos: pos.clone(),
+                    entity: part.entity.clone(),
+                    slot: InventorySlot::Fuel,
+                    item: "coal".into(),
+                    count: 5,
+                },
+                pre: vec![
+                    Condition::AtPosition {
+                        who: crate::action::Actor::Role,
+                        pos: pos.clone(),
+                        radius: 3.0,
+                        min_radius: 0.5,
+                    },
+                ],
+                eff: vec![],
+                duration: 200,
+                pinned: None,
+                label: format!("fuel {} with coal", part.entity),
+            })));
+        }
+
+        // --- 4. Recipe configuration ---
+        if let Some(ref recipe) = part.recipe {
+            steps.push(Step::Act(Box::new(Action {
+                id: ids.next(),
+                kind: ActionKind::SetRecipe {
+                    pos: pos.clone(),
+                    entity: part.entity.clone(),
+                    recipe: recipe.clone(),
+                },
+                pre: vec![
+                    Condition::AtPosition {
+                        who: crate::action::Actor::Role,
+                        pos: pos.clone(),
+                        radius: 3.0,
+                        min_radius: 0.5,
+                    },
+                ],
+                eff: vec![],
+                duration: 60,
+                pinned: None,
+                label: format!("set recipe {} for {}", recipe, part.role),
+            })));
+        }
     }
 
     steps
+}
+
+/// Returns true for entity names known to burn fuel.
+fn is_burner_entity(name: &str) -> bool {
+    matches!(name, "burner-mining-drill" | "stone-furnace" | "steel-furnace"
+        | "burner-inserter" | "boiler")
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +438,10 @@ mod tests {
 
         let mut ids = ActionIdGen::new();
         let steps = compile_module_placement(&design, &instance, &mut ids);
-        assert!(!steps.is_empty(), "should produce at least one placement step");
-        assert_eq!(ids.next(), crate::ids::ActionId(1), "ActionIdGen advanced");
+        // 1 drill part: Subgoal(Have) + Place + Fuel = 3 steps
+        assert_eq!(steps.len(), 3, "1 drill part: Have + Place + Fuel");
+        // After 2 parts × (Place=1 + fuel=1 + recipe=1) = 6 ActionIds, next is 6
+        // 3 Act steps × 1 ActionId each
+        assert_eq!(ids.next(), crate::ids::ActionId(2), "2 ActionIds used: Place + Fuel");
     }
 }

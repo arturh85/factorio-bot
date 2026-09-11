@@ -44,8 +44,14 @@ mod furnace_reuse;
 mod goal_names_its_recipe;
 #[path = "machine_named_by_category.rs"]
 mod machine_named_by_category;
+#[path = "module_connected_chain.rs"]
+mod module_connected_chain;
 #[path = "module_demand.rs"]
 mod module_demand;
+#[path = "module_launch_memory.rs"]
+mod module_launch_memory;
+#[path = "module_launch_selection.rs"]
+mod module_launch_selection;
 #[path = "module_offline.rs"]
 mod module_offline;
 #[path = "module_rocket_contracts.rs"]
@@ -108,7 +114,3 @@ mod tile_reservation;
 mod unreachable_memory;
 #[path = "world_round_trip.rs"]
 mod world_round_trip;
-#[path = "module_launch_memory.rs"]
-mod module_launch_memory;
-#[path = "module_launch_selection.rs"]
-mod module_launch_selection;

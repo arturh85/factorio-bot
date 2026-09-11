@@ -15,17 +15,18 @@ use crate::goal::Goal;
 
 use crate::ids::{ActionIdGen, BotId};
 use crate::memory::ReplanMemory;
-use crate::method::{run_steps, ExpansionCtx, MethodRegistry, Step};
+use crate::method::{ExpansionCtx, MethodRegistry, Step, run_steps};
 use crate::modules::artifact::{ModuleDesign, Rate};
 pub use crate::modules::cache::CacheMode;
 use crate::modules::cache::LibraryCache;
 use crate::modules::instance::{InstanceMemory, ModuleInstance};
 use crate::modules::ledger::OperatingLedger;
+use crate::modules::routing::{ConnectionRequest, charge_connection_materials, route_connections};
 use crate::modules::select::{
-    select_candidates, site_candidates, ModuleSelection, ProductionRequest, ReservationSet,
+    ModuleSelection, ProductionRequest, ReservationSet, select_candidates, site_candidates,
 };
 use crate::network::ActionNetwork;
-use crate::schedule::{schedule, Schedule, ScheduledStep, StepKind};
+use crate::schedule::{Schedule, ScheduledStep, StepKind, schedule};
 use crate::state::PlanState;
 use std::sync::Arc;
 
@@ -92,6 +93,13 @@ pub struct CompiledModules {
     pub instances: Vec<ModuleInstance>,
     pub network: ActionNetwork,
     pub ledger: OperatingLedger,
+    /// Items that cannot be funded through standard production and need
+    /// finite machine-production prerequisites instead of simple Have subgoals.
+    /// Keyed by item name, value is the count needed for construction.
+    pub construction_shortfalls: BTreeMap<String, u64>,
+    /// Items whose operating rate cannot be met through existing supply
+    /// networks. Keyed by item name, value is the shortfall rate.
+    pub operating_shortfalls: BTreeMap<String, Rate>,
 }
 
 // ---------------------------------------------------------------------------
@@ -471,7 +479,7 @@ pub fn plan_with_session(
                 support_ticks: options.support_ticks,
             })
             .collect(),
-        reservations,
+        reservations: reservations.clone(),
     };
 
     // Build ExpansionCtx and compile.
@@ -494,6 +502,97 @@ pub fn plan_with_session(
                 budget: control.report(),
             };
         }
+    }
+
+    // --- Route connections between module instances ---
+    let mut ledger = OperatingLedger::default();
+    let mut routing_steps: Vec<Step> = Vec::new();
+
+    // Build connection requests from instance port bindings.
+    let mut connection_requests: Vec<ConnectionRequest> = Vec::new();
+    for (design, instance) in selection.designs.iter().zip(selection.instances.iter()) {
+        for binding in &instance.bindings {
+            // Skip unbound ports (no provider).
+            let Some(provider_instance) = binding.provider_instance else {
+                continue;
+            };
+            let item = binding.port.clone();
+            let rate = design
+                .operation
+                .outputs
+                .get(&item)
+                .cloned()
+                .unwrap_or_else(|| Rate::new(1, 600).unwrap());
+
+            connection_requests.push(ConnectionRequest {
+                source: provider_instance,
+                source_port: binding.provider_port.clone(),
+                consumer: instance.id,
+                consumer_port: binding.port.clone(),
+                item,
+                rate,
+            });
+        }
+    }
+
+    if !connection_requests.is_empty() {
+        // Attempt routing with at most 2 retries for ledger corrections.
+        let max_retries = 2;
+        for attempt in 0..=max_retries {
+            match route_connections(
+                &connection_requests,
+                &selection,
+                &mut ctx,
+                &mut reservations,
+                control,
+                &mut ledger,
+            ) {
+                Ok(steps) => {
+                    routing_steps = steps;
+                    break;
+                }
+                Err(e) => {
+                    if attempt < max_retries {
+                        // On retry, reset ledger and try again.
+                        ledger = OperatingLedger::default();
+                        factorio_bot_core::tracing::warn!(
+                            "connection routing attempt {} failed, retrying: {e}",
+                            attempt + 1
+                        );
+                    } else {
+                        factorio_bot_core::tracing::warn!(
+                            "connection routing failed after {} attempts: {e}",
+                            max_retries + 1
+                        );
+                        // Routing failures are logged but do not abort the plan;
+                        // modules will still be placed, just not connected.
+                    }
+                }
+            }
+        }
+    }
+
+    // Charge material subgoals for connection infrastructure.
+    match charge_connection_materials(
+        &connection_requests,
+        &selection,
+        &mut ctx,
+        &mut reservations,
+        control,
+    ) {
+        Ok(material_steps) => {
+            if let Err(e) = run_steps(material_steps, &mut ctx, &mut net, registry, &mut promised) {
+                factorio_bot_core::tracing::warn!("connection material steps failed: {e}");
+            }
+        }
+        Err(e) => {
+            factorio_bot_core::tracing::warn!("connection material charging failed: {e}");
+        }
+    }
+
+    // Execute routing steps through the action network.
+    if let Err(e) = run_steps(routing_steps, &mut ctx, &mut net, registry, &mut promised) {
+        factorio_bot_core::tracing::warn!("routing steps failed: {e}");
     }
 
     // Power: call ensure_powered for each electric module instance.
@@ -524,8 +623,16 @@ pub fn plan_with_session(
             right_bottom: Position::new(site.x + max_hx as f64 * 0.5, site.y + max_hy as f64 * 0.5),
         };
         let occupants: Vec<FactorioEntity> = Vec::new();
+        // Apply 20% policy headroom to power demand.
+        let headroom_kw = kw * 1.2;
         match crate::method::power::ensure_powered(
-            &mut ctx, "module", &site, &site_area, kw, 20.0, &occupants,
+            &mut ctx,
+            "module",
+            &site,
+            &site_area,
+            headroom_kw,
+            20.0,
+            &occupants,
         ) {
             Ok(Some(powering)) => {
                 if let Err(e) =

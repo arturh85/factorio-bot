@@ -111,15 +111,7 @@ fn compile_module_placement(
         let py = anchor_y + part.offset.half_y as f64 * 0.5;
         let pos = Position::new(px, py);
 
-        // --- 1. Acquisition subgoal: have this entity ---
-        steps.push(Step::Subgoal(Goal::Have {
-            item: part.entity.clone(),
-            count: 1,
-            whose: Holder::Anyone,
-            via: None,
-        }));
-
-        // --- 2. Placement action ---
+        // --- 1. Placement action ---
         let entity = FactorioEntity {
             name: part.entity.clone(),
             entity_type: part.entity.clone(),
@@ -155,7 +147,7 @@ fn compile_module_placement(
             label: format!("place {} for {}", part.entity, part.role),
         })));
 
-        // --- 3. Fuel Insert step for burner machines ---
+        // --- 2. Fuel Insert step for burner machines ---
         if is_burner_entity(&part.entity) {
             steps.push(Step::Act(Box::new(Action {
                 id: ids.next(),
@@ -181,7 +173,7 @@ fn compile_module_placement(
             })));
         }
 
-        // --- 4. Recipe configuration ---
+        // --- 3. Recipe configuration ---
         if let Some(ref recipe) = part.recipe {
             steps.push(Step::Act(Box::new(Action {
                 id: ids.next(),
@@ -371,8 +363,7 @@ pub fn plan_with_session(
     // production. The module's placement steps already reserve the ground,
     // so any conflicting placements from the legacy expansion will be
     // detected by the scheduler.
-    // Schedule.
-    match schedule(&net, &ctx.state, roster) {
+    match schedule(&net, state, roster) {
         Ok(sched) => {
             let memory = ReplanMemory {
             plan_round: 0,
@@ -529,11 +520,10 @@ mod tests {
 
         let mut ids = ActionIdGen::new();
         let steps = compile_module_placement(&design, &instance, &mut ids);
-        // 1 drill part: Subgoal(Have) + Place + Fuel = 3 steps
-        assert_eq!(steps.len(), 3, "1 drill part: Have + Place + Fuel");
-        // After 2 parts × (Place=1 + fuel=1 + recipe=1) = 6 ActionIds, next is 6
-        // 3 Act steps × 1 ActionId each
-        assert_eq!(ids.next(), crate::ids::ActionId(2), "2 ActionIds used: Place + Fuel");
+        // 1 drill part (no recipe): Place + Fuel = 2 steps
+        assert_eq!(steps.len(), 2, "1 drill part: Place + Fuel");
+        // 2 Act steps: Place(0) + Fuel(1), next id = 2
+        assert_eq!(ids.next(), crate::ids::ActionId(2), "2 ActionIds: Place + Fuel");
     }
 
     #[test]

@@ -15,17 +15,17 @@ use crate::goal::Goal;
 
 use crate::ids::{ActionIdGen, BotId};
 use crate::memory::ReplanMemory;
-use crate::method::{ExpansionCtx, MethodRegistry, Step, run_steps};
+use crate::method::{run_steps, ExpansionCtx, MethodRegistry, Step};
 use crate::modules::artifact::{ModuleDesign, Rate};
 pub use crate::modules::cache::CacheMode;
 use crate::modules::cache::LibraryCache;
 use crate::modules::instance::{InstanceMemory, ModuleInstance};
 use crate::modules::ledger::OperatingLedger;
 use crate::modules::select::{
-    ModuleSelection, ProductionRequest, select_candidates, site_candidates,
+    select_candidates, site_candidates, ModuleSelection, ProductionRequest, ReservationSet,
 };
 use crate::network::ActionNetwork;
-use crate::schedule::{Schedule, ScheduledStep, StepKind, schedule};
+use crate::schedule::{schedule, Schedule, ScheduledStep, StepKind};
 use crate::state::PlanState;
 use std::sync::Arc;
 
@@ -398,6 +398,7 @@ pub fn plan_with_session(
     // For each production item, select module designs.
     let mut all_designs: Vec<Arc<ModuleDesign>> = Vec::new();
     let mut all_instances: Vec<ModuleInstance> = Vec::new();
+    let mut reservations = ReservationSet::default();
 
     for (item, per_minute) in &prod_items {
         let request = ProductionRequest {
@@ -412,6 +413,7 @@ pub fn plan_with_session(
             &mut session.library,
             options.cache_mode,
             control,
+            &mut session.memory,
         ) {
             Ok(designs) => {
                 for design in designs.iter().take(options.candidate_limit) {
@@ -423,7 +425,15 @@ pub fn plan_with_session(
                     // Compute how many copies of this module are needed.
                     let copies =
                         design_instances_needed(design, *per_minute, options.support_ticks.into());
-                    match site_candidates(design, state, &near, copies as u32, control) {
+                    match site_candidates(
+                        design,
+                        state,
+                        &near,
+                        copies as u32,
+                        control,
+                        &mut reservations,
+                        &session.memory,
+                    ) {
                         Ok(instances) => {
                             for inst in instances {
                                 all_designs.push(design.clone());
@@ -461,6 +471,7 @@ pub fn plan_with_session(
                 support_ticks: options.support_ticks,
             })
             .collect(),
+        reservations,
     };
 
     // Build ExpansionCtx and compile.

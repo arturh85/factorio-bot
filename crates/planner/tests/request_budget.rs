@@ -4,24 +4,19 @@
 
 use std::collections::BTreeMap;
 
-use factorio_bot_planner::control::{
-    BudgetLimits, PlanControl, WorkKind,
-};
+use factorio_bot_core::test_utils::fixture_world;
 use factorio_bot_planner::PlanStatus;
+use factorio_bot_planner::control::{BudgetLimits, PlanControl, WorkKind};
 use factorio_bot_planner::goal::{Goal, Holder};
 use factorio_bot_planner::ids::BotId;
-use factorio_bot_planner::registry_for;
 use factorio_bot_planner::plan_controlled;
+use factorio_bot_planner::registry_for;
 use factorio_bot_planner::state::PlanState;
-use factorio_bot_core::test_utils::fixture_world;
 use std::sync::Arc;
 
 #[test]
 fn zero_goal_budget_cannot_become_a_no_method_refusal() {
-    let state = PlanState::from_world(
-        Arc::new(fixture_world()),
-        &[BotId(1)],
-    );
+    let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
     let control = PlanControl::new(BudgetLimits {
         maxima: BTreeMap::from([(WorkKind::Goal, 0)]),
     });
@@ -81,4 +76,3 @@ fn default_control_produces_same_plan_as_plan_best() {
 
 // The phase test helper is defined here so the test can use it without
 // depending on Task 4's observer implementation.
-

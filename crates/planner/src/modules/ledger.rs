@@ -324,14 +324,12 @@ mod tests {
             },
         };
         ledger.reserve_flow(claim.clone()).unwrap();
-        assert!(
-            ledger
-                .reserve_flow(FlowClaim {
-                    consumer: 2,
-                    ..claim
-                })
-                .is_err()
-        );
+        assert!(ledger
+            .reserve_flow(FlowClaim {
+                consumer: 2,
+                ..claim
+            })
+            .is_err());
         assert_eq!(ledger.flows.len(), 1);
     }
 
@@ -439,18 +437,16 @@ mod tests {
             .unwrap();
 
         // Second claim of 50 should fail (only 40 remaining).
-        assert!(
-            ledger
-                .reserve_stock(
-                    "iron-chest",
-                    StockClaim {
-                        consumer: 2,
-                        at: 1000,
-                        quantity: 50,
-                    }
-                )
-                .is_err()
-        );
+        assert!(ledger
+            .reserve_stock(
+                "iron-chest",
+                StockClaim {
+                    consumer: 2,
+                    at: 1000,
+                    quantity: 50,
+                }
+            )
+            .is_err());
     }
 
     #[test]
@@ -480,18 +476,16 @@ mod tests {
             .unwrap();
 
         // Remaining: 10 + 50 - 30 = 30. Claiming 40 should fail.
-        assert!(
-            ledger
-                .reserve_stock(
-                    "coal-chest",
-                    StockClaim {
-                        consumer: 2,
-                        at: 1000,
-                        quantity: 40,
-                    }
-                )
-                .is_err()
-        );
+        assert!(ledger
+            .reserve_stock(
+                "coal-chest",
+                StockClaim {
+                    consumer: 2,
+                    at: 1000,
+                    quantity: 40,
+                }
+            )
+            .is_err());
     }
 
     #[test]
@@ -588,7 +582,10 @@ mod tests {
             consumer: 1,
             item: "coal".into(),
             rate: Rate::new(10, 3600).unwrap(),
-            interval: Interval { start: 500, end: 500 },
+            interval: Interval {
+                start: 500,
+                end: 500,
+            },
         });
         assert!(result.is_err());
     }
@@ -655,19 +652,17 @@ mod tests {
         });
 
         // Claim entirely outside the source's available interval.
-        assert!(
-            ledger
-                .reserve_flow(FlowClaim {
-                    source: "iron-out".into(),
-                    consumer: 1,
-                    item: "iron-plate".into(),
-                    rate: rate_per_min(10),
-                    interval: Interval {
-                        start: 0,
-                        end: 1000
-                    },
-                })
-                .is_err()
-        );
+        assert!(ledger
+            .reserve_flow(FlowClaim {
+                source: "iron-out".into(),
+                consumer: 1,
+                item: "iron-plate".into(),
+                rate: rate_per_min(10),
+                interval: Interval {
+                    start: 0,
+                    end: 1000
+                },
+            })
+            .is_err());
     }
 }

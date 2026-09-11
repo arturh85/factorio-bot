@@ -110,3 +110,5 @@ mod unreachable_memory;
 mod world_round_trip;
 #[path = "module_launch_memory.rs"]
 mod module_launch_memory;
+#[path = "module_launch_selection.rs"]
+mod module_launch_selection;

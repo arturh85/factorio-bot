@@ -124,7 +124,11 @@ fn rate_cmp(a: Rate, b: Rate) -> std::cmp::Ordering {
 
 /// GCD for u128 (used internally after checked multiplication).
 fn gcd_u128(a: u128, b: u128) -> u128 {
-    if b == 0 { a } else { gcd_u128(b, a % b) }
+    if b == 0 {
+        a
+    } else {
+        gcd_u128(b, a % b)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -294,7 +298,18 @@ fn resolve_item(
     }
 
     // Check if this item is a raw resource (no recipe produces it).
+    //
+    // When the ProductIndex is empty (no recipes loaded at all) we cannot
+    // distinguish a raw resource from a truly unknown name, so we reject
+    // both.  With a populated index, anything not produced by a recipe is
+    // treated as a raw resource that comes out of the ground.
     if !product_index.produces(item) {
+        if product_index.is_empty() {
+            return Err(ModuleError::InvalidArtifact(format!(
+                "item '{}' is not produced by any recipe and no recipes are loaded",
+                item
+            )));
+        }
         let mut result = BTreeMap::new();
         result.insert(item.to_string(), rate.clone());
         return Ok(result);

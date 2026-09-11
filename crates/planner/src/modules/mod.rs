@@ -14,9 +14,10 @@ pub mod error;
 pub mod families;
 pub mod instance;
 pub mod ledger;
+pub mod reservations;
 pub mod select;
 
-pub use demand::{DemandSet, normalize_goals, required_gross};
+pub use demand::{normalize_goals, required_gross, DemandSet};
 
 #[cfg(test)]
 mod tests {

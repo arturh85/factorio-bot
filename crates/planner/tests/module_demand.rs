@@ -321,14 +321,10 @@ fn recipe_dag_rejects_unknown_items_with_no_recipe_and_no_resource() {
     let mut floor = BTreeMap::new();
     floor.insert("completely-unknown-item".into(), r(30));
     let result = resolve_recipe_dag(&floor, &index, &BTreeMap::new());
-    // Currently, resolve_recipe_dag treats items with no recipe as raw
-    // resources. Since we can't distinguish unknown from raw without ground
-    // supply data, this currently succeeds.
-    // A future enhancement could add a "known items" set to reject unknowns.
-    // For now, document the current behavior.
+    // An unknown item with no recipes loaded should error.
     assert!(
-        result.is_ok(),
-        "unknown items are treated as raw resources: {:?}",
+        result.is_err(),
+        "unknown items should error when no recipes are loaded: {:?}",
         result
     );
 }

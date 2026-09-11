@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 use factorio_bot_core::types::Direction;
 
 use crate::modules::artifact::{
-    KnowledgeOrigin, ModuleDesign, ModuleError, ModuleFamily, ModuleParameters, Offset,
-    OperatingContract, Part, Port, PortMode, Rate, design_id,
+    design_id, KnowledgeOrigin, ModuleDesign, ModuleError, ModuleFamily, ModuleParameters, Offset,
+    OperatingContract, Part, Port, PortMode, Rate,
 };
 use crate::state::PlanState;
 

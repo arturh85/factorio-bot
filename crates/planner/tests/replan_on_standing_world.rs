@@ -140,7 +140,17 @@ const BOTS: [BotId; 4] = [BotId(1), BotId(2), BotId(3), BotId(4)];
 /// and it is open: `docs/superpowers/notes/2026-09-09-no-chests-landed.md`.
 const CUTS: [(u32, u32); 3] = [(1, 2), (3, 4), (1, 1)];
 
-fn plan(state: &PlanState, goal: &Goal) -> Result<(ActionNetwork, Schedule, factorio_bot_planner::memory::ReplanMemory), PlannerError> {
+fn plan(
+    state: &PlanState,
+    goal: &Goal,
+) -> Result<
+    (
+        ActionNetwork,
+        Schedule,
+        factorio_bot_planner::memory::ReplanMemory,
+    ),
+    PlannerError,
+> {
     let chain_actor = pick_chain_actor(state, &BOTS).expect("four bots");
     plan_best(
         std::slice::from_ref(goal),

@@ -101,9 +101,10 @@ impl InstanceMemory {
     /// Returns `ModuleError::InvalidArtifact` on overflow (max `u64::MAX`).
     pub fn allocate_id(&mut self) -> Result<InstanceId, ModuleError> {
         let id = self.next_id;
-        self.next_id = self.next_id.checked_add(1).ok_or_else(|| {
-            ModuleError::InvalidArtifact("instance ID overflow".into())
-        })?;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| ModuleError::InvalidArtifact("instance ID overflow".into()))?;
         Ok(id)
     }
 

@@ -304,7 +304,6 @@ mod tests {
 use crate::modules::artifact::{
         KnowledgeOrigin, ModuleFamily, ModuleParameters, Offset, OperatingContract, Part, Rate,
     };
-    use crate::modules::families::extract_design;
     use crate::state::PlanState;
     use factorio_bot_core::test_utils::fixture_world;
     use std::collections::BTreeMap;

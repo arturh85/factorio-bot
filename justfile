@@ -151,3 +151,48 @@ fix:
 # archive, one line each; pass a directory for the full accounting.
 analyse *ARGS:
     python3 tools/run_analysis.py {{ if ARGS == "" { "--all --summary" } else { ARGS } }}
+
+
+# viewer binary path
+viewer_bin := "/home/arturh/projects/private/factorio-bot/workspace/viewer-bin/factorio-bot-viewer"
+
+
+# Restart the viewer server, waiting for port and verifying build hash
+restart:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    HERE="{{justfile_directory()}}"
+    PORT=7500
+    BIN="{{viewer_bin}}"
+    
+    echo "  killing any process on :$PORT ..."
+    OLD=$(ss -tlnp "sport = :$PORT" 2>/dev/null | grep -oP 'pid=\K\d+')
+    if [ -n "$OLD" ]; then
+        kill "$OLD" 2>/dev/null || true
+        for i in $$(seq 1 10); do
+            if ! ss -tlnp "sport = :$PORT" 2>/dev/null | grep -q .; then
+                break
+            fi
+            sleep 0.1
+        done
+    fi
+    
+    echo "  building viewer ..."
+    cd "$$HERE"
+    nix develop -c cargo build --release --no-default-features --features viewer 2>&1 | tail -1
+    cp target/release/factorio-bot "$$BIN"
+    
+    echo "  starting $$BIN ..."
+    nix develop -c "$$BIN" serve --web-root app/dist --bind "0.0.0.0:$PORT" &
+    SPID=$!
+    
+    for i in $$(seq 1 20); do
+        if curl -sf "http://localhost:$PORT/api/v1/modules/designs" > /dev/null 2>&1; then
+            echo "  server ready (PID $SPID)"
+            break
+        fi
+        sleep 0.2
+    done
+    
+    build=$$(curl -sf "http://localhost:$PORT/api/v1/modules/designs" | python3 -c "import sys,json; print(json.load(sys.stdin).get('build','?'))" 2>/dev/null || echo "?")
+    echo "  build: $$build"

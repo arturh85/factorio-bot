@@ -162,6 +162,19 @@ function ticksToMinutes(ticks: number): string {
   return (ticks / 3600).toFixed(1) + ' min';
 }
 
+function designLabel(design: ModuleDesign): string {
+  const labels: Record<string, string> = {
+    'assembler-1i1o': '1-Input Assembler Cell',
+    'assembler-2i1o': '2-Input Assembler Cell',
+    'red-science-cell': '2-Input Assembler Cell (Red Science)',
+    'assembler-3i1o': '3-Input Assembler Cell',
+    'ore-to-plate-iron': 'Iron Ore-to-Plate Cell',
+    'ore-to-plate-copper': 'Copper Ore-to-Plate Cell',
+    'pumpjack': 'Pumpjack'
+  };
+  return labels[design.id] ?? entityLabel(design.id);
+}
+
 function hasArrow(role: string): boolean {
   return role !== 'furnace' && role !== 'power-pole' && role !== 'pumpjack'
       && role !== 'assembler' && !role.includes('drill');
@@ -186,7 +199,7 @@ function entityLabel(entity: string): string {
         <!-- Header -->
         <div class="mb-4 flex items-start justify-between">
           <div>
-            <h2 class="text-xl font-semibold">{{ entityLabel(design.parameters.item) }} Cell</h2>
+            <h2 class="text-xl font-semibold">{{ designLabel(design) }}</h2>
             <p class="text-xs font-mono text-gray-400">{{ design.id }}</p>
             <span class="mt-1 inline-block rounded bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
               {{ design.family }}

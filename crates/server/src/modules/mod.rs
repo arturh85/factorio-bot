@@ -52,7 +52,10 @@ async fn list_designs() -> Json<Value> {
         one_input_assembler_design(),
         three_input_assembler_design(),
     ];
-    Json(serde_json::json!({ "designs": designs }))
+    Json(serde_json::json!({
+        "designs": designs,
+        "build": option_env!("BUILD_GIT_DESCRIBE").unwrap_or("unknown")
+    }))
 }
 
 fn hs(name: &str) -> Value {
@@ -299,26 +302,28 @@ mod tests {
     }
 }
 
+
 fn one_input_assembler_design() -> Value {
     let hw = |name: &str| -> Value { PROTO_SIZES.half_size(name) };
+    // 1-input assembler: belt at -5, REGULAR inserter at -3 (cheaper than long-handed)
     serde_json::json!({
         "schema":1,"id":"assembler-1i1o","family":"AssemblerCell",
         "parameters":{"item":"any","with_pole":true,"labs":0},
         "parts":[
             {"role":"belt","entity":"transport-belt",
-             "offset":{"half_x":-9,"half_y":-2},"direction":0,"recipe":null,
-             "half_size":hw("transport-belt")},
-            {"role":"belt","entity":"transport-belt",
-             "offset":{"half_x":-9,"half_y":0},"direction":0,"recipe":null,
-             "half_size":hw("transport-belt")},
-            {"role":"belt","entity":"transport-belt",
-             "offset":{"half_x":-9,"half_y":2},"direction":0,"recipe":null,
-             "half_size":hw("transport-belt")},
-            {"role":"inserter","entity":"long-handed-inserter",
-             "offset":{"half_x":-5,"half_y":0},"direction":12,"recipe":null,
-             "half_size":hw("long-handed-inserter")},
-            {"role":"power-pole","entity":"small-electric-pole",
              "offset":{"half_x":-5,"half_y":-2},"direction":0,"recipe":null,
+             "half_size":hw("transport-belt")},
+            {"role":"belt","entity":"transport-belt",
+             "offset":{"half_x":-5,"half_y":0},"direction":0,"recipe":null,
+             "half_size":hw("transport-belt")},
+            {"role":"belt","entity":"transport-belt",
+             "offset":{"half_x":-5,"half_y":2},"direction":0,"recipe":null,
+             "half_size":hw("transport-belt")},
+            {"role":"inserter","entity":"inserter",
+             "offset":{"half_x":-3,"half_y":0},"direction":12,"recipe":null,
+             "half_size":hw("inserter")},
+            {"role":"power-pole","entity":"small-electric-pole",
+             "offset":{"half_x":-3,"half_y":2},"direction":0,"recipe":null,
              "half_size":hw("small-electric-pole")},
             {"role":"assembler","entity":"assembling-machine-1",
              "offset":{"half_x":-1,"half_y":0},"direction":4,"recipe":null,
@@ -338,18 +343,17 @@ fn one_input_assembler_design() -> Value {
         ],
         "ports":[
             {"id":"input","mode":"BeltInput","item":"any",
-             "offset":{"half_x":-10,"half_y":-2},"direction":4},
+             "offset":{"half_x":-6,"half_y":-2},"direction":4},
             {"id":"output","mode":"InventoryOutput","item":"any",
              "offset":{"half_x":6,"half_y":2},"direction":0}
         ],
-        "bill":{"assembling-machine-1":1,"long-handed-inserter":1,"inserter":1,
+        "bill":{"assembling-machine-1":1,"inserter":2,
                 "transport-belt":6,"small-electric-pole":1},
         "operation":{
             "inputs":{"input-item":{"numerator":1,"ticks":60}},
             "outputs":{"output-item":{"numerator":1,"ticks":60}},
             "power_watts":90000,"fuel_per_tick":{},
-            "startup_latency_ticks":60,
-            "startup_items":{},
+            "startup_latency_ticks":60,"startup_items":{},
             "required_research":["automation"],"required_surface":"nauvis"
         }
     })

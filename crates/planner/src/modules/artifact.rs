@@ -70,6 +70,7 @@ pub struct Offset {
 pub enum ModuleFamily {
     OreToPlate,
     RedScience,
+    AssemblerCell,
 }
 
 /// How the design was obtained.

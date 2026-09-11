@@ -27,6 +27,7 @@ pub fn extract_design(
     match family {
         ModuleFamily::OreToPlate => extract_ore_to_plate(state, parameters),
         ModuleFamily::RedScience => extract_red_science(state, parameters),
+        ModuleFamily::AssemblerCell => extract_assembler_cell(state, parameters),
     }
 }
 
@@ -170,8 +171,14 @@ fn extract_ore_to_plate(
 
 fn extract_red_science(
     state: &PlanState,
-    _parameters: &ModuleParameters,
+    parameters: &ModuleParameters,
 ) -> Result<ModuleDesign, ModuleError> {
+    if parameters.item != "automation-science-pack" {
+        return Err(ModuleError::Unsupported(format!(
+            "red-science: unsupported item '{}', expected automation-science-pack",
+            parameters.item
+        )));
+    }
     let item = "automation-science-pack".to_string();
 
     // Simple red-science cell: one assembler fed by two chests (one iron-gear-wheel
@@ -280,6 +287,231 @@ fn extract_red_science(
 
     Ok(design)
 }
+
+fn extract_assembler_cell(
+    state: &PlanState,
+    parameters: &ModuleParameters,
+) -> Result<ModuleDesign, ModuleError> {
+    let item = &parameters.item;
+
+    // Count ingredients from the recipe prototype.
+    let recipes = state.base().entity_graph.recipes();
+    let recipe = recipes.get(item).ok_or_else(|| ModuleError::Unsupported(format!(
+        "assembler-cell: no recipe for '{item}'"
+    )))?;
+    let ingredients = recipe.ingredients.as_ref().ok_or_else(|| ModuleError::Unsupported(format!(
+        "assembler-cell: recipe for '{item}' has no ingredients"
+    )))?;
+    let input_count = ingredients.len();
+    if input_count > 2 {
+        // 3-input cell not yet implemented in the planner.
+        return Err(ModuleError::Unsupported(format!(
+            "assembler-cell: {input_count}-input recipes not yet supported"
+        )));
+    }
+
+    // Build geometry relative to the assembler centre at (0, 0).
+    let mut parts: Vec<Part> = Vec::new();
+    let mut ports: Vec<Port> = Vec::new();
+    let mut bill: BTreeMap<String, u64> = BTreeMap::new();
+    let mut required_clearance: Vec<Offset> = Vec::new();
+    let mut precedence: Vec<(String, String)> = Vec::new();
+
+    if input_count == 1 {
+        // 1-input: belt at -6, inserter at -4, assembler at 0, out at 4.
+        for hy in [-2i32, 0, 2] {
+            parts.push(Part {
+                role: "belt".into(),
+                entity: "transport-belt".into(),
+                half_size: Some(state.entity_half_size("transport-belt")),
+                offset: Offset { half_x: -6, half_y: hy },
+                direction: Direction::North as u8,
+                recipe: None,
+                underground_half: None,
+            });
+        }
+        parts.push(Part {
+            role: "inserter".into(),
+            entity: "inserter".into(),
+            half_size: Some(state.entity_half_size("inserter")),
+            offset: Offset { half_x: -4, half_y: 0 },
+            direction: Direction::West as u8,
+            recipe: None,
+            underground_half: None,
+        });
+        parts.push(Part {
+            role: "power-pole".into(),
+            entity: "small-electric-pole".into(),
+            half_size: Some(state.entity_half_size("small-electric-pole")),
+            offset: Offset { half_x: -4, half_y: -2 },
+            direction: Direction::North as u8,
+            recipe: None,
+            underground_half: None,
+        });
+        ports.push(Port {
+            id: "belt-input".into(),
+            mode: PortMode::BeltInput,
+            item: ingredients[0].name.clone(),
+            offset: Offset { half_x: -7, half_y: -2 },
+            direction: Direction::West as u8,
+            lane: None,
+            maximum: Rate::new(1, 60).unwrap(),
+        });
+        bill.entry("inserter".to_string()).or_insert(2);
+        bill.entry("transport-belt".to_string()).or_insert(6);
+        bill.entry("small-electric-pole".to_string()).or_insert(1);
+        required_clearance = vec![
+            Offset { half_x: -7, half_y: -2 },
+            Offset { half_x: -7, half_y: 2 },
+            Offset { half_x: 7, half_y: -2 },
+            Offset { half_x: 7, half_y: 2 },
+        ];
+    } else {
+        // 2-input: two belts at -8, -6; two inserters at (-4,-2) and (-4,2).
+        for (i, ing) in ingredients.iter().enumerate() {
+            let belt_x = -8 + i as i32 * 2;
+            for hy in [-2i32, 0, 2] {
+                parts.push(Part {
+                    role: format!("belt-{}", i),
+                    entity: "transport-belt".into(),
+                    half_size: Some(state.entity_half_size("transport-belt")),
+                    offset: Offset { half_x: belt_x, half_y: hy },
+                    direction: Direction::North as u8,
+                    recipe: None,
+                    underground_half: None,
+                });
+            }
+            let ins_x = -4i32;
+            let ins_hy = -2 + i as i32 * 4;
+            let is_long = i == 0; // far belt needs long-handed
+            parts.push(Part {
+                role: if i == 0 { "gear-inserter".into() } else { "copper-inserter".into() },
+                entity: if is_long { "long-handed-inserter" } else { "inserter" }.into(),
+                half_size: Some(state.entity_half_size(
+                    if is_long { "long-handed-inserter" } else { "inserter" }
+                )),
+                offset: Offset { half_x: ins_x, half_y: ins_hy },
+                direction: Direction::West as u8,
+                recipe: None,
+                underground_half: None,
+            });
+            ports.push(Port {
+                id: format!("input-{i}"),
+                mode: PortMode::BeltInput,
+                item: ing.name.clone(),
+                offset: Offset { half_x: belt_x - 1, half_y: -2 },
+                direction: Direction::West as u8,
+                lane: None,
+                maximum: Rate::new(1, 60).unwrap(),
+            });
+            bill.entry(
+                if is_long { "long-handed-inserter" } else { "inserter" }.to_string()
+            ).and_modify(|c| *c += 1).or_insert(1);
+        }
+        parts.push(Part {
+            role: "power-pole".into(),
+            entity: "small-electric-pole".into(),
+            half_size: Some(state.entity_half_size("small-electric-pole")),
+            offset: Offset { half_x: -4, half_y: 0 },
+            direction: Direction::North as u8,
+            recipe: None,
+            underground_half: None,
+        });
+        bill.entry("transport-belt".to_string()).or_insert(9);
+        bill.entry("small-electric-pole".to_string()).or_insert(1);
+        required_clearance = vec![
+            Offset { half_x: -9, half_y: -2 },
+            Offset { half_x: -9, half_y: 2 },
+            Offset { half_x: 7, half_y: -2 },
+            Offset { half_x: 7, half_y: 2 },
+        ];
+    }
+
+    // Common parts: assembler, output inserter, output belt
+    parts.push(Part {
+        role: "assembler".into(),
+        entity: "assembling-machine-1".into(),
+        half_size: Some(state.entity_half_size("assembling-machine-1")),
+        offset: Offset { half_x: 0, half_y: 0 },
+        direction: Direction::East as u8,
+        recipe: Some(item.clone()),
+        underground_half: None,
+    });
+    parts.push(Part {
+        role: "out-inserter".into(),
+        entity: "inserter".into(),
+        half_size: Some(state.entity_half_size("inserter")),
+        offset: Offset { half_x: 4, half_y: 0 },
+        direction: Direction::West as u8,
+        recipe: None,
+        underground_half: None,
+    });
+    for hy in [-2i32, 0, 2] {
+        parts.push(Part {
+            role: "output-belt".into(),
+            entity: "transport-belt".into(),
+            half_size: Some(state.entity_half_size("transport-belt")),
+            offset: Offset { half_x: 6, half_y: hy },
+            direction: Direction::North as u8,
+            recipe: None,
+            underground_half: None,
+        });
+    }
+
+    ports.push(Port {
+        id: "output".into(),
+        mode: PortMode::InventoryOutput,
+        item: item.clone(),
+        offset: Offset { half_x: 7, half_y: 2 },
+        direction: Direction::North as u8,
+        lane: None,
+        maximum: Rate::new(1, 60).unwrap(),
+    });
+
+    bill.entry("assembling-machine-1".to_string()).or_insert(1);
+    bill.entry("inserter".to_string())
+        .and_modify(|c| *c += 1) // out-inserter
+        .or_insert(1);
+
+    let operation = OperatingContract {
+        inputs: ingredients.iter().map(|ing| {
+            (ing.name.clone(), Rate::new(1, 60).unwrap())
+        }).collect(),
+        outputs: BTreeMap::from([(item.clone(), Rate::new(1, 60).unwrap())]),
+        power_watts: 90000,
+        fuel_per_tick: BTreeMap::new(),
+        startup_latency_ticks: 60,
+        startup_items: BTreeMap::new(),
+        local_buffer_capacity: BTreeMap::new(),
+        required_research: vec!["automation".into()],
+        required_surface: "nauvis".into(),
+        unsupported_mechanisms: vec![],
+    };
+
+    let mut design = ModuleDesign {
+        schema: 1,
+        id: String::new(),
+        family: ModuleFamily::AssemblerCell,
+        generator_version: 1,
+        origin: KnowledgeOrigin::Extracted,
+        parameters: parameters.clone(),
+        prototype_hash: "assembler-cell-v1".into(),
+        mod_versions: BTreeMap::new(),
+        parents: vec![],
+        training_manifest: None,
+        parts,
+        ports,
+        required_clearance,
+        expansion_space: vec![],
+        bill,
+        precedence,
+        operation,
+    };
+
+    design.id = design_id(&design)?;
+    Ok(design)
+}
+
 
 #[cfg(test)]
 mod tests {

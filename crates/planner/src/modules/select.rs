@@ -109,12 +109,12 @@ pub fn select_candidates(
 }
 
 /// Return the list of module families that could produce `item`.
-fn matching_families(item: &str) -> Vec<ModuleFamily> {
-    match item {
-        "iron-plate" | "copper-plate" => vec![ModuleFamily::OreToPlate],
-        "automation-science-pack" => vec![ModuleFamily::RedScience],
-        _ => vec![],
-    }
+fn matching_families(_item: &str) -> Vec<ModuleFamily> {
+    vec![
+        ModuleFamily::OreToPlate,
+        ModuleFamily::RedScience,
+        ModuleFamily::AssemblerCell,
+    ]
 }
 
 // ---------------------------------------------------------------------------

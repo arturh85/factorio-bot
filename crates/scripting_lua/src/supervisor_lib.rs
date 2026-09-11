@@ -18,6 +18,12 @@ pub const SUPERVISOR_LUA: &str = include_str!(concat!(
     "/../../scripts/supervisor.lua"
 ));
 
+/// `scripts/rocket_policy.lua`, verbatim.
+pub const ROCKET_POLICY_LUA: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../scripts/rocket_policy.lua"
+));
+
 #[cfg(test)]
 mod tests {
     use super::SUPERVISOR_LUA;
@@ -3116,5 +3122,385 @@ mod tests {
             let err = lua.load(src).exec().expect_err(src).to_string();
             assert!(err.contains(wanted), "{src}: {err}");
         }
+    }
+
+    // ---- Rocket policy: construction limiter and commissioning decisions ---
+
+    fn policy_harness() -> Lua {
+        let lua = sandboxed();
+        lua.load(super::ROCKET_POLICY_LUA).exec().expect("rocket_policy loads");
+        lua
+    }
+
+    #[test]
+    fn a_building_state_with_all_constructed_and_no_flow_emits_repair() {
+        let lua = policy_harness();
+        let src = r#"
+            local cfg = {target_rate=60, max_new_copies=2, window_ticks=3600, required_windows=3}
+            local m = {instance_ids={11,12}, constructed_ids={}, commissioned_ids={},
+                       state="building", windows=0}
+            local obs = {tick=100, constructed_ids={11,12}, delivered_rate=0,
+                         supply_ready=false, evidence_known=true}
+            local next_m, decision = policy.limit(cfg, m, obs)
+            __decision = decision
+            __instance_count = #next_m.instance_ids
+            __state = next_m.state
+            __original_state = m.state
+        "#;
+        lua.load(src).exec().expect("policy.limit runs");
+        let g = lua.globals();
+        assert_eq!(
+            g.get::<String>("__decision").unwrap(),
+            "repair",
+            "cap reached, supply missing, evidence known -> repair"
+        );
+        assert_eq!(
+            g.get::<i64>("__instance_count").unwrap(),
+            2,
+            "instance ids are preserved"
+        );
+        assert_ne!(
+            g.get::<String>("__state").unwrap(),
+            "complete",
+            "no flow, so not complete"
+        );
+        assert_eq!(
+            g.get::<String>("__original_state").unwrap(),
+            "building",
+            "input memory is not mutated"
+        );
+    }
+
+    #[test]
+    fn a_building_state_below_cap_emits_build() {
+        let lua = policy_harness();
+        let src = r#"
+            local cfg = {target_rate=60, max_new_copies=5, window_ticks=3600, required_windows=3}
+            local m = {instance_ids={11}, constructed_ids={}, commissioned_ids={},
+                       state="building", windows=0}
+            local obs = {tick=100, constructed_ids={}, delivered_rate=0,
+                         supply_ready=false, evidence_known=true}
+            local next_m, decision = policy.limit(cfg, m, obs)
+            __decision = decision
+            __instance_count = #next_m.instance_ids
+        "#;
+        lua.load(src).exec().expect("policy.limit runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__decision").unwrap(), "build",
+            "below max_new_copies with nothing built -> build");
+    }
+
+    #[test]
+    fn a_building_state_at_cap_not_constructed_observes() {
+        let lua = policy_harness();
+        let src = r#"
+            local cfg = {target_rate=60, max_new_copies=2, window_ticks=3600, required_windows=3}
+            local m = {instance_ids={11,12}, constructed_ids={11}, commissioned_ids={},
+                       state="building", windows=0}
+            local obs = {tick=1000, constructed_ids={11}, delivered_rate=0,
+                         supply_ready=false, evidence_known=true}
+            local next_m, decision = policy.limit(cfg, m, obs)
+            __decision = decision
+            __state = next_m.state
+        "#;
+        lua.load(src).exec().expect("policy.limit runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__decision").unwrap(), "observe",
+            "at cap but not all constructed -> wait");
+    }
+
+    #[test]
+    fn a_building_state_transitions_to_commissioning_when_flow_is_good() {
+        let lua = policy_harness();
+        let src = r#"
+            local cfg = {target_rate=60, max_new_copies=2, window_ticks=4000, required_windows=3}
+            local m = {instance_ids={11,12}, constructed_ids={11,12}, commissioned_ids={},
+                       state="building", windows=0}
+            local obs = {tick=2000, constructed_ids={11,12}, delivered_rate=60,
+                         supply_ready=true, evidence_known=true}
+            local next_m, decision = policy.limit(cfg, m, obs)
+            __decision = decision
+            __state = next_m.state
+            __window_start = next_m.window_start
+        "#;
+        lua.load(src).exec().expect("policy.limit runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__state").unwrap(), "commissioning",
+            "all built, flow good -> commission");
+        assert_eq!(g.get::<i64>("__window_start").unwrap(), 2000,
+            "window starts at observation tick");
+    }
+
+    #[test]
+    fn unknown_evidence_in_building_state_yields_observe() {
+        let lua = policy_harness();
+        let src = r#"
+            local cfg = {target_rate=60, max_new_copies=2, window_ticks=3600, required_windows=3}
+            local m = {instance_ids={11,12}, constructed_ids={}, commissioned_ids={},
+                       state="building", windows=0}
+            local obs = {tick=500, constructed_ids={11,12}, delivered_rate=0,
+                         supply_ready=false, evidence_known=false}
+            local next_m, decision = policy.limit(cfg, m, obs)
+            __decision = decision
+        "#;
+        lua.load(src).exec().expect("policy.limit runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__decision").unwrap(), "observe",
+            "no evidence -> wait, cannot diagnose");
+    }
+
+    #[test]
+    fn duplicate_ids_in_observation_are_deduplicated() {
+        let lua = policy_harness();
+        let src = r#"
+            local cfg = {target_rate=60, max_new_copies=2, window_ticks=3600, required_windows=3}
+            local m = {instance_ids={11,12}, constructed_ids={}, commissioned_ids={},
+                       state="building", windows=0}
+            -- observation reports 11 twice and 12 once
+            local obs = {tick=1000, constructed_ids={11,11,12}, delivered_rate=60,
+                         supply_ready=true, evidence_known=true}
+            local next_m, decision = policy.limit(cfg, m, obs)
+            __decision = decision
+            __constructed = #next_m.constructed_ids
+            __has_11 = false; __has_12 = false
+            for _, id in ipairs(next_m.constructed_ids) do
+                if id == 11 then __has_11 = true end
+                if id == 12 then __has_12 = true end
+            end
+        "#;
+        lua.load(src).exec().expect("policy.limit runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<i64>("__constructed").unwrap(), 2,
+            "duplicates are collapsed");
+        assert!(g.get::<bool>("__has_11").unwrap(), "11 present");
+        assert!(g.get::<bool>("__has_12").unwrap(), "12 present");
+    }
+
+    #[test]
+    fn repeated_observations_are_idempotent() {
+        let lua = policy_harness();
+        let src = r#"
+            local cfg = {target_rate=60, max_new_copies=2, window_ticks=3600, required_windows=3}
+            local m = {instance_ids={11,12}, constructed_ids={11,12}, commissioned_ids={},
+                       state="commissioning", windows=1, window_start=500}
+            -- Same observation twice: mid-window, rate holding
+            local obs = {tick=1500, constructed_ids={11,12}, delivered_rate=60,
+                         supply_ready=true, evidence_known=true}
+            local m1, d1 = policy.limit(cfg, m, obs)
+            local m2, d2 = policy.limit(cfg, m1, obs)
+            __d1, __d2 = d1, d2
+            __w1, __w2 = m1.windows, m2.windows
+        "#;
+        lua.load(src).exec().expect("policy.limit runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__d1").unwrap(), "observe");
+        assert_eq!(g.get::<String>("__d2").unwrap(), "observe",
+            "same observation -> same decision");
+        assert_eq!(g.get::<i64>("__w1").unwrap(), 1);
+        assert_eq!(g.get::<i64>("__w2").unwrap(), 1,
+            "windows not incremented mid-window");
+    }
+
+    #[test]
+    fn commissioning_completes_after_three_windows() {
+        let lua = policy_harness();
+        let src = r#"
+            local cfg = {target_rate=60, max_new_copies=2, window_ticks=1000, required_windows=3}
+            local m = {instance_ids={11,12}, constructed_ids={11,12}, commissioned_ids={},
+                       state="commissioning", windows=2, window_start=7000}
+            local obs = {tick=8000, constructed_ids={11,12}, delivered_rate=60,
+                         supply_ready=true, evidence_known=true}
+            local next_m, decision = policy.limit(cfg, m, obs)
+            __decision = decision
+            __state = next_m.state
+            __windows = next_m.windows
+        "#;
+        lua.load(src).exec().expect("policy.limit runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__decision").unwrap(), "complete",
+            "3rd window good -> complete");
+        assert_eq!(g.get::<String>("__state").unwrap(), "complete");
+        assert_eq!(g.get::<i64>("__windows").unwrap(), 3);
+    }
+
+    #[test]
+    fn commissioning_resets_window_count_on_rate_drop() {
+        let lua = policy_harness();
+        let src = r#"
+            local cfg = {target_rate=60, max_new_copies=2, window_ticks=1000, required_windows=3}
+            local m = {instance_ids={11,12}, constructed_ids={11,12}, commissioned_ids={},
+                       state="commissioning", windows=2, window_start=7000}
+            local obs = {tick=8000, constructed_ids={11,12}, delivered_rate=30,
+                         supply_ready=true, evidence_known=true}
+            local next_m, decision = policy.limit(cfg, m, obs)
+            __decision = decision
+            __windows = next_m.windows
+            __window_start = next_m.window_start
+        "#;
+        lua.load(src).exec().expect("policy.limit runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<i64>("__windows").unwrap(), 0,
+            "rate below target resets window count");
+        assert_eq!(g.get::<i64>("__window_start").unwrap(), 8000,
+            "new window starts at this observation tick");
+    }
+
+    #[test]
+    fn supply_loss_mid_window_triggers_repair() {
+        let lua = policy_harness();
+        let src = r#"
+            local cfg = {target_rate=60, max_new_copies=2, window_ticks=5000, required_windows=3}
+            local m = {instance_ids={11,12}, constructed_ids={11,12}, commissioned_ids={},
+                       state="commissioning", windows=1, window_start=1000}
+            local obs = {tick=3000, constructed_ids={11,12}, delivered_rate=0,
+                         supply_ready=false, evidence_known=true}
+            local next_m, decision = policy.limit(cfg, m, obs)
+            __decision = decision
+            __windows = next_m.windows
+        "#;
+        lua.load(src).exec().expect("policy.limit runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__decision").unwrap(), "repair",
+            "supply loss mid-window -> repair");
+        assert_eq!(g.get::<i64>("__windows").unwrap(), 1,
+            "window count should NOT reset on mid-window supply loss (not a full window)");
+    }
+
+    #[test]
+    fn support_expiry_emits_blocked() {
+        let lua = policy_harness();
+        let src = r#"
+            local cfg = {target_rate=60, max_new_copies=2, window_ticks=3600, required_windows=3}
+            local m = {instance_ids={11,12}, constructed_ids={11}, commissioned_ids={},
+                       state="building", windows=0, support_until=5000}
+            local obs = {tick=6000, constructed_ids={11}, delivered_rate=0,
+                         supply_ready=false, evidence_known=true}
+            local next_m, decision = policy.limit(cfg, m, obs)
+            __decision = decision
+            __state = next_m.state
+        "#;
+        lua.load(src).exec().expect("policy.limit runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__decision").unwrap(), "blocked",
+            "support expired -> blocked");
+        assert_eq!(g.get::<String>("__state").unwrap(), "blocked");
+    }
+
+    #[test]
+    fn depletion_emits_blocked() {
+        let lua = policy_harness();
+        let src = r#"
+            local cfg = {target_rate=60, max_new_copies=2, window_ticks=3600, required_windows=3}
+            local m = {instance_ids={11,12}, constructed_ids={11,12}, commissioned_ids={},
+                       state="commissioning", windows=1, window_start=1000}
+            local obs = {tick=3000, constructed_ids={11,12}, delivered_rate=0,
+                         supply_ready=true, evidence_known=true, depleted=true}
+            local next_m, decision = policy.limit(cfg, m, obs)
+            __decision = decision
+            __state = next_m.state
+        "#;
+        lua.load(src).exec().expect("policy.limit runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__decision").unwrap(), "blocked",
+            "depleted finite batch -> blocked");
+        assert_eq!(g.get::<String>("__state").unwrap(), "blocked");
+    }
+
+    #[test]
+    fn resume_midway_through_window_continues_observing() {
+        let lua = policy_harness();
+        let src = r#"
+            local cfg = {target_rate=60, max_new_copies=2, window_ticks=10000, required_windows=3}
+            -- Resumed: saved memory says we were in a window that started at tick 5000
+            -- Current tick is 8000 (3000 ticks into the window)
+            local m = {instance_ids={11,12}, constructed_ids={11,12}, commissioned_ids={},
+                       state="commissioning", windows=1, window_start=5000}
+            local obs = {tick=8000, constructed_ids={11,12}, delivered_rate=60,
+                         supply_ready=true, evidence_known=true}
+            local next_m, decision = policy.limit(cfg, m, obs)
+            __decision = decision
+            __windows = next_m.windows
+            __state = next_m.state
+        "#;
+        lua.load(src).exec().expect("policy.limit runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__decision").unwrap(), "observe",
+            "mid-window -> observe");
+        assert_eq!(g.get::<i64>("__windows").unwrap(), 1,
+            "windows not incremented mid-window");
+    }
+
+    #[test]
+    fn finite_batch_completes_with_quantity_check() {
+        let lua = policy_harness();
+        let src = r#"
+            local cfg = {target_rate=60, max_new_copies=2, window_ticks=1000, required_windows=3}
+            -- Commissioning, need 3 windows, already have 2
+            local m = {instance_ids={11,12}, constructed_ids={11,12}, commissioned_ids={},
+                       state="commissioning", windows=2, window_start=7000}
+            local obs = {tick=8000, constructed_ids={11,12}, delivered_rate=60,
+                         supply_ready=true, evidence_known=true}
+            local next_m, decision = policy.limit(cfg, m, obs)
+            __decision = decision
+            __state = next_m.state
+        "#;
+        lua.load(src).exec().expect("policy.limit runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__decision").unwrap(), "complete",
+            "third consecutive good window -> complete");
+    }
+
+    #[test]
+    fn complete_state_returns_complete() {
+        let lua = policy_harness();
+        let src = r#"
+            local cfg = {target_rate=60, max_new_copies=2, window_ticks=3600, required_windows=3}
+            local m = {instance_ids={11,12}, constructed_ids={11,12}, commissioned_ids={11,12},
+                       state="complete", windows=3, window_start=9000}
+            local obs = {tick=10000, constructed_ids={11,12}, delivered_rate=60,
+                         supply_ready=true, evidence_known=true}
+            local next_m, decision = policy.limit(cfg, m, obs)
+            __decision = decision
+        "#;
+        lua.load(src).exec().expect("policy.limit runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__decision").unwrap(), "complete");
+    }
+
+    #[test]
+    fn blocked_state_returns_blocked() {
+        let lua = policy_harness();
+        let src = r#"
+            local cfg = {target_rate=60, max_new_copies=2, window_ticks=3600, required_windows=3}
+            local m = {instance_ids={11,12}, constructed_ids={11,12}, commissioned_ids={},
+                       state="blocked", windows=0}
+            local obs = {tick=10000, constructed_ids={11,12}, delivered_rate=0,
+                         supply_ready=false, evidence_known=true}
+            local next_m, decision = policy.limit(cfg, m, obs)
+            __decision = decision
+        "#;
+        lua.load(src).exec().expect("policy.limit runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__decision").unwrap(), "blocked");
+    }
+
+    #[test]
+    fn missing_evidence_during_commissioning_does_not_reset_windows() {
+        let lua = policy_harness();
+        let src = r#"
+            local cfg = {target_rate=60, max_new_copies=2, window_ticks=1000, required_windows=3}
+            local m = {instance_ids={11,12}, constructed_ids={11,12}, commissioned_ids={},
+                       state="commissioning", windows=1, window_start=7000}
+            -- Window elapsed, but no evidence -> observe, not reset
+            local obs = {tick=8000, constructed_ids={11,12}, delivered_rate=0,
+                         supply_ready=false, evidence_known=false}
+            local next_m, decision = policy.limit(cfg, m, obs)
+            __decision = decision
+            __windows = next_m.windows
+        "#;
+        lua.load(src).exec().expect("policy.limit runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<String>("__decision").unwrap(), "observe",
+            "no evidence -> observe, not repair");
     }
 }

@@ -29,6 +29,8 @@ pub fn extract_design(
         ModuleFamily::RedScience => extract_red_science(state, parameters),
         ModuleFamily::AssemblerCell => extract_assembler_cell(state, parameters),
         ModuleFamily::OilRefinery | ModuleFamily::ChemicalPlant => extract_fluid_manufacturing(state, family, parameters),
+        ModuleFamily::RocketSilo => extract_rocket_silo(state, parameters),
+        ModuleFamily::SpacePlatform => extract_space_platform(state, parameters),
     }
 }
 
@@ -566,6 +568,151 @@ fn extract_assembler_cell(
     Ok(design)
 }
 
+
+
+fn extract_rocket_silo(
+    state: &PlanState,
+    parameters: &ModuleParameters,
+) -> Result<ModuleDesign, ModuleError> {
+    let item = &parameters.item;
+    if item != "rocket-part" {
+        return Err(ModuleError::Unsupported(format!(
+            "rocket-silo: unsupported item '{item}'"
+        )));
+    }
+    let bill = BTreeMap::from([
+        ("rocket-silo".to_string(), 1u64),
+        ("small-electric-pole".to_string(), 2u64),
+    ]);
+    let parts = vec![
+        Part {
+            role: "rocket-silo".into(),
+            entity: "rocket-silo".into(),
+            half_size: Some(Offset { half_x: 5, half_y: 5 }),
+            offset: Offset { half_x: 0, half_y: 0 },
+            direction: Direction::North as u8,
+            recipe: Some("rocket-part".into()),
+            underground_half: None,
+        },
+    ];
+    let ports = vec![
+        Port {
+            id: "output".into(),
+            mode: PortMode::InventoryOutput,
+            item: "rocket-part".into(),
+            offset: Offset { half_x: 5, half_y: 0 },
+            direction: Direction::North as u8,
+            lane: None,
+            maximum: Rate::new(1, 180).unwrap(),
+        },
+    ];
+    let required_clearance = vec![
+        Offset { half_x: -6, half_y: -6 },
+        Offset { half_x: 6, half_y: -6 },
+        Offset { half_x: -6, half_y: 6 },
+        Offset { half_x: 6, half_y: 6 },
+    ];
+    let operation = OperatingContract {
+        inputs: BTreeMap::from([
+            ("processing-unit".into(), Rate::new(1, 180).unwrap()),
+            ("low-density-structure".into(), Rate::new(1, 180).unwrap()),
+            ("rocket-fuel".into(), Rate::new(1, 180).unwrap()),
+        ]),
+        outputs: BTreeMap::from([("rocket-part".into(), Rate::new(1, 180).unwrap())]),
+        power_watts: 1000000,
+        fuel_per_tick: BTreeMap::new(),
+        startup_latency_ticks: 60,
+        startup_items: BTreeMap::new(),
+        local_buffer_capacity: BTreeMap::new(),
+        required_research: vec!["rocket-silo".into()],
+        required_surface: "nauvis".into(),
+        unsupported_mechanisms: vec![],
+    };
+    Ok(ModuleDesign {
+        schema: 1,
+        id: String::new(),
+        family: ModuleFamily::RocketSilo,
+        generator_version: 1,
+        origin: KnowledgeOrigin::Extracted,
+        parameters: parameters.clone(),
+        prototype_hash: "rocket-silo-v1".into(),
+        mod_versions: BTreeMap::new(), parents: vec![], training_manifest: None,
+        parts, ports, required_clearance, expansion_space: vec![], bill,
+        precedence: vec![], operation,
+    })
+}
+
+fn extract_space_platform(
+    state: &PlanState,
+    parameters: &ModuleParameters,
+) -> Result<ModuleDesign, ModuleError> {
+    let item = &parameters.item;
+    if item != "space-platform-starter-pack" {
+        return Err(ModuleError::Unsupported(format!(
+            "space-platform: unsupported item '{item}'"
+        )));
+    }
+    let bill = BTreeMap::from([
+        ("assembling-machine-3".to_string(), 1u64),
+        ("small-electric-pole".to_string(), 1u64),
+    ]);
+    let parts = vec![
+        Part {
+            role: "assembler".into(),
+            entity: "assembling-machine-3".into(),
+            half_size: Some(Offset { half_x: 3, half_y: 3 }),
+            offset: Offset { half_x: 0, half_y: 0 },
+            direction: Direction::East as u8,
+            recipe: Some("space-platform-starter-pack".into()),
+            underground_half: None,
+        },
+    ];
+    let ports = vec![
+        Port {
+            id: "output".into(),
+            mode: PortMode::InventoryOutput,
+            item: "space-platform-starter-pack".into(),
+            offset: Offset { half_x: 4, half_y: 0 },
+            direction: Direction::North as u8,
+            lane: None,
+            maximum: Rate::new(1, 600).unwrap(),
+        },
+    ];
+    let required_clearance = vec![
+        Offset { half_x: -3, half_y: -3 },
+        Offset { half_x: 3, half_y: -3 },
+        Offset { half_x: -3, half_y: 3 },
+        Offset { half_x: 3, half_y: 3 },
+    ];
+    let operation = OperatingContract {
+        inputs: BTreeMap::from([
+            ("steel-plate".into(), Rate::new(1, 60).unwrap()),
+            ("processing-unit".into(), Rate::new(1, 60).unwrap()),
+            ("space-platform-foundation".into(), Rate::new(1, 60).unwrap()),
+        ]),
+        outputs: BTreeMap::from([("space-platform-starter-pack".into(), Rate::new(1, 600).unwrap())]),
+        power_watts: 250000,
+        fuel_per_tick: BTreeMap::new(),
+        startup_latency_ticks: 120,
+        startup_items: BTreeMap::new(),
+        local_buffer_capacity: BTreeMap::from([("space-platform-starter-pack".into(), 2u64)]),
+        required_research: vec!["space-platform".into()],
+        required_surface: "nauvis".into(),
+        unsupported_mechanisms: vec![],
+    };
+    Ok(ModuleDesign {
+        schema: 1,
+        id: String::new(),
+        family: ModuleFamily::SpacePlatform,
+        generator_version: 1,
+        origin: KnowledgeOrigin::Extracted,
+        parameters: parameters.clone(),
+        prototype_hash: "space-platform-v1".into(),
+        mod_versions: BTreeMap::new(), parents: vec![], training_manifest: None,
+        parts, ports, required_clearance, expansion_space: vec![], bill,
+        precedence: vec![], operation,
+    })
+}
 
 #[cfg(test)]
 mod tests {

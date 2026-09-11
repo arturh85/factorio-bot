@@ -116,6 +116,8 @@ fn matching_families(_item: &str) -> Vec<ModuleFamily> {
         ModuleFamily::AssemblerCell,
         ModuleFamily::OilRefinery,
         ModuleFamily::ChemicalPlant,
+        ModuleFamily::RocketSilo,
+        ModuleFamily::SpacePlatform,
     ]
 }
 

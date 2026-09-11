@@ -73,6 +73,8 @@ pub enum ModuleFamily {
     AssemblerCell,
     OilRefinery,
     ChemicalPlant,
+    RocketSilo,
+    SpacePlatform,
 }
 
 /// How the design was obtained.

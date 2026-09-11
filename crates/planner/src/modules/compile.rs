@@ -139,7 +139,8 @@ fn compile_module_placement(
     for (item, count) in &design.bill {
         // Skip items that are themselves complex machines - they'll be placed as parts.
         if item == "oil-refinery" || item == "chemical-plant" || item == "pumpjack"
-            || item == "assembling-machine-1" || item == "assembling-machine-2"
+            || item == "assembling-machine-1" || item == "assembling-machine-2" || item == "assembling-machine-3"
+            || item == "rocket-silo"
         {
             continue;
         }

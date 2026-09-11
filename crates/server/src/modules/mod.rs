@@ -122,84 +122,81 @@ fn pumpjack_design() -> Value {
 
 fn red_science_design() -> Value {
     let hw = |name: &str| -> Value { PROTO_SIZES.half_size(name) };
-    // Two input belts (gear + copper) on the left, each with its own inserter.
-    // Inserters are stacked vertically (gear at hy=-2, copper at hy=2) so
-    // their collision boxes don't overlap — they share hx=-4.
+    // Two-belt RedScience cell, no gaps between columns.
+    //   gear-belt    at -9  box=[-10,-8]  (3 v)
+    //   copper-belt  at -7  box=[ -8,-6]  (3 v, touches gear belt)
+    //   gear-inserter at -5, hy=-1, LONG-HANDED  (2 tiles to gear belt)
+    //   copper-inserter at -4, hy=1, REGULAR     (1 tile to copper belt)
+    //   assembler at 0, out-inserter at 4, output-belt at 6
     serde_json::json!({
-        "schema": 1,
-        "id": "red-science-cell",
-        "family": "RedScience",
-        "parameters": { "item": "automation-science-pack", "with_pole": false, "labs": 0 },
-        "parts": [
-            { "role": "gear-belt", "entity": "transport-belt",
-              "offset": { "half_x": -9, "half_y": -2 }, "direction": 0, "recipe": null,
-              "half_size": hw("transport-belt") },
-            { "role": "gear-belt", "entity": "transport-belt",
-              "offset": { "half_x": -9, "half_y": 0 }, "direction": 0, "recipe": null,
-              "half_size": hw("transport-belt") },
-            { "role": "gear-belt", "entity": "transport-belt",
-              "offset": { "half_x": -9, "half_y": 2 }, "direction": 0, "recipe": null,
-              "half_size": hw("transport-belt") },
-            { "role": "copper-belt", "entity": "transport-belt",
-              "offset": { "half_x": -6, "half_y": -2 }, "direction": 0, "recipe": null,
-              "half_size": hw("transport-belt") },
-            { "role": "copper-belt", "entity": "transport-belt",
-              "offset": { "half_x": -6, "half_y": 0 }, "direction": 0, "recipe": null,
-              "half_size": hw("transport-belt") },
-            { "role": "copper-belt", "entity": "transport-belt",
-              "offset": { "half_x": -6, "half_y": 2 }, "direction": 0, "recipe": null,
-              "half_size": hw("transport-belt") },
-            { "role": "gear-inserter", "entity": "long-handed-inserter",
-              "offset": { "half_x": -4, "half_y": -2 }, "direction": 12, "recipe": null,
-              "half_size": hw("long-handed-inserter") },
-            { "role": "copper-inserter", "entity": "inserter",
-              "offset": { "half_x": -4, "half_y": 2 }, "direction": 12, "recipe": null,
-              "half_size": hw("inserter") },
-            { "role": "assembler", "entity": "assembling-machine-1",
-              "offset": { "half_x": 0, "half_y": 0 }, "direction": 4,
-              "recipe": "automation-science-pack",
-              "half_size": hw("assembling-machine-1") },
-            { "role": "out-inserter", "entity": "inserter",
-              "offset": { "half_x": 4, "half_y": 0 }, "direction": 12, "recipe": null,
-              "half_size": hw("inserter") },
-            { "role": "output-belt", "entity": "transport-belt",
-              "offset": { "half_x": 6, "half_y": -2 }, "direction": 0, "recipe": null,
-              "half_size": hw("transport-belt") },
-            { "role": "output-belt", "entity": "transport-belt",
-              "offset": { "half_x": 6, "half_y": 0 }, "direction": 0, "recipe": null,
-              "half_size": hw("transport-belt") },
-            { "role": "output-belt", "entity": "transport-belt",
-              "offset": { "half_x": 6, "half_y": 2 }, "direction": 0, "recipe": null,
-              "half_size": hw("transport-belt") },
-            { "role": "power-pole", "entity": "small-electric-pole",
-              "offset": { "half_x": -2, "half_y": -5 }, "direction": 0, "recipe": null,
-              "half_size": hw("small-electric-pole") }
+        "schema":1,"id":"red-science-cell","family":"RedScience",
+        "parameters":{"item":"automation-science-pack","with_pole":false,"labs":0},
+        "parts":[
+            {"role":"gear-belt","entity":"transport-belt",
+             "offset":{"half_x":-9,"half_y":-2},"direction":0,"recipe":null,
+             "half_size":hw("transport-belt")},
+            {"role":"gear-belt","entity":"transport-belt",
+             "offset":{"half_x":-9,"half_y":0},"direction":0,"recipe":null,
+             "half_size":hw("transport-belt")},
+            {"role":"gear-belt","entity":"transport-belt",
+             "offset":{"half_x":-9,"half_y":2},"direction":0,"recipe":null,
+             "half_size":hw("transport-belt")},
+            {"role":"copper-belt","entity":"transport-belt",
+             "offset":{"half_x":-7,"half_y":-2},"direction":0,"recipe":null,
+             "half_size":hw("transport-belt")},
+            {"role":"copper-belt","entity":"transport-belt",
+             "offset":{"half_x":-7,"half_y":0},"direction":0,"recipe":null,
+             "half_size":hw("transport-belt")},
+            {"role":"copper-belt","entity":"transport-belt",
+             "offset":{"half_x":-7,"half_y":2},"direction":0,"recipe":null,
+             "half_size":hw("transport-belt")},
+            {"role":"gear-inserter","entity":"long-handed-inserter",
+             "offset":{"half_x":-5,"half_y":-1},"direction":12,"recipe":null,
+             "half_size":hw("long-handed-inserter")},
+            {"role":"copper-inserter","entity":"inserter",
+             "offset":{"half_x":-4,"half_y":1},"direction":12,"recipe":null,
+             "half_size":hw("inserter")},
+            {"role":"assembler","entity":"assembling-machine-1",
+             "offset":{"half_x":0,"half_y":0},"direction":4,
+             "recipe":"automation-science-pack",
+             "half_size":hw("assembling-machine-1")},
+            {"role":"out-inserter","entity":"inserter",
+             "offset":{"half_x":4,"half_y":0},"direction":12,"recipe":null,
+             "half_size":hw("inserter")},
+            {"role":"output-belt","entity":"transport-belt",
+             "offset":{"half_x":6,"half_y":-2},"direction":0,"recipe":null,
+             "half_size":hw("transport-belt")},
+            {"role":"output-belt","entity":"transport-belt",
+             "offset":{"half_x":6,"half_y":0},"direction":0,"recipe":null,
+             "half_size":hw("transport-belt")},
+            {"role":"output-belt","entity":"transport-belt",
+             "offset":{"half_x":6,"half_y":2},"direction":0,"recipe":null,
+             "half_size":hw("transport-belt")},
+            {"role":"power-pole","entity":"small-electric-pole",
+             "offset":{"half_x":-2,"half_y":-5},"direction":0,"recipe":null,
+             "half_size":hw("small-electric-pole")}
         ],
-        "ports": [
-            { "id": "input-gears", "mode": "BeltInput", "item": "iron-gear-wheel",
-              "offset": { "half_x": -10, "half_y": -2 }, "direction": 4 },
-            { "id": "input-copper", "mode": "BeltInput", "item": "copper-plate",
-              "offset": { "half_x": -7, "half_y": -2 }, "direction": 4 },
-            { "id": "output", "mode": "InventoryOutput", "item": "automation-science-pack",
-              "offset": { "half_x": 7, "half_y": 2 }, "direction": 0 }
+        "ports":[
+            {"id":"input-gears","mode":"BeltInput","item":"iron-gear-wheel",
+             "offset":{"half_x":-10,"half_y":-2},"direction":4},
+            {"id":"input-copper","mode":"BeltInput","item":"copper-plate",
+             "offset":{"half_x":-8,"half_y":-2},"direction":4},
+            {"id":"output","mode":"InventoryOutput","item":"automation-science-pack",
+             "offset":{"half_x":7,"half_y":2},"direction":0}
         ],
-        "bill": { "assembling-machine-1": 1, "inserter": 1, "long-handed-inserter": 1,
-                  "transport-belt": 9, "small-electric-pole": 1 },
-        "operation": {
-            "inputs": { "copper-plate": { "numerator": 1, "ticks": 180 },
-                        "iron-gear-wheel": { "numerator": 1, "ticks": 180 } },
-            "outputs": { "automation-science-pack": { "numerator": 1, "ticks": 180 } },
-            "power_watts": 90000,
-            "fuel_per_tick": {},
-            "startup_latency_ticks": 180,
-            "startup_items": { "copper-plate": 5, "iron-gear-wheel": 5 },
-            "required_research": ["automation"],
-            "required_surface": "nauvis"
+        "bill":{"assembling-machine-1":1,"long-handed-inserter":1,"inserter":1,
+                "transport-belt":9,"small-electric-pole":1},
+        "operation":{
+            "inputs":{"copper-plate":{"numerator":1,"ticks":180},
+                      "iron-gear-wheel":{"numerator":1,"ticks":180}},
+            "outputs":{"automation-science-pack":{"numerator":1,"ticks":180}},
+            "power_watts":90000,"fuel_per_tick":{},
+            "startup_latency_ticks":180,
+            "startup_items":{"copper-plate":5,"iron-gear-wheel":5},
+            "required_research":["automation"],"required_surface":"nauvis"
         }
     })
-}
-
-pub fn router() -> OpenApiRouter<crate::state::AppState> {
+}pub fn router() -> OpenApiRouter<crate::state::AppState> {
     OpenApiRouter::new()
         .routes(routes!(list_designs))
 }

@@ -137,6 +137,32 @@ const FALLBACK_DESIGNS: ModuleDesign[] = [
       startup_latency_ticks: 120, startup_items: {'pipe': 2},
       required_research: ['oil-processing'], required_surface: 'nauvis'
     }
+  },
+    {
+    schema: 1, id: 'red-science-cell', family: 'RedScience',
+    parameters: {item: 'automation-science-pack', with_pole: false, labs: 0},
+    parts: [
+      {role: 'gear-belt', entity: 'transport-belt', offset: {half_x: 0, half_y: -5}, direction: 4, recipe: null, half_size: {half_x: 1, half_y: 1}},
+      {role: 'copper-belt', entity: 'transport-belt', offset: {half_x: 0, half_y: -3}, direction: 4, recipe: null, half_size: {half_x: 1, half_y: 1}},
+      {role: 'gear-inserter', entity: 'long-handed-inserter', offset: {half_x: 0, half_y: -2}, direction: 0, recipe: null, half_size: {half_x: 1, half_y: 1}},
+      {role: 'copper-inserter', entity: 'inserter', offset: {half_x: 0, half_y: -1}, direction: 0, recipe: null, half_size: {half_x: 1, half_y: 1}},
+      {role: 'assembler', entity: 'assembling-machine-1', offset: {half_x: 0, half_y: 0}, direction: 0, recipe: 'automation-science-pack', half_size: {half_x: 2, half_y: 2}},
+      {role: 'out-inserter', entity: 'inserter', offset: {half_x: 0, half_y: 3}, direction: 8, recipe: null, half_size: {half_x: 1, half_y: 1}},
+      {role: 'output-belt', entity: 'transport-belt', offset: {half_x: 0, half_y: 5}, direction: 4, recipe: null, half_size: {half_x: 1, half_y: 1}}
+    ],
+    ports: [
+      {id: 'input-gears', mode: 'BeltInput', item: 'iron-gear-wheel', offset: {half_x: -2, half_y: -5}, direction: 12},
+      {id: 'input-copper', mode: 'BeltInput', item: 'copper-plate', offset: {half_x: -2, half_y: -3}, direction: 12},
+      {id: 'output', mode: 'InventoryOutput', item: 'automation-science-pack', offset: {half_x: 2, half_y: 5}, direction: 4}
+    ],
+    bill: {'assembling-machine-1': 1, 'inserter': 1, 'long-handed-inserter': 1, 'transport-belt': 3, 'small-electric-pole': 1},
+    operation: {
+      inputs: {'copper-plate': {numerator: 1, ticks: 180}, 'iron-gear-wheel': {numerator: 1, ticks: 180}},
+      outputs: {'automation-science-pack': {numerator: 1, ticks: 180}},
+      power_watts: 90000, fuel_per_tick: {},
+      startup_latency_ticks: 180, startup_items: {'copper-plate': 5, 'iron-gear-wheel': 5},
+      required_research: ['automation'], required_surface: 'nauvis'
+    }
   }
 ];
 

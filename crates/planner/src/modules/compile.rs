@@ -261,7 +261,10 @@ pub fn plan_with_session(
         match select_candidates(&request, state, &mut session.library, options.cache_mode, control) {
             Ok(designs) => {
                 for design in designs.iter().take(options.candidate_limit) {
-                    let near = Position::new(0.0, 0.0);
+                    // Use the chain actor's position as the search origin.
+                    let near = state.bot(chain_actor)
+                        .map(|b| b.position.clone())
+                        .unwrap_or_else(|| Position::new(0.0, 0.0));
                     match site_candidates(design, state, &near, 1, control) {
                         Ok(instances) => {
                             let design_clone = design.clone();

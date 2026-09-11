@@ -34,7 +34,7 @@ use factorio_bot_planner::method::have::registry_for;
 use factorio_bot_planner::method::produce::{cell_spec, cells_for, cells_standing};
 use factorio_bot_planner::{
     ActionKind, ActionNetwork, Goal, InventorySlot, PlanState, Schedule, ScheduledStep, StepKind,
-    Ticks, graphviz, mermaid_gantt, pick_chain_actor, plan_best,
+    Ticks, graphviz, mermaid_gantt, pick_chain_actor, plan_best, plan_best_modules,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -450,6 +450,17 @@ pub(crate) fn install_goal_plan(
             async move {
                 let goal = goal_from_lua(&g)?;
                 let roster = resolve_roster(opts.as_ref(), &default_roster)?;
+                // Check for module planner mode.
+                let planner_mode: String = match opts.as_ref() {
+                    Some(t) => {
+                        let v: LuaValue = t.get("planner_mode").unwrap_or(LuaValue::Nil);
+                        match v {
+                            LuaValue::String(s) => s.to_string_lossy().to_string(),
+                            _ => "legacy".to_string(),
+                        }
+                    }
+                    None => "legacy".to_string(),
+                };
                 // Optional for the same reason it is in `goal.start`: absence
                 // means nobody is recording, which a planning-only
                 // interpreter legitimately is.
@@ -465,6 +476,7 @@ pub(crate) fn install_goal_plan(
                     refresher.as_ref(),
                     clock.as_ref(),
                     live.as_ref(),
+                    &planner_mode,
                 )
                 .await?;
                 narrate_work_split(&net, &scheduled);
@@ -971,6 +983,7 @@ async fn plan_verified(
     refresher: Option<&BufferRefresher>,
     clock: Option<&PlanningClockSeam>,
     live: Option<&crate::globals::record::LiveRecord>,
+    planner_mode: &str,
 ) -> LuaResult<(ActionNetwork, Schedule, Option<u64>)> {
     // Once, before any expansion, and deliberately outside the loop below.
     //
@@ -990,7 +1003,7 @@ async fn plan_verified(
     // later tick, and a paused game has no later tick. Everything the rounds
     // below ask (`can_place_entity`) is answered in the call itself.
     let running = PlanningClock::stop(clock).await;
-    let planned = plan_rounds(goal, surface, world, roster, checker).await;
+    let planned = plan_rounds(goal, surface, world, roster, checker, planner_mode).await;
     // Restarted on every exit path, a refusal included: a planner error must
     // never leave the game frozen behind it.
     let timing = running.restart(clock).await;
@@ -1128,6 +1141,7 @@ async fn plan_rounds(
     world: &Arc<FactorioSurface>,
     roster: &[BotId],
     checker: Option<&PlacementChecker>,
+    planner_mode: &str,
 ) -> LuaResult<(ActionNetwork, Schedule)> {
     for round in 0..=MAX_RESITE_ROUNDS {
         // Rebuilt every round, deliberately: this is the read that picks up
@@ -1147,14 +1161,24 @@ async fn plan_rounds(
         // choice the offline `plan` CLI makes or the two stop agreeing.
         let chain_actor = pick_chain_actor(&state, roster)
             .ok_or_else(|| goal_error("no bots in this run; goals need at least one"))?;
-        let (net, scheduled, _memory) = plan_best(
-            std::slice::from_ref(goal),
-            &state,
-            &registry_for(roster),
-            chain_actor,
-            roster,
-        )
-        .map_err(planner_error)?;
+        let plan_result = if planner_mode == "modules" {
+            plan_best_modules(
+                std::slice::from_ref(goal),
+                &state,
+                &registry_for(roster),
+                chain_actor,
+                roster,
+            )
+        } else {
+            plan_best(
+                std::slice::from_ref(goal),
+                &state,
+                &registry_for(roster),
+                chain_actor,
+                roster,
+            )
+        };
+        let (net, scheduled, _memory) = plan_result.map_err(planner_error)?;
 
         let Some(checker) = checker else {
             return Ok((net, scheduled));

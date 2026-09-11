@@ -206,9 +206,9 @@ function entityLabel(entity: string): string {
 
               <!-- Grid covering the viewBox, 1 tile = 2 half-tile units -->
               <defs>
-                <pattern id="grid" width="1" height="1" patternUnits="userSpaceOnUse"
+                <pattern id="grid" width="2" height="2" patternUnits="userSpaceOnUse"
                          x="0" y="0">
-                  <path d="M 1 0 L 0 0 0 1" fill="none" stroke="#e5e7eb" stroke-width="0.10"/>
+                  <path d="M 2 0 L 0 0 0 2" fill="none" stroke="#e5e7eb" stroke-width="0.15"/>
                 </pattern>
               </defs>
               <rect x="-999" y="-999" width="1998" height="1998" fill="url(#grid)"/>

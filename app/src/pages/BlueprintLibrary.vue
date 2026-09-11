@@ -72,6 +72,13 @@ const designs = ref<ModuleDesign[]>([]);
 
 /** Per-design tile count keyed by design id. */
 const tileCount = ref<Record<string, number>>({});
+
+// Fetch designs from API — no fallback data.
+fetch('/api/v1/modules/designs')
+  .then(r => r.ok ? r.json() : Promise.reject(r.status))
+  .then(data => { designs.value = data.designs; })
+  .catch(() => { /* API unavailable — designs stay empty */ });
+
 // ---------------------------------------------------------------------------
 // SVG helpers
 // ---------------------------------------------------------------------------

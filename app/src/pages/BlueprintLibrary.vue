@@ -76,12 +76,12 @@ const FALLBACK_DESIGNS: ModuleDesign[] = [
     schema: 1, id: 'ore-to-plate-iron', family: 'OreToPlate',
     parameters: {item: 'iron-plate', with_pole: false, labs: 0},
     parts: [
-      {role: 'drill', entity: 'burner-mining-drill', offset: {half_x: 0, half_y: 0}, direction: 4, recipe: null},
-      {role: 'furnace', entity: 'stone-furnace', offset: {half_x: 0, half_y: 4}, direction: 0, recipe: 'iron-plate'}
+      {role: 'drill', entity: 'burner-mining-drill', offset: {half_x: 0, half_y: 0}, direction: 0, recipe: null},
+      {role: 'furnace', entity: 'stone-furnace', offset: {half_x: 1, half_y: 5}, direction: 0, recipe: 'iron-plate'}
     ],
     ports: [
       {id: 'belt-input', mode: 'BeltInput', item: 'iron-ore', offset: {half_x: -2, half_y: 0}, direction: 12},
-      {id: 'inventory-output', mode: 'InventoryOutput', item: 'iron-plate', offset: {half_x: 0, half_y: 6}, direction: 0}
+      {id: 'inventory-output', mode: 'InventoryOutput', item: 'iron-plate', offset: {half_x: 1, half_y: 7}, direction: 0}
     ],
     bill: {'burner-mining-drill': 1, 'stone-furnace': 1},
     operation: {
@@ -98,12 +98,12 @@ const FALLBACK_DESIGNS: ModuleDesign[] = [
     schema: 1, id: 'ore-to-plate-copper', family: 'OreToPlate',
     parameters: {item: 'copper-plate', with_pole: false, labs: 0},
     parts: [
-      {role: 'drill', entity: 'burner-mining-drill', offset: {half_x: 0, half_y: 0}, direction: 4, recipe: null},
-      {role: 'furnace', entity: 'stone-furnace', offset: {half_x: 0, half_y: 4}, direction: 0, recipe: 'copper-plate'}
+      {role: 'drill', entity: 'burner-mining-drill', offset: {half_x: 0, half_y: 0}, direction: 0, recipe: null},
+      {role: 'furnace', entity: 'stone-furnace', offset: {half_x: 1, half_y: 5}, direction: 0, recipe: 'copper-plate'}
     ],
     ports: [
       {id: 'belt-input', mode: 'BeltInput', item: 'copper-ore', offset: {half_x: -2, half_y: 0}, direction: 12},
-      {id: 'inventory-output', mode: 'InventoryOutput', item: 'copper-plate', offset: {half_x: 0, half_y: 6}, direction: 0}
+      {id: 'inventory-output', mode: 'InventoryOutput', item: 'copper-plate', offset: {half_x: 1, half_y: 7}, direction: 0}
     ],
     bill: {'burner-mining-drill': 1, 'stone-furnace': 1},
     operation: {
@@ -216,30 +216,51 @@ function entityLabel(entity: string): string {
                  class="w-full max-w-sm rounded border bg-gray-50"
                  xmlns="http://www.w3.org/2000/svg">
 
-              <!-- Grid background -->
+              <!-- Grid background (1 tile = 2 half-tile units) -->
               <defs>
                 <pattern id="grid" width="2" height="2" patternUnits="userSpaceOnUse">
                   <path d="M 2 0 L 0 0 0 2" fill="none" stroke="#e5e7eb" stroke-width="0.1"/>
                 </pattern>
+                <!-- Direction arrow marker for entity facing -->
+                <marker id="arrow-up" markerWidth="4" markerHeight="4" refX="0" refY="4" orient="auto">
+                  <polygon points="0,0 4,0 2,4" fill="#374151"/>
+                </marker>
               </defs>
               <rect width="100%" height="100%" fill="url(#grid)"/>
 
-              <!-- Port indicators -->
+              <!-- Port indicators with directional arrows -->
               <g v-for="port in design.ports" :key="port.id">
-                <circle :cx="port.offset.half_x" :cy="port.offset.half_y" r="0.6" fill="#93c5fd" stroke="#3b82f6" stroke-width="0.15"/>
-                <text :x="port.offset.half_x" :y="port.offset.half_y + 0.2"
-                      text-anchor="middle" font-size="0.6" fill="#1e40af">{{ labelForMode(port.mode).charAt(0) }}</text>
+                <circle :cx="port.offset.half_x" :cy="port.offset.half_y" r="0.5" fill="#bfdbfe" stroke="#3b82f6" stroke-width="0.3"/>
+                <line :x1="port.offset.half_x" :y1="port.offset.half_y"
+                      :x2="port.offset.half_x + 1.5 * Math.cos((port.direction / 4) * Math.PI)"
+                      :y2="port.offset.half_y + 1.5 * -Math.sin((port.direction / 4) * Math.PI)"
+                      stroke="#3b82f6" stroke-width="0.25"
+                      marker-end="url(#arrow-up)"/>
+                <text :x="port.offset.half_x" :y="port.offset.half_y - 0.8"
+                      text-anchor="middle" font-size="0.4" fill="#2563eb">{{ port.id }}</text>
               </g>
 
-              <!-- Entity rectangles -->
+              <!-- Entity rectangles with direction indicators -->
               <g v-for="part in design.parts" :key="part.role">
-                <rect :x="part.offset.half_x - 1" :y="part.offset.half_y - 1"
-                      width="2" height="2" rx="0.3"
+                <!-- Entity body with correct game size -->
+                <rect :x="part.offset.half_x - entityHalfSize(part.entity).hw"
+                      :y="part.offset.half_y - entityHalfSize(part.entity).hh"
+                      :width="entityHalfSize(part.entity).hw * 2"
+                      :height="entityHalfSize(part.entity).hh * 2"
+                      rx="0.3"
                       :fill="colorForEntityType(part.entity)"
-                      stroke="#374151" stroke-width="0.15"/>
-                <text :x="part.offset.half_x" :y="part.offset.half_y + 0.15"
-                      text-anchor="middle" font-size="0.5" fill="white"
-                      font-weight="bold">{{ entityLabel(part.role).substring(0, 4) }}</text>
+                      stroke="#374151" stroke-width="0.2"/>
+                <!-- Direction arrow on the entity's facing side -->
+                <line :x1="part.offset.half_x + entityDx(part.direction, part.entity)"
+                      :y1="part.offset.half_y + entityDy(part.direction, part.entity)"
+                      :x2="part.offset.half_x + entityArrowEndX(part.direction, part.entity)"
+                      :y2="part.offset.half_y + entityArrowEndY(part.direction, part.entity)"
+                      stroke="#fbbf24" stroke-width="0.5"
+                      stroke-linecap="round"/>
+                <!-- Entity label -->
+                <text :x="part.offset.half_x" :y="part.offset.half_y + 0.2"
+                      text-anchor="middle" font-size="0.45" fill="white"
+                      font-weight="bold">{{ entityLabel(part.role) }}</text>
               </g>
             </svg>
           </div>

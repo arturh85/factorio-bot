@@ -50,18 +50,25 @@ fn extract_ore_to_plate(
         Part {
             role: "drill".into(),
             entity: "burner-mining-drill".into(),
+            // Drill at origin, facing north. Its output emerges on the
+            // tile immediately north of its north face (at y = 1.5 tiles
+            // from origin).
             offset: Offset { half_x: 0, half_y: 0 },
-            direction: Direction::East as u8,
+            direction: Direction::North as u8,
             recipe: None,
             underground_half: None,
         },
         Part {
             role: "furnace".into(),
             entity: "stone-furnace".into(),
-            // Furnace is 3 tiles north of the drill (in half-tile offset).
-            // The drill is 3x3 (mining-drill) and the furnace is ~2x2, so
-            // they need at least 1.5 + 0.7 = 2.2 tiles gap. 3 tiles works.
-            offset: Offset { half_x: 0, half_y: 10 },
+            // Furnace placed so its south input face sits on the drill's
+            // output tile. Furnace centre at (0.5, 2.5) tiles north of
+            // drill centre = offset (1, 5) in half-tiles.
+            //
+            // The stone-furnace is ~2x2 so it occupies tiles (0,2)-(1,3)
+            // which overlaps the drill's output tile (0,2). Items pass
+            // directly from drill to furnace without an inserter.
+            offset: Offset { half_x: 1, half_y: 5 },
             direction: Direction::North as u8,
             recipe: Some(item.clone()),
             underground_half: None,
@@ -72,10 +79,9 @@ fn extract_ore_to_plate(
     let bill = BTreeMap::from([
         ("burner-mining-drill".to_string(), 1u64),
         ("stone-furnace".to_string(), 1u64),
-        ("burner-inserter".to_string(), 1u64),
     ]);
 
-    // Ports: the input side (drill`s belt feed) and output side (furnace output).
+    // Ports: ore belt input on the drill's west face, plate output on furnace's north face.
     let ports = vec![
         Port {
             id: "belt-input".into(),
@@ -90,7 +96,7 @@ fn extract_ore_to_plate(
             id: "inventory-output".into(),
             mode: PortMode::InventoryOutput,
             item: item.clone(),
-            offset: Offset { half_x: 0, half_y: 10 },
+            offset: Offset { half_x: 1, half_y: 8 },
             direction: Direction::North as u8,
             lane: None,
             maximum: Rate::new(1, 600).unwrap(),

@@ -11,7 +11,6 @@ async fn list_designs() -> Json<Value> {
     let designs = vec![
         ore_to_plate_design("iron-plate", "iron-ore"),
         ore_to_plate_design("copper-plate", "copper-ore"),
-        red_science_design(),
         pumpjack_design(),
     ];
     Json(serde_json::json!({ "designs": designs }))
@@ -48,38 +47,6 @@ fn ore_to_plate_design(item: &str, ore: &str) -> Value {
     })
 }
 
-
-fn red_science_design() -> Value {
-    serde_json::json!({
-        "schema": 1,
-        "id": "red-science-cell",
-        "family": "RedScience",
-        "parameters": { "item": "automation-science-pack", "with_pole": false, "labs": 0 },
-        "parts": [
-            { "role": "assembler", "entity": "assembling-machine-1",
-              "offset": { "half_x": 0, "half_y": 0 }, "direction": 0, "recipe": "automation-science-pack",
-              "half_size": { "half_x": 2, "half_y": 2 } }
-        ],
-        "ports": [
-            { "id": "input-gears", "mode": "BeltInput", "item": "iron-gear-wheel",
-              "offset": { "half_x": -3, "half_y": 0 }, "direction": 12 },
-            { "id": "input-copper", "mode": "BeltInput", "item": "copper-plate",
-              "offset": { "half_x": 3, "half_y": 0 }, "direction": 4 }
-        ],
-        "bill": { "assembling-machine-1": 1, "inserter": 3, "iron-chest": 3 },
-        "operation": {
-            "inputs": { "iron-gear-wheel": { "numerator": 1, "ticks": 180 },
-                        "copper-plate": { "numerator": 1, "ticks": 180 } },
-            "outputs": { "automation-science-pack": { "numerator": 1, "ticks": 180 } },
-            "power_watts": 90000,
-            "fuel_per_tick": {},
-            "startup_latency_ticks": 180,
-            "startup_items": { "iron-gear-wheel": 5, "copper-plate": 5 },
-            "required_research": ["automation"],
-            "required_surface": "nauvis"
-        }
-    })
-}
 
 fn pumpjack_design() -> Value {
     serde_json::json!({

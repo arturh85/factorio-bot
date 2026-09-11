@@ -99,8 +99,6 @@ fn compile_module_placement(
     instance: &ModuleInstance,
     ids: &mut ActionIdGen,
 ) -> Vec<Step> {
-    use crate::goal::{Goal, Holder};
-
     let mut steps: Vec<Step> = Vec::new();
 
     let anchor_x = instance.placement.half_x as f64 * 0.5;

@@ -128,7 +128,7 @@ fn run_offline(args: &ArgMatches) -> Result<()> {
     let manifest_json = std::fs::read_to_string(manifest_path)
         .into_diagnostic()
         .map_err(|e| miette!("failed to read manifest: {e}"))?;
-    let manifest: Manifest = factorio_bot_core::serde_json::from_str(&manifest_json)
+    let _manifest: Manifest = factorio_bot_core::serde_json::from_str(&manifest_json)
         .into_diagnostic()
         .map_err(|e| miette!("failed to parse manifest: {e}"))?;
 
@@ -160,15 +160,13 @@ fn run_report(args: &ArgMatches) -> Result<()> {
     let manifest_json = std::fs::read_to_string(manifest_path)
         .into_diagnostic()
         .map_err(|e| miette!("failed to read manifest: {e}"))?;
-    let manifest: Manifest = factorio_bot_core::serde_json::from_str(&manifest_json)
+    let _manifest: Manifest = factorio_bot_core::serde_json::from_str(&manifest_json)
         .into_diagnostic()
         .map_err(|e| miette!("failed to parse manifest: {e}"))?;
 
     // Load trial results from results directory.
     let results_csv = results_path.join("trials.csv");
     let results_json = results_path.join("comparison.json");
-
-    let mut results = Vec::new();
 
     // Try CSV first.
     if results_csv.exists() {
@@ -180,9 +178,6 @@ fn run_report(args: &ArgMatches) -> Result<()> {
         let json_content = std::fs::read_to_string(&results_json)
             .into_diagnostic()
             .map_err(|e| miette!("failed to read {results_json:?}: {e}"))?;
-        // For JSON, parse each line as a TrialResult
-        for line in json_content.lines().filter(|l| !l.trim().is_empty() && !l.trim().starts_with('[') && !l.trim().starts_with(']') && !l.trim().starts_with('{')) {
-        }
         return Err(miette!("JSON results not yet supported; use CSV format"));
     } else {
         return Err(miette!("no trial results found at {results_path:?}"));

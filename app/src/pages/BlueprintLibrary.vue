@@ -129,6 +129,15 @@ function tiledViewBox(design: ModuleDesign, tiles: number): string {
 
 /** Vertical spacing (in half-tile units) between tiled copies.
  *  Cell extent from lowest bottom edge to highest top edge, plus a 1-tile gap. */
+function viewBoxOriginX(design: ModuleDesign): number {
+  let minX = Infinity;
+  for (const p of design.parts) {
+    const half = entityHalfSize(p);
+    minX = Math.min(minX, p.offset.half_x - half.hw);
+  }
+  return minX - 2;  // same padding as tiledViewBox
+}
+
 function tileStepY(design: ModuleDesign): number {
   let minY = Infinity, maxY = -Infinity;
   for (const p of design.parts) {
@@ -206,12 +215,13 @@ function entityLabel(entity: string): string {
 
               <!-- Grid covering the viewBox, 1 tile = 2 half-tile units -->
               <defs>
-                <pattern id="grid" width="2" height="2" patternUnits="userSpaceOnUse"
-                         x="0" y="0">
+                <pattern :id="'grid-'+design.id" width="2" height="2" patternUnits="userSpaceOnUse"
+                         :x="viewBoxOriginX(design)"
+                         y="0">
                   <path d="M 2 0 L 0 0 0 2" fill="none" stroke="#e5e7eb" stroke-width="0.15"/>
                 </pattern>
               </defs>
-              <rect x="-999" y="-999" width="1998" height="1998" fill="url(#grid)"/>
+              <rect x="-999" y="-999" width="1998" height="1998" :fill="'url(#grid-'+design.id+')'"/>
 
               <!-- Tiled cells. SVG y-positive = down, so north (Factorio -y) is SVG -y.
                    Entity rects are drawn at -(factorio_y + half_hh) so their centre

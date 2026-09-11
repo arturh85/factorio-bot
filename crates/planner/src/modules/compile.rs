@@ -203,12 +203,65 @@ fn compile_module_placement(
                 pinned: None,
                 label: format!("set recipe {} for {}", recipe, part.role),
             })));
+        }
+    }
 
+    // For each part with a recipe and an output in the design's contract,
+    // add a Remove step to collect the output from the machine.
+    for part in &design.parts {
+        if part.recipe.is_some() {
+            let px = anchor_x + part.offset.half_x as f64 * 0.5;
+            let py = anchor_y + part.offset.half_y as f64 * 0.5;
+            let pos = Position::new(px, py);
+
+            let output_slot = output_slot_for_entity(&part.entity);
+            for (output_item, rate) in &design.operation.outputs {
+                // Take one cycle's worth from the machine's output slot.
+                steps.push(Step::Act(Box::new(Action {
+                    id: ids.next(),
+                    kind: ActionKind::Remove {
+                        pos: pos.clone(),
+                        entity: part.entity.clone(),
+                        slot: output_slot,
+                        item: output_item.clone(),
+                        count: rate.numerator as u32,
+                    },
+                    pre: vec![
+                        Condition::AtPosition {
+                            who: crate::action::Actor::Role,
+                            pos: pos.clone(),
+                            radius: 3.0,
+                            min_radius: 0.5,
+                        },
+                    ],
+                    eff: vec![
+                        Effect::GainItem {
+                            who: crate::action::Actor::Role,
+                            item: output_item.clone(),
+                            count: rate.numerator as u32,
+                        },
+                    ],
+                    duration: rate.ticks.get() as u32,
+                    pinned: None,
+                    label: format!("take {} {} from {}", rate.numerator, output_item, part.role),
+                })));
+            }
         }
     }
 
     steps
 }
+/// Determine the output inventory slot for a given entity type.
+fn output_slot_for_entity(name: &str) -> InventorySlot {
+    if name.contains("furnace") || name.contains("smelter") {
+        InventorySlot::FurnaceResult
+    } else if name.contains("assembling") || name.contains("assembler") || name.contains("crafting") {
+        InventorySlot::AssemblerOutput
+    } else {
+        InventorySlot::FurnaceResult
+    }
+}
+
 /// Returns true for entity names known to burn fuel.
 fn is_burner_entity(name: &str) -> bool {
     matches!(name, "burner-mining-drill" | "stone-furnace" | "steel-furnace"

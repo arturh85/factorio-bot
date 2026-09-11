@@ -173,7 +173,8 @@ mod tests {
 
     #[test]
     fn instance_ids_are_monotonic() {
-        let _mem = InstanceMemory::default();
+        #[allow(unused_mut)]
+        let mut mem = InstanceMemory::default();
         let id1 = mem.allocate_id();
         let id2 = mem.allocate_id();
         assert_eq!(id1, 0);
@@ -183,7 +184,8 @@ mod tests {
 
     #[test]
     fn store_and_retrieve_instance() {
-        let _mem = InstanceMemory::default();
+        #[allow(unused_mut)]
+        let mut mem = InstanceMemory::default();
         let instance = ModuleInstance {
             id: mem.allocate_id(),
             design_id: "test-design".into(),
@@ -209,7 +211,8 @@ mod tests {
 
     #[test]
     fn reconcile_preserves_existing_parts() {
-        let _mem = InstanceMemory::default();
+        #[allow(unused_mut)]
+        let mut mem = InstanceMemory::default();
         let mut instance = ModuleInstance {
             id: mem.allocate_id(),
             design_id: "ore-to-plate".into(),

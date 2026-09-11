@@ -24,7 +24,7 @@ interface Part {
   offset: Offset;
   direction: number;
   recipe: string | null;
-  half_size?: Offset;
+  half_size: Offset;
 }
 
 interface Rate {
@@ -66,123 +66,12 @@ interface ModuleDesign {
 // Design state — fetched from API with hardcoded fallback
 // ---------------------------------------------------------------------------
 
-import {ref, onMounted} from 'vue';
+import {ref} from 'vue';
 
 const designs = ref<ModuleDesign[]>([]);
-const loading = ref(true);
-const error = ref<string | null>(null);
 
 /** Per-design tile count keyed by design id. */
 const tileCount = ref<Record<string, number>>({});
-
-const FALLBACK_DESIGNS: ModuleDesign[] = [
-  {
-    schema: 1, id: 'ore-to-plate-iron', family: 'OreToPlate',
-    parameters: {item: 'iron-plate', with_pole: false, labs: 0},
-    parts: [
-      {role: 'drill', entity: 'burner-mining-drill', offset: {half_x: 0, half_y: 0}, direction: 0, recipe: null},
-      {role: 'furnace', entity: 'stone-furnace', offset: {half_x: 1, half_y: 5}, direction: 0, recipe: 'iron-plate'}
-    ],
-    ports: [
-      {id: 'belt-input', mode: 'BeltInput', item: 'iron-ore', offset: {half_x: -2, half_y: 0}, direction: 12},
-      {id: 'inventory-output', mode: 'InventoryOutput', item: 'iron-plate', offset: {half_x: 1, half_y: 7}, direction: 0}
-    ],
-    bill: {'burner-mining-drill': 1, 'stone-furnace': 1},
-    operation: {
-      inputs: {'iron-ore': {numerator: 1, ticks: 600}},
-      outputs: {'iron-plate': {numerator: 1, ticks: 600}},
-      power_watts: 0,
-      fuel_per_tick: {coal: {numerator: 1, ticks: 4800}},
-      startup_latency_ticks: 4800,
-      startup_items: {coal: 10, 'iron-ore': 5},
-      required_research: [], required_surface: 'nauvis'
-    }
-  },
-  {
-    schema: 1, id: 'ore-to-plate-copper', family: 'OreToPlate',
-    parameters: {item: 'copper-plate', with_pole: false, labs: 0},
-    parts: [
-      {role: 'drill', entity: 'burner-mining-drill', offset: {half_x: 0, half_y: 0}, direction: 0, recipe: null},
-      {role: 'furnace', entity: 'stone-furnace', offset: {half_x: 1, half_y: 5}, direction: 0, recipe: 'copper-plate'}
-    ],
-    ports: [
-      {id: 'belt-input', mode: 'BeltInput', item: 'copper-ore', offset: {half_x: -2, half_y: 0}, direction: 12},
-      {id: 'inventory-output', mode: 'InventoryOutput', item: 'copper-plate', offset: {half_x: 1, half_y: 7}, direction: 0}
-    ],
-    bill: {'burner-mining-drill': 1, 'stone-furnace': 1},
-    operation: {
-      inputs: {'copper-ore': {numerator: 1, ticks: 600}},
-      outputs: {'copper-plate': {numerator: 1, ticks: 600}},
-      power_watts: 0,
-      fuel_per_tick: {coal: {numerator: 1, ticks: 4800}},
-      startup_latency_ticks: 4800,
-      startup_items: {coal: 10, 'copper-ore': 5},
-      required_research: [], required_surface: 'nauvis'
-    }
-  },
-  {
-    schema: 1, id: 'pumpjack', family: 'OreToPlate',
-    parameters: {item: 'crude-oil', with_pole: false, labs: 0},
-    parts: [
-      {role: 'pumpjack', entity: 'pumpjack', offset: {half_x: 0, half_y: 0}, direction: 0, recipe: null, half_size: {half_x: 3, half_y: 3}}
-    ],
-    ports: [
-      {id: 'output-crude', mode: 'InventoryOutput', item: 'crude-oil', offset: {half_x: 0, half_y: 3}, direction: 0}
-    ],
-    bill: {'pumpjack': 1, 'pipe': 2},
-    operation: {
-      inputs: {},
-      outputs: {'crude-oil': {numerator: 1, ticks: 120}},
-      power_watts: 90000, fuel_per_tick: {},
-      startup_latency_ticks: 120, startup_items: {'pipe': 2},
-      required_research: ['oil-processing'], required_surface: 'nauvis'
-    }
-  },
-    {
-    schema: 1, id: 'red-science-cell', family: 'RedScience',
-    parameters: {item: 'automation-science-pack', with_pole: false, labs: 0},
-    parts: [
-      {role: 'gear-belt', entity: 'transport-belt', offset: {half_x: 0, half_y: -5}, direction: 4, recipe: null, half_size: {half_x: 1, half_y: 1}},
-      {role: 'copper-belt', entity: 'transport-belt', offset: {half_x: 0, half_y: -3}, direction: 4, recipe: null, half_size: {half_x: 1, half_y: 1}},
-      {role: 'gear-inserter', entity: 'long-handed-inserter', offset: {half_x: 0, half_y: -2}, direction: 0, recipe: null, half_size: {half_x: 1, half_y: 1}},
-      {role: 'copper-inserter', entity: 'inserter', offset: {half_x: 0, half_y: -1}, direction: 0, recipe: null, half_size: {half_x: 1, half_y: 1}},
-      {role: 'assembler', entity: 'assembling-machine-1', offset: {half_x: 0, half_y: 0}, direction: 0, recipe: 'automation-science-pack', half_size: {half_x: 2, half_y: 2}},
-      {role: 'out-inserter', entity: 'inserter', offset: {half_x: 0, half_y: 3}, direction: 8, recipe: null, half_size: {half_x: 1, half_y: 1}},
-      {role: 'output-belt', entity: 'transport-belt', offset: {half_x: 0, half_y: 5}, direction: 4, recipe: null, half_size: {half_x: 1, half_y: 1}}
-    ],
-    ports: [
-      {id: 'input-gears', mode: 'BeltInput', item: 'iron-gear-wheel', offset: {half_x: -2, half_y: -5}, direction: 12},
-      {id: 'input-copper', mode: 'BeltInput', item: 'copper-plate', offset: {half_x: -2, half_y: -3}, direction: 12},
-      {id: 'output', mode: 'InventoryOutput', item: 'automation-science-pack', offset: {half_x: 2, half_y: 5}, direction: 4}
-    ],
-    bill: {'assembling-machine-1': 1, 'inserter': 1, 'long-handed-inserter': 1, 'transport-belt': 3, 'small-electric-pole': 1},
-    operation: {
-      inputs: {'copper-plate': {numerator: 1, ticks: 180}, 'iron-gear-wheel': {numerator: 1, ticks: 180}},
-      outputs: {'automation-science-pack': {numerator: 1, ticks: 180}},
-      power_watts: 90000, fuel_per_tick: {},
-      startup_latency_ticks: 180, startup_items: {'copper-plate': 5, 'iron-gear-wheel': 5},
-      required_research: ['automation'], required_surface: 'nauvis'
-    }
-  }
-];
-
-onMounted(async () => {
-  try {
-    const res = await fetch('/api/v1/modules/designs');
-    if (res.ok) {
-      const data = await res.json();
-      designs.value = data.designs;
-    } else {
-      throw new Error(`HTTP ${res.status}`);
-    }
-  } catch {
-    error.value = 'Could not load from API, using fallback designs';
-    designs.value = FALLBACK_DESIGNS;
-  } finally {
-    loading.value = false;
-  }
-});
-
 // ---------------------------------------------------------------------------
 // SVG helpers
 // ---------------------------------------------------------------------------
@@ -190,16 +79,10 @@ onMounted(async () => {
 /** Compute bounding box of all parts in half-tile units. */
 
 function entityHalfSize(part: Part): {hw: number, hh: number} {
-  // Collision-box half-sizes measured from live Factorio 2.1.17 prototypes.
-  const sizes: Record<string, {hw: number, hh: number}> = {
-    'burner-mining-drill': {hw: 2, hh: 2},   // 2×2 tiles (not 3×3)
-    'stone-furnace':      {hw: 2, hh: 2},    // 2×2 tiles
-    'burner-inserter':    {hw: 1, hh: 1},    // 1×1 tile
-    'inserter':           {hw: 1, hh: 1},    // 1×1 tile
-    'assembling-machine-1': {hw: 2, hh: 2}
-  };
-  return sizes[part.entity] ?? {hw: 2, hh: 2};
+  return {hw: part.half_size.half_x, hh: part.half_size.half_y};
 }
+
+
 
 function svgArrowPoints(dir: number, entity: string, cx: number, cy: number): string {
   const half = entityHalfSize({ entity: entity } as Part);
@@ -285,9 +168,7 @@ function entityLabel(entity: string): string {
       Reusable factory module designs. Each card shows the entity layout, bill of materials, rates, and a tiling slider to preview how the cell expands.
     </p>
 
-    <div v-if="loading" class="text-gray-500">Loading designs...</div>
-    <div v-else-if="error" class="mb-4 rounded border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-800">{{ error }}</div>
-    <div v-else class="grid gap-8">
+    <div class="grid gap-8">
       <div v-for="design in designs" :key="design.id"
            class="rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
 

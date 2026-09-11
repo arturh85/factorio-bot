@@ -3,15 +3,13 @@
 //! Compares module vs legacy planning using dumped worlds, without Factorio.
 //! Produces trial results that can be fed into the report system.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
-use factorio_bot_core::miette::{IntoDiagnostic, Result as MResult, miette};
-use factorio_bot_core::serde_json;
-use factorio_bot_core::types::Position;
 
-use crate::experiment::manifest::{Manifest, TrialKey, ManifestError, expand_matrix};
+use factorio_bot_core::serde_json;
+
+use crate::experiment::manifest::{Manifest, TrialKey, expand_matrix};
 use crate::experiment::runner::{TrialOutcome, TrialResult};
 
 /// Run an offline experiment against dumped worlds.
@@ -23,6 +21,7 @@ pub fn run_offline_experiment(
     map_dir: &Path,
     output_dir: &Path,
 ) -> Vec<TrialResult> {
+    let _ = output_dir;
     let trial_keys = match expand_matrix(manifest) {
         Ok(keys) => keys,
         Err(e) => {
@@ -210,7 +209,7 @@ mod tests {
             return;
         }
 
-        let manifest = Manifest {
+        let _manifest = Manifest {
             schema: 1,
             seeds: vec![31337],
             bots: vec![1],

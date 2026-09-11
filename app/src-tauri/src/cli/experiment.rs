@@ -6,11 +6,9 @@
 
 use crate::cli::{Subcommand, SubcommandCallback};
 use crate::context::Context;
-use crate::experiment::{manifest::Manifest, report::{compare, write_report, Comparison}};
-use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
-use factorio_bot_core::miette::{IntoDiagnostic, Result, miette, ErrReport};
-use std::path::PathBuf;
-
+use crate::experiment::{manifest::Manifest, report::{compare, write_report}};
+use clap::{Arg, ArgMatches, Command, value_parser};
+use factorio_bot_core::miette::{IntoDiagnostic, Result, miette};
 /// Build the experiment subcommand.
 pub fn build() -> Box<dyn Subcommand> {
     Box::new(ExperimentCommand)
@@ -128,7 +126,7 @@ fn run_offline(args: &ArgMatches) -> Result<()> {
     let manifest_json = std::fs::read_to_string(manifest_path)
         .into_diagnostic()
         .map_err(|e| miette!("failed to read manifest: {e}"))?;
-    let manifest: crate::experiment::manifest::Manifest = factorio_bot_core::serde_json::from_str(&manifest_json)
+    let _manifest: crate::experiment::manifest::Manifest = factorio_bot_core::serde_json::from_str(&manifest_json)
         .into_diagnostic()
         .map_err(|e| miette!("failed to parse manifest: {e}"))?;
 
@@ -228,11 +226,12 @@ fn run_report(args: &ArgMatches) -> Result<()> {
 
 /// Parse a simple CSV of trial results.
 fn parse_trials_csv(content: &str) -> Result<Vec<crate::experiment::runner::TrialResult>> {
+    #[allow(unused_variables)]
     use crate::experiment::manifest::TrialKey;
     use crate::experiment::runner::{TrialOutcome, TrialResult};
 
     let mut results = Vec::new();
-    for (line_no, line) in content.lines().enumerate() {
+    for (line_no, _line) in content.lines().enumerate() {
         if line_no == 0 || line.trim().is_empty() {
             continue; // header or empty
         }
@@ -241,6 +240,7 @@ fn parse_trials_csv(content: &str) -> Result<Vec<crate::experiment::runner::Tria
             return Err(miette!("CSV line {} has {} fields (expected >= 7)", line_no + 1, parts.len()));
         }
         let (seed_str, bots_str, task, variant, rep_str, outcome_str, ticks_str) = (parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]);
+        let _ = variant; let _ = outcome_str;
         let seed: u32 = seed_str.parse().map_err(|e| miette!("line {}: invalid seed: {e}", line_no + 1))?;
         let bots: u32 = bots_str.parse().map_err(|e| miette!("line {}: invalid bots: {e}", line_no + 1))?;
         let rep: u32 = rep_str.parse().map_err(|e| miette!("line {}: invalid rep: {e}", line_no + 1))?;

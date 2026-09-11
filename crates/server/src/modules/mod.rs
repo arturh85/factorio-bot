@@ -122,75 +122,49 @@ fn pumpjack_design() -> Value {
 
 fn red_science_design() -> Value {
     let hw = |name: &str| -> Value { PROTO_SIZES.half_size(name) };
-    // Red-science cell with continuous vertical belts and proper 3×3 assembler.
-    // Layout (west to east):
-    //   gear-belt & copper-belt: continuous north-south columns (3 tiles each)
-    //   gear-inserter (long-handed), copper-inserter (regular)
-    //   assembling-machine-1
-    //   out-inserter, output-belt (continuous north-south column)
     serde_json::json!({
         "schema": 1,
         "id": "red-science-cell",
         "family": "RedScience",
         "parameters": { "item": "automation-science-pack", "with_pole": false, "labs": 0 },
         "parts": [
-            // gear-belt column (3 tiles = continuous north-south belt)
-            { "role": "gear-belt", "entity": "transport-belt",
-              "offset": { "half_x": -8, "half_y": -3 }, "direction": 0, "recipe": null,
+            { "role": "belt", "entity": "transport-belt",
+              "offset": { "half_x": -6, "half_y": -2 }, "direction": 0, "recipe": null,
               "half_size": hw("transport-belt") },
-            { "role": "gear-belt", "entity": "transport-belt",
-              "offset": { "half_x": -8, "half_y": 0 }, "direction": 0, "recipe": null,
+            { "role": "belt", "entity": "transport-belt",
+              "offset": { "half_x": -6, "half_y": 0 }, "direction": 0, "recipe": null,
               "half_size": hw("transport-belt") },
-            { "role": "gear-belt", "entity": "transport-belt",
-              "offset": { "half_x": -8, "half_y": 3 }, "direction": 0, "recipe": null,
+            { "role": "belt", "entity": "transport-belt",
+              "offset": { "half_x": -6, "half_y": 2 }, "direction": 0, "recipe": null,
               "half_size": hw("transport-belt") },
-            // copper-belt column (3 tiles = continuous north-south belt)
-            { "role": "copper-belt", "entity": "transport-belt",
-              "offset": { "half_x": -5, "half_y": -3 }, "direction": 0, "recipe": null,
-              "half_size": hw("transport-belt") },
-            { "role": "copper-belt", "entity": "transport-belt",
-              "offset": { "half_x": -5, "half_y": 0 }, "direction": 0, "recipe": null,
-              "half_size": hw("transport-belt") },
-            { "role": "copper-belt", "entity": "transport-belt",
-              "offset": { "half_x": -5, "half_y": 3 }, "direction": 0, "recipe": null,
-              "half_size": hw("transport-belt") },
-            // Input inserters
-            { "role": "gear-inserter", "entity": "long-handed-inserter",
-              "offset": { "half_x": -5, "half_y": 0 }, "direction": 12, "recipe": null,
-              "half_size": hw("long-handed-inserter") },
-            { "role": "copper-inserter", "entity": "inserter",
-              "offset": { "half_x": -3, "half_y": 0 }, "direction": 12, "recipe": null,
+            { "role": "inserter", "entity": "inserter",
+              "offset": { "half_x": -4, "half_y": 0 }, "direction": 12, "recipe": null,
               "half_size": hw("inserter") },
-            // 3×3 Assembler (confirmed from prototype: collision_box {{-1.2,-1.2},{1.2,1.2}})
             { "role": "assembler", "entity": "assembling-machine-1",
               "offset": { "half_x": 0, "half_y": 0 }, "direction": 4,
               "recipe": "automation-science-pack",
               "half_size": hw("assembling-machine-1") },
-            // Output
             { "role": "out-inserter", "entity": "inserter",
               "offset": { "half_x": 4, "half_y": 0 }, "direction": 12, "recipe": null,
               "half_size": hw("inserter") },
-            // Output belt column (3 tiles = continuous north-south belt)
             { "role": "output-belt", "entity": "transport-belt",
-              "offset": { "half_x": 7, "half_y": -3 }, "direction": 0, "recipe": null,
+              "offset": { "half_x": 6, "half_y": -2 }, "direction": 0, "recipe": null,
               "half_size": hw("transport-belt") },
             { "role": "output-belt", "entity": "transport-belt",
-              "offset": { "half_x": 7, "half_y": 0 }, "direction": 0, "recipe": null,
+              "offset": { "half_x": 6, "half_y": 0 }, "direction": 0, "recipe": null,
               "half_size": hw("transport-belt") },
             { "role": "output-belt", "entity": "transport-belt",
-              "offset": { "half_x": 7, "half_y": 3 }, "direction": 0, "recipe": null,
+              "offset": { "half_x": 6, "half_y": 2 }, "direction": 0, "recipe": null,
               "half_size": hw("transport-belt") }
         ],
         "ports": [
-            { "id": "input-gears", "mode": "BeltInput", "item": "iron-gear-wheel",
-              "offset": { "half_x": -9, "half_y": -3 }, "direction": 4 },
-            { "id": "input-copper", "mode": "BeltInput", "item": "copper-plate",
-              "offset": { "half_x": -6, "half_y": -3 }, "direction": 4 },
+            { "id": "input", "mode": "BeltInput", "item": "mixed",
+              "offset": { "half_x": -7, "half_y": -2 }, "direction": 4 },
             { "id": "output", "mode": "InventoryOutput", "item": "automation-science-pack",
-              "offset": { "half_x": 8, "half_y": 3 }, "direction": 0 }
+              "offset": { "half_x": 7, "half_y": 2 }, "direction": 0 }
         ],
-        "bill": { "assembling-machine-1": 1, "inserter": 1, "long-handed-inserter": 1,
-                  "transport-belt": 9, "small-electric-pole": 1 },
+        "bill": { "assembling-machine-1": 1, "inserter": 2,
+                  "transport-belt": 6, "small-electric-pole": 1 },
         "operation": {
             "inputs": { "copper-plate": { "numerator": 1, "ticks": 180 },
                         "iron-gear-wheel": { "numerator": 1, "ticks": 180 } },
@@ -208,4 +182,100 @@ fn red_science_design() -> Value {
 pub fn router() -> OpenApiRouter<crate::state::AppState> {
     OpenApiRouter::new()
         .routes(routes!(list_designs))
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type Box = (String, i32, i32, i32, i32);
+
+    fn part_boxes(design: &Value) -> Vec<Box> {
+        let mut out = Vec::new();
+        if let Some(parts) = design["parts"].as_array() {
+            for p in parts {
+                let role = p["role"].as_str().unwrap_or("?").to_string();
+                let hx = p["offset"]["half_x"].as_i64().unwrap_or(0) as i32;
+                let hy = p["offset"]["half_y"].as_i64().unwrap_or(0) as i32;
+                let hw = p["half_size"]["half_x"].as_i64().unwrap_or(1) as i32;
+                let hh = p["half_size"]["half_y"].as_i64().unwrap_or(1) as i32;
+                out.push((role, hx - hw, hx + hw, hy - hh, hy + hh));
+            }
+        }
+        out
+    }
+
+    fn overlaps(a: &Box, b: &Box) -> bool {
+        a.1 < b.2 && b.1 < a.2 && a.3 < b.4 && b.3 < a.4
+    }
+
+    async fn get_designs() -> Vec<Value> {
+        list_designs().await.0["designs"].as_array().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn no_design_has_overlapping_boxes() {
+        let designs = get_designs().await;
+        for d in &designs {
+            let id = d["id"].as_str().unwrap_or("?");
+            let boxes = part_boxes(d);
+            let mut failures = Vec::new();
+            for i in 0..boxes.len() {
+                for j in (i + 1)..boxes.len() {
+                    if boxes[i].0 == boxes[j].0 { continue; }
+                    if overlaps(&boxes[i], &boxes[j]) {
+                        failures.push(format!(
+                            "  {} @[{},{},{},{}] overlaps {} @[{},{},{},{}]",
+                            boxes[i].0, boxes[i].1, boxes[i].2, boxes[i].3, boxes[i].4,
+                            boxes[j].0, boxes[j].1, boxes[j].2, boxes[j].3, boxes[j].4,
+                        ));
+                    }
+                }
+            }
+            assert!(failures.is_empty(),
+                "Design '{}' has overlapping parts:\n{}", id, failures.join("\n"));
+        }
+    }
+
+    #[tokio::test]
+    async fn every_inserter_reaches_its_targets() {
+        let designs = get_designs().await;
+        for d in &designs {
+            let id = d["id"].as_str().unwrap_or("?");
+            let boxes = part_boxes(d);
+            for b in &boxes {
+                let (role, _x1, _x2, _y1, _y2) = b;
+                if !role.contains("inserter") && !role.contains("out-inserter") { continue; }
+                let part = d["parts"].as_array().unwrap().iter()
+                    .find(|p| p["role"].as_str() == Some(role)).unwrap();
+                let hx = part["offset"]["half_x"].as_i64().unwrap_or(0) as i32;
+                let hy = part["offset"]["half_y"].as_i64().unwrap_or(0) as i32;
+                let dir = part["direction"].as_i64().unwrap_or(0) as i32;
+                let entity = part["entity"].as_str().unwrap_or("");
+                let is_long = entity.contains("long");
+                let (pick_dx, drop_dx) = if dir == 12 {
+                    (if is_long { -4 } else { -2 }, 2)
+                } else {
+                    panic!("Unknown direction {}", dir);
+                };
+                let pick_x = hx + pick_dx;
+                let drop_x = hx + drop_dx;
+
+                let pick_ok = boxes.iter().any(|(r, bx1, bx2, by1, by2)| {
+                    r != role && *bx1 <= pick_x && pick_x <= *bx2 && *by1 <= hy && hy <= *by2
+                });
+                assert!(pick_ok,
+                    "{} '{}': picks from x={} but no entity covers that point",
+                    id, role, pick_x);
+
+                let drop_ok = boxes.iter().any(|(r, bx1, bx2, by1, by2)| {
+                    r != role && *bx1 <= drop_x && drop_x <= *bx2 && *by1 <= hy && hy <= *by2
+                });
+                assert!(drop_ok,
+                    "{} '{}': drops to x={} but no entity covers that point",
+                    id, role, drop_x);
+            }
+        }
+    }
 }

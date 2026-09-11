@@ -58,10 +58,10 @@ fn extract_ore_to_plate(
         Part {
             role: "furnace".into(),
             entity: "stone-furnace".into(),
-            // Furnace is 2 tiles north of the drill (in half-tile offset).
-            // The drill occupies a 2x2 area, and the furnace is placed
-            // with its centre 2 tiles (4 half-tiles) north.
-            offset: Offset { half_x: 0, half_y: 4 },
+            // Furnace is 3 tiles north of the drill (in half-tile offset).
+            // The drill is 3x3 (mining-drill) and the furnace is ~2x2, so
+            // they need at least 1.5 + 0.7 = 2.2 tiles gap. 3 tiles works.
+            offset: Offset { half_x: 0, half_y: 8 },
             direction: Direction::North as u8,
             recipe: Some(item.clone()),
             underground_half: None,
@@ -72,6 +72,7 @@ fn extract_ore_to_plate(
     let bill = BTreeMap::from([
         ("burner-mining-drill".to_string(), 1u64),
         ("stone-furnace".to_string(), 1u64),
+        ("burner-inserter".to_string(), 1u64),
     ]);
 
     // Ports: the input side (drill`s belt feed) and output side (furnace output).
@@ -89,7 +90,7 @@ fn extract_ore_to_plate(
             id: "inventory-output".into(),
             mode: PortMode::InventoryOutput,
             item: item.clone(),
-            offset: Offset { half_x: 0, half_y: 6 },
+            offset: Offset { half_x: 0, half_y: 8 },
             direction: Direction::North as u8,
             lane: None,
             maximum: Rate::new(1, 600).unwrap(),
@@ -100,8 +101,8 @@ fn extract_ore_to_plate(
     let required_clearance = vec![
         Offset { half_x: -3, half_y: -1 },
         Offset { half_x: 3, half_y: -1 },
-        Offset { half_x: -3, half_y: 5 },
-        Offset { half_x: 3, half_y: 5 },
+        Offset { half_x: -3, half_y: 7 },
+        Offset { half_x: 3, half_y: 7 },
     ];
 
     // Precedence: drill must be placed before furnace (furnace may go

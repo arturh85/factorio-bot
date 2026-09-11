@@ -44,12 +44,32 @@ mod furnace_reuse;
 mod goal_names_its_recipe;
 #[path = "machine_named_by_category.rs"]
 mod machine_named_by_category;
+#[path = "module_demand.rs"]
+mod module_demand;
+#[path = "module_offline.rs"]
+mod module_offline;
+#[path = "module_rocket_contracts.rs"]
+mod module_rocket_contracts;
 #[path = "oil_category_gate.rs"]
 mod oil_category_gate;
 #[path = "ore_underfoot.rs"]
 mod ore_underfoot;
 #[path = "placement_occupancy.rs"]
 mod placement_occupancy;
+#[path = "planning_work_ceilings.rs"]
+mod planning_work_ceilings;
+#[path = "product_index_live_capture.rs"]
+mod product_index_live_capture;
+#[path = "recipe_probability.rs"]
+mod recipe_probability;
+#[path = "red_science.rs"]
+mod red_science;
+#[path = "red_science_cell.rs"]
+mod red_science_cell;
+#[path = "refusal_expiry.rs"]
+mod refusal_expiry;
+#[path = "refusal_memory.rs"]
+mod refusal_memory;
 #[path = "replan_finishes_its_cell.rs"]
 mod replan_finishes_its_cell;
 #[path = "replan_haul.rs"]
@@ -60,22 +80,8 @@ mod replan_on_standing_world;
 mod replan_sealed_supply;
 #[path = "replan_taps_the_run.rs"]
 mod replan_taps_the_run;
-#[path = "planning_work_ceilings.rs"]
-mod planning_work_ceilings;
 #[path = "request_budget.rs"]
 mod request_budget;
-#[path = "product_index_live_capture.rs"]
-mod product_index_live_capture;
-#[path = "recipe_probability.rs"]
-mod recipe_probability;
-#[path = "red_science_cell.rs"]
-mod red_science_cell;
-#[path = "red_science.rs"]
-mod red_science;
-#[path = "refusal_expiry.rs"]
-mod refusal_expiry;
-#[path = "refusal_memory.rs"]
-mod refusal_memory;
 #[path = "roster_shares.rs"]
 mod roster_shares;
 #[path = "scheduling.rs"]
@@ -102,7 +108,3 @@ mod tile_reservation;
 mod unreachable_memory;
 #[path = "world_round_trip.rs"]
 mod world_round_trip;
-#[path = "module_offline.rs"]
-mod module_offline;
-#[path = "module_rocket_contracts.rs"]
-mod module_rocket_contracts;

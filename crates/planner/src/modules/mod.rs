@@ -9,11 +9,14 @@
 pub mod artifact;
 pub mod cache;
 pub mod compile;
+pub mod demand;
 pub mod error;
 pub mod families;
 pub mod instance;
 pub mod ledger;
 pub mod select;
+
+pub use demand::{DemandSet, normalize_goals, required_gross};
 
 #[cfg(test)]
 mod tests {

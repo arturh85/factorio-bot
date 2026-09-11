@@ -15,11 +15,11 @@ use factorio_bot_core::types::Position;
 use crate::control::{BudgetLimits, BudgetReport, PlanControl, WorkKind};
 use crate::error::PlannerError;
 use crate::goal::Goal;
-use crate::memory::ReplanMemory;
-use crate::method::{expand, MethodRegistry};
-use crate::network::ActionNetwork;
-use crate::schedule::{schedule, Schedule};
 use crate::ids::BotId;
+use crate::memory::ReplanMemory;
+use crate::method::{MethodRegistry, expand};
+use crate::network::ActionNetwork;
+use crate::schedule::{Schedule, schedule};
 use crate::state::PlanState;
 
 // ---------------------------------------------------------------------------
@@ -216,13 +216,22 @@ pub fn plan_controlled(
                 match next_conflict_retry(control, &mut retry_seen, pos.clone()) {
                     Ok(true) => {
                         retry_state.reserve_ground(&[pos], "conflict retry");
-                        if let Err(err) = do_retry_try(goals, &retry_state, registry,
-                            chain_actor, roster, control, &mut best) {
+                        if let Err(err) = do_retry_try(
+                            goals,
+                            &retry_state,
+                            registry,
+                            chain_actor,
+                            roster,
+                            control,
+                            &mut best,
+                        ) {
                             first_error.get_or_insert(err);
                         }
                     }
                     Ok(false) => {} // already seen, skip
-                    Err(err) => { first_error.get_or_insert(err); }
+                    Err(err) => {
+                        first_error.get_or_insert(err);
+                    }
                 }
             }
         }
@@ -260,14 +269,19 @@ pub fn plan_controlled(
                                         match schedule(&net, &under, roster) {
                                             Ok(plan) => {
                                                 let _memory = crate::memory::capture_intent(
-                                                    state, &net, &plan, 0);
+                                                    state, &net, &plan, 0,
+                                                );
                                                 best = Some((net, plan));
                                                 break;
                                             }
-                                            Err(err) => { first_error = Some(err); }
+                                            Err(err) => {
+                                                first_error = Some(err);
+                                            }
                                         }
                                     }
-                                    Err(err) => { first_error = Some(err); }
+                                    Err(err) => {
+                                        first_error = Some(err);
+                                    }
                                 }
                             }
                             Ok(false) => break, // repeated conflict
@@ -284,8 +298,10 @@ pub fn plan_controlled(
     }
 
     // Record phase times and build the result.
-    phase_ms.insert("expansion".to_string(),
-        Instant::now().duration_since(expansion_start).as_millis() as u64);
+    phase_ms.insert(
+        "expansion".to_string(),
+        Instant::now().duration_since(expansion_start).as_millis() as u64,
+    );
     let _planning_record = Some(PlanningRecord {
         total_ms: Some(Instant::now().duration_since(plan_start).as_millis() as u64),
         ..Default::default()
@@ -323,16 +339,14 @@ pub fn plan_controlled(
                 budget: report,
             }
         }
-        (None, None) => {
-            PlanResult {
-                status: PlanStatus::Infeasible,
-                incumbent: None,
-                diagnostic: Some(PlannerError::PlanningStopped {
-                    reason: "no plan could be built, no error was recorded".to_string(),
-                }),
-                budget: report,
-            }
-        }
+        (None, None) => PlanResult {
+            status: PlanStatus::Infeasible,
+            incumbent: None,
+            diagnostic: Some(PlannerError::PlanningStopped {
+                reason: "no plan could be built, no error was recorded".to_string(),
+            }),
+            budget: report,
+        },
     }
 }
 
@@ -426,10 +440,18 @@ pub fn plan_best_modules(
         cache_mode: crate::modules::compile::CacheMode::On,
         candidate_limit: 1,
         support_ticks: 18000,
+        external_rates: BTreeMap::new(),
     };
 
     let result = crate::modules::compile::plan_with_session(
-        goals, &state, registry, chain_actor, roster, &control, &options, &mut session,
+        goals,
+        &state,
+        registry,
+        chain_actor,
+        roster,
+        &control,
+        &options,
+        &mut session,
     );
 
     match (result.incumbent, result.diagnostic) {
@@ -450,10 +472,12 @@ mod tests {
     use super::*;
     use crate::control::BudgetLimits;
     use crate::control::WorkKind;
-    use std::collections::BTreeMap;
     use factorio_bot_core::types::Position;
+    use std::collections::BTreeMap;
 
-    fn pos(x: f64, y: f64) -> Position { Position::new(x, y) }
+    fn pos(x: f64, y: f64) -> Position {
+        Position::new(x, y)
+    }
 
     #[test]
     fn repeated_conflict_does_not_start_another_attempt() {

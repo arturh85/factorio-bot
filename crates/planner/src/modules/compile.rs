@@ -16,7 +16,7 @@ use crate::goal::Goal;
 use crate::ids::{ActionIdGen, BotId};
 use crate::memory::ReplanMemory;
 use crate::method::{ExpansionCtx, MethodRegistry, Step, run_steps};
-use crate::modules::artifact::ModuleDesign;
+use crate::modules::artifact::{ModuleDesign, Rate};
 pub use crate::modules::cache::CacheMode;
 use crate::modules::cache::LibraryCache;
 use crate::modules::instance::ModuleInstance;
@@ -47,6 +47,10 @@ pub struct PlannerOptions {
     pub cache_mode: CacheMode,
     pub candidate_limit: usize,
     pub support_ticks: u32,
+    /// External (export) rates that the module factory must cover.
+    /// Items keyed by name, values are rates in items per tick.
+    /// Defaults to empty (no external demand).
+    pub external_rates: BTreeMap<String, Rate>,
 }
 
 impl Default for PlannerOptions {
@@ -56,6 +60,7 @@ impl Default for PlannerOptions {
             cache_mode: CacheMode::On,
             candidate_limit: 8,
             support_ticks: 18000,
+            external_rates: BTreeMap::new(),
         }
     }
 }

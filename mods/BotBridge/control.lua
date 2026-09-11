@@ -49,6 +49,7 @@
 
 require "util"
 require "types"
+require "rocket_launch"
 
 local my_client_id = nil
 
@@ -366,6 +367,7 @@ function on_init()
 	storage.pathfinding = {}
 	storage.pathfinding.map = {}
 	storage.n_clients = 1
+	if type(rocket_launch) == "table" and type(rocket_launch.init) == "function" then rocket_launch.init() end
 	-- AND the module local, because `on_load` will NOT run in this session.
 	--
 	-- The two are mutually exclusive by design. Quoting the shipped 2.1.17 API
@@ -4380,6 +4382,12 @@ script.on_event(defines.events.on_player_crafted_item, on_player_crafted_item)
 -- The other half of a craft's outcome. Without this a cancelled craft answered
 -- nothing at all and its registry entry outlived the run.
 script.on_event(defines.events.on_player_cancelled_crafting, on_player_cancelled_crafting)
+if type(rocket_launch) == "table" and type(rocket_launch.on_rocket_launched) == "function" then
+    script.on_event(defines.events.on_rocket_launched, rocket_launch.on_rocket_launched)
+end
+if type(rocket_launch) == "table" and type(rocket_launch.on_space_platform_started) == "function" then
+    script.on_event(defines.events.on_space_platform_started, rocket_launch.on_space_platform_started)
+end
 
 -- The only registration site for the force-sample cadence. `on_nth_tick`
 -- replaces the handler for a given period rather than adding to it, so
@@ -7808,5 +7816,72 @@ remote.add_interface("botbridge", {
 	action_start_mining=rcon_action_start_mining,
 	action_start_crafting=rcon_action_start_crafting,
 	action_start_research=rcon_action_start_research,
-	set_research_trigger_emulation=rcon_set_research_trigger_emulation
+	set_research_trigger_emulation=rcon_set_research_trigger_emulation,
+
+	-- rocket launch interface
+	rocket_request = function(args)
+		local rl = rocket_launch
+		if type(rl) ~= "table" or type(rl.request) ~= "function" then
+			rcon.print(helpers.table_to_json({ ok = false, error = "rocket_launch not loaded" }))
+			return
+		end
+		local ok, result = pcall(rl.request, args)
+		if not ok then
+			rcon.print(helpers.table_to_json({ ok = false, error = tostring(result) }))
+		else
+			rcon.print(helpers.table_to_json(result))
+		end
+	end,
+	rocket_status = function(key)
+		local rl = rocket_launch
+		if type(rl) ~= "table" or type(rl.status) ~= "function" then
+			rcon.print(helpers.table_to_json({ ok = false, error = "rocket_launch not loaded" }))
+			return
+		end
+		local ok, result = pcall(rl.status, key)
+		if not ok then
+			rcon.print(helpers.table_to_json({ ok = false, error = tostring(result) }))
+		else
+			rcon.print(helpers.table_to_json(result))
+		end
+	end,
+	rocket_launch = function(args)
+		local rl = rocket_launch
+		if type(rl) ~= "table" or type(rl.launch) ~= "function" then
+			rcon.print(helpers.table_to_json({ ok = false, error = "rocket_launch not loaded" }))
+			return
+		end
+		local ok, result = pcall(rl.launch, args)
+		if not ok then
+			rcon.print(helpers.table_to_json({ ok = false, error = tostring(result) }))
+		else
+			rcon.print(helpers.table_to_json(result))
+		end
+	end,
+	rocket_evidence = function(key)
+		local rl = rocket_launch
+		if type(rl) ~= "table" or type(rl.evidence) ~= "function" then
+			rcon.print(helpers.table_to_json({ ok = false, error = "rocket_launch not loaded" }))
+			return
+		end
+		local ok, result = pcall(rl.evidence, key)
+		if not ok then
+			rcon.print(helpers.table_to_json({ ok = false, error = tostring(result) }))
+		else
+			rcon.print(helpers.table_to_json(result))
+		end
+	end,
+	rocket_list_requests = function()
+		local rl = rocket_launch
+		if type(rl) ~= "table" or type(rl.list_requests) ~= "function" then
+			rcon.print(helpers.table_to_json({ ok = false, error = "rocket_launch not loaded" }))
+			return
+		end
+		local ok, result = pcall(rl.list_requests)
+		if not ok then
+			rcon.print(helpers.table_to_json({ ok = false, error = tostring(result) }))
+		else
+			rcon.print(helpers.table_to_json(result))
+		end
+	end,
 })

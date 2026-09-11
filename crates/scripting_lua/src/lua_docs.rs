@@ -3,6 +3,7 @@ use crate::globals::goal::create_lua_goal;
 use crate::globals::rcon::create_lua_rcon;
 use crate::globals::record::create_lua_record;
 use crate::globals::world::create_lua_world;
+use crate::globals::rocket::create_lua_rocket;
 use factorio_bot_core::factorio::rcon::FactorioRcon;
 use factorio_bot_core::factorio::world::FactorioSurface;
 use factorio_bot_core::mlua::prelude::*;
@@ -66,7 +67,8 @@ pub(crate) fn binding_tables(
         cwd.clone(),
         vec![],
     )?;
-    let rcon_table = create_lua_rcon(lua, rcon, planner.real_world)?;
+    let rcon_table = create_lua_rcon(lua, rcon.clone(), planner.real_world)?;
+    let rocket_table = create_lua_rocket(lua, rcon)?;
     let code_by_path: HashMap<String, String> = HashMap::new();
     let code_by_path: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(code_by_path));
     create_lua_globals(
@@ -85,6 +87,7 @@ pub(crate) fn binding_tables(
         ("goal.lua", goal_table),
         ("rcon.lua", rcon_table),
         ("record.lua", record_table),
+        ("rocket.lua", rocket_table),
     ])
 }
 

@@ -3,6 +3,7 @@ use crate::globals::goal::create_lua_goal;
 use crate::globals::rcon::create_lua_rcon;
 use crate::globals::record::create_lua_record;
 use crate::globals::world::create_lua_world;
+use crate::globals::rocket::create_lua_rocket;
 use factorio_bot_core::mlua::LuaSerdeExt;
 use factorio_bot_core::mlua::prelude::*;
 use factorio_bot_core::parking_lot::Mutex;
@@ -236,6 +237,8 @@ pub async fn run_lua(
                         record_bots,
                     )?;
                     globals.set("record", record)?;
+                    let rocket = create_lua_rocket(&lua, rcon.clone())?;
+                    globals.set("rocket", rocket)?;
                     let rcon = create_lua_rcon(&lua, rcon.clone(), real_world.clone())?;
                     globals.set("rcon", rcon)?;
                 }

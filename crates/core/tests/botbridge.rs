@@ -50,6 +50,8 @@ mod botbridge_research_action;
 mod botbridge_research_triggers;
 #[path = "botbridge_rest_position.rs"]
 mod botbridge_rest_position;
+#[path = "botbridge_rocket_launch.rs"]
+mod botbridge_rocket_launch;
 #[path = "botbridge_returns_fire.rs"]
 mod botbridge_returns_fire;
 #[path = "botbridge_sampling_session.rs"]

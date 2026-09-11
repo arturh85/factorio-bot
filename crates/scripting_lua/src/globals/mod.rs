@@ -3,6 +3,7 @@ mod globals;
 pub use globals::create_lua_globals;
 pub(crate) mod goal;
 pub(crate) mod rcon;
+pub(crate) mod rocket;
 pub mod record;
 pub(crate) mod world;
 

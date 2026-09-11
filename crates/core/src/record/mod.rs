@@ -26,6 +26,7 @@ pub mod lanes;
 pub mod map;
 pub mod provenance;
 pub mod retention;
+pub mod rocket_launch;
 pub mod run_mode;
 pub mod samples;
 pub mod savepoint;
@@ -49,6 +50,7 @@ pub use samples::{
 pub use savepoint::{
     ModCheck, ModFingerprint, SAVEPOINT_SCHEMA, Savepoint, SavepointError, check_mods,
 };
+pub use rocket_launch::RocketLaunchEvidence;
 pub use splits::{Split, derive_splits};
 pub use video::{
     TickSample, VideoManifest, VideoOptions, VideoRecord, VideoRecorder, VideoStatus,

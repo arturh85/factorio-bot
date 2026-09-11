@@ -260,7 +260,60 @@ function rocket_speedrun.run(opts)
     -- Handle pending launch (stage 10)
     if rocket_speedrun._pending_launch then
         print("INITIATING LAUNCH: space-platform-starter-pack")
-        -- Launch command would go here via rcon
+        if type(rocket) == "table" and type(rocket.request) == "function" then
+            local req = rocket.request {
+                key = "speedrun-starter-pack",
+                payload = "space-platform-starter-pack",
+                planet = "nauvis",
+                starter_pack = { { name = "space-platform-starter-pack", count = 1 } },
+            }
+            if req and req.ok then
+                print("  rocket request created: " .. req.key)
+                if type(rocket.launch) == "function" then
+                    -- Find the silo to launch from
+                    local silo_search
+                    if type(rcon) == "table" and type(rcon.find_entities_in_radius) == "function" then
+                        local entities = rcon.find_entities_in_radius(
+                            { x = 0, y = 0 }, 100, "rocket-silo", nil)
+                        if type(entities) == "table" and #entities > 0 then
+                            local silo = entities[1]
+                            local launch = rocket.launch {
+                                key = req.key,
+                                silo_unit_number = silo.unit_number,
+                            }
+                            if launch and launch.ok then
+                                print(string.format("  launch ordered at silo %d tick %s",
+                                    launch.silo_unit_number,
+                                    tostring(launch.launch_ordered_tick)))
+                            else
+                                print("  LAUNCH FAILED: " .. tostring(launch and launch.error or "unknown"))
+                            end
+                        else
+                            print("  no rocket-silo found within 100 tiles")
+                        end
+                    end
+
+                    -- Check evidence
+                    if type(rocket.evidence) == "function" then
+                        local ev = rocket.evidence(req.key)
+                        if ev and ev.ok and ev.evidence then
+                            local e = ev.evidence
+                            if e.launched_tick and e.platform_established_tick then
+                                print(string.format("  ROCKET ACHIEVED: launched tick=%s platform tick=%s",
+                                    tostring(e.launched_tick), tostring(e.platform_established_tick)))
+                            else
+                                print(string.format("  rocket in flight: launched=%s platform=%s",
+                                    tostring(e.launched_tick), tostring(e.platform_established_tick)))
+                            end
+                        end
+                    end
+                end
+            else
+                print("  ROCKET REQUEST FAILED: " .. tostring(req and req.error or "unknown"))
+            end
+        else
+            print("  rocket API not available")
+        end
         rocket_speedrun._pending_launch = nil
     end
 

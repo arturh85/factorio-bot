@@ -558,7 +558,7 @@ mod tests {
             parts: vec![
                 Part { role: "drill".into(), entity: "burner-mining-drill".into(),
                     offset: Offset { half_x: 0, half_y: 0 }, direction: 0,
-                    recipe: None, underground_half: None },
+                    recipe: None, underground_half: None, half_size: None },
             ],
             ports: vec![], required_clearance: vec![], expansion_space: vec![],
             bill: BTreeMap::new(), precedence: vec![],

@@ -255,6 +255,7 @@ mod tests {
                     direction: 0,
                     recipe: None,
                     underground_half: None,
+                    half_size: None,
                 },
             ],
             ports: vec![],

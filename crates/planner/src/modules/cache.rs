@@ -333,6 +333,7 @@ use crate::modules::artifact::{
                     direction: 0,
                     recipe: None,
                     underground_half: None,
+                    half_size: None,
                 },
             ],
             ports: vec![],
@@ -428,6 +429,7 @@ use crate::modules::artifact::{
             direction: 0,
             recipe: None,
             underground_half: None,
+            half_size: None,
         });
         assert!(validate_design(&design, &state).is_err());
     }
@@ -458,6 +460,7 @@ use crate::modules::artifact::{
             direction: 0,
             recipe: Some("iron-plate".into()),
             underground_half: None,
+            half_size: None,
         });
         design.precedence.push(("drill".into(), "furnace".into()));
         design.precedence.push(("furnace".into(), "drill".into()));

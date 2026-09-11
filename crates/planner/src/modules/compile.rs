@@ -115,6 +115,17 @@ fn compile_module_placement(
         }
     }
 
+    // Add acquisition subgoals for the bill of materials.
+    // Each entity to place needs to be crafted/mined first.
+    for (item, count) in &design.bill {
+        steps.push(Step::Subgoal(Goal::Have {
+            item: item.clone(),
+            count: *count as u32,
+            whose: crate::Holder::Anyone,
+            via: None,
+        }));
+    }
+
     let anchor_x = instance.placement.half_x as f64 * 0.5;
     let anchor_y = instance.placement.half_y as f64 * 0.5;
 
@@ -150,8 +161,18 @@ fn compile_module_placement(
                     entity: part.entity.clone(),
                     direction: part.direction,
                 },
+                Condition::HasItem {
+                    who: crate::action::Actor::Role,
+                    item: part.entity.clone(),
+                    count: 1,
+                },
             ],
             eff: vec![
+                Effect::LoseItem {
+                    who: crate::action::Actor::Role,
+                    item: part.entity.clone(),
+                    count: 1,
+                },
                 Effect::CreateEntity(Box::new(entity)),
             ],
             duration: 100,

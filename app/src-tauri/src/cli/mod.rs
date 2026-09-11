@@ -1,4 +1,5 @@
 mod config;
+mod experiment;
 #[cfg(feature = "lua")]
 mod lua;
 mod plan;
@@ -213,6 +214,7 @@ pub fn subcommands() -> Vec<Box<dyn Subcommand>> {
     #[cfg(feature = "restapi")]
     serve::build(),
     start::build(),
+    experiment::build(),
   ]
 }
 

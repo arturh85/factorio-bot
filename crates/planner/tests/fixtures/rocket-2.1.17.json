@@ -1,0 +1,541 @@
+{
+  "game_version": "2.1.17",
+  "mods": {
+    "base": "2.1.17",
+    "space-age": "2.1.17",
+    "quality": "2.1.17",
+    "elevated-rails": "2.1.17",
+    "recycler": "2.1.17",
+    "BotBridge": "0.0.1"
+  },
+  "prototype_hash": "566ef7d6ceb16d9e",
+  "rocket_parts_required": 50,
+  "recipes": {
+    "rocket-part": {
+      "category": "rocket-building",
+      "energy": 3,
+      "enabled": false,
+      "ingredients": {
+        "processing-unit": 1,
+        "low-density-structure": 1,
+        "rocket-fuel": 1
+      },
+      "products": {
+        "rocket-part": 1
+      }
+    },
+    "rocket-silo": {
+      "category": null,
+      "energy": 30,
+      "enabled": false,
+      "ingredients": {
+        "steel-plate": 1000,
+        "concrete": 1000,
+        "pipe": 100,
+        "processing-unit": 200,
+        "electric-engine-unit": 200
+      },
+      "products": {
+        "rocket-silo": 1
+      }
+    },
+    "space-platform-starter-pack": {
+      "category": "crafting",
+      "energy": 60,
+      "enabled": false,
+      "ingredients": {
+        "space-platform-foundation": 60,
+        "steel-plate": 20,
+        "processing-unit": 20
+      },
+      "products": {
+        "space-platform-starter-pack": 1
+      }
+    },
+    "space-platform-foundation": {
+      "category": "crafting",
+      "energy": 10,
+      "enabled": false,
+      "ingredients": {
+        "steel-plate": 20,
+        "copper-cable": 20
+      },
+      "products": {
+        "space-platform-foundation": 1
+      }
+    },
+    "low-density-structure": {
+      "category": "crafting",
+      "energy": 15,
+      "enabled": false,
+      "ingredients": {
+        "steel-plate": 2,
+        "copper-plate": 20,
+        "plastic-bar": 5
+      },
+      "products": {
+        "low-density-structure": 1
+      }
+    },
+    "rocket-fuel": {
+      "category": "crafting-with-fluid",
+      "energy": 15,
+      "enabled": false,
+      "ingredients": {
+        "solid-fuel": 10,
+        "light-oil": 10
+      },
+      "products": {
+        "rocket-fuel": 1
+      }
+    },
+    "processing-unit": {
+      "category": "crafting-with-fluid",
+      "energy": 10,
+      "enabled": false,
+      "ingredients": {
+        "electronic-circuit": 20,
+        "advanced-circuit": 2,
+        "sulfuric-acid": 5
+      },
+      "products": {
+        "processing-unit": 1
+      }
+    },
+    "satellite": {
+      "category": "crafting",
+      "energy": 5,
+      "enabled": false,
+      "ingredients": {
+        "solar-panel-equipment": 100,
+        "accumulator": 100,
+        "processing-unit": 100,
+        "radar": 5,
+        "low-density-structure": 100,
+        "rocket-fuel": 50
+      },
+      "products": {
+        "satellite": 1
+      }
+    },
+    "cargo-landing-pad": {
+      "category": "crafting",
+      "energy": 10,
+      "enabled": false,
+      "ingredients": {
+        "steel-plate": 500,
+        "concrete": 500,
+        "processing-unit": 100,
+        "steel-beam": 50,
+        "copper-plate": 1000
+      },
+      "products": {
+        "cargo-landing-pad": 1
+      }
+    }
+  },
+  "technologies": {
+    "rocket-silo": {
+      "prerequisites": [
+        "concrete",
+        "rocket-fuel",
+        "processing-unit",
+        "logistic-robotics",
+        "low-density-structure",
+        "advanced-material-processing-2"
+      ],
+      "effects": [
+        {
+          "type": "unlock-recipe",
+          "recipe": "rocket-silo"
+        },
+        {
+          "type": "unlock-recipe",
+          "recipe": "rocket-part"
+        },
+        {
+          "type": "unlock-recipe",
+          "recipe": "cargo-landing-pad"
+        },
+        {
+          "type": "unlock-space-platforms"
+        },
+        {
+          "type": "unlock-recipe",
+          "recipe": "space-platform-starter-pack"
+        },
+        {
+          "type": "unlock-recipe",
+          "recipe": "space-platform-foundation"
+        }
+      ],
+      "unit": {
+        "count": 1000,
+        "ingredients": [
+          "automation-science-pack",
+          "logistic-science-pack",
+          "chemical-science-pack"
+        ],
+        "time": 60
+      },
+      "trigger": null
+    },
+    "logistic-robotics": {
+      "prerequisites": [
+        "automation",
+        "logistic-science-pack"
+      ],
+      "effects": [
+        {
+          "type": "unlock-recipe",
+          "recipe": "roboport"
+        },
+        {
+          "type": "unlock-recipe",
+          "recipe": "logistic-chest-active-provider"
+        },
+        {
+          "type": "unlock-recipe",
+          "recipe": "logistic-chest-passive-provider"
+        },
+        {
+          "type": "unlock-recipe",
+          "recipe": "logistic-chest-storage"
+        },
+        {
+          "type": "unlock-recipe",
+          "recipe": "logistic-chest-buffer"
+        },
+        {
+          "type": "unlock-recipe",
+          "recipe": "logistic-chest-requester"
+        }
+      ],
+      "unit": {
+        "count": 50,
+        "ingredients": [
+          "automation-science-pack",
+          "logistic-science-pack"
+        ],
+        "time": 30
+      },
+      "trigger": null
+    },
+    "advanced-material-processing-2": {
+      "prerequisites": [
+        "advanced-material-processing",
+        "chemical-science-pack"
+      ],
+      "effects": [
+        {
+          "type": "unlock-recipe",
+          "recipe": "steel-axe"
+        }
+      ],
+      "unit": {
+        "count": 200,
+        "ingredients": [
+          "automation-science-pack",
+          "logistic-science-pack",
+          "chemical-science-pack"
+        ],
+        "time": 30
+      },
+      "trigger": null
+    },
+    "space-platform": {
+      "prerequisites": [
+        "rocket-silo"
+      ],
+      "effects": [
+        {
+          "type": "unlock-recipe",
+          "recipe": "cargo-bay"
+        },
+        {
+          "type": "unlock-recipe",
+          "recipe": "oxide-asteroid-crushing"
+        }
+      ],
+      "unit": null,
+      "trigger": {
+        "type": "create-space-platform"
+      }
+    },
+    "space-science-pack": {
+      "prerequisites": [
+        "space-platform"
+      ],
+      "effects": [
+        {
+          "type": "unlock-recipe",
+          "recipe": "space-science-pack"
+        }
+      ],
+      "unit": null,
+      "trigger": {
+        "type": "build-entity",
+        "entity": "asteroid-collector"
+      }
+    },
+    "automation-science-pack": {
+      "prerequisites": [],
+      "effects": [
+        {
+          "type": "unlock-recipe",
+          "recipe": "automation-science-pack"
+        }
+      ],
+      "unit": null,
+      "trigger": {
+        "type": "craft-item",
+        "count": 10,
+        "item": "copper-plate"
+      }
+    },
+    "logistic-science-pack": {
+      "prerequisites": [
+        "automation-science-pack"
+      ],
+      "effects": [
+        {
+          "type": "unlock-recipe",
+          "recipe": "logistic-science-pack"
+        },
+        {
+          "type": "unlock-recipe",
+          "recipe": "inserter"
+        },
+        {
+          "type": "unlock-recipe",
+          "recipe": "long-handed-inserter"
+        },
+        {
+          "type": "unlock-recipe",
+          "recipe": "transport-belt"
+        },
+        {
+          "type": "unlock-recipe",
+          "recipe": "fast-transport-belt"
+        },
+        {
+          "type": "unlock-recipe",
+          "recipe": "underground-belt"
+        },
+        {
+          "type": "unlock-recipe",
+          "recipe": "splitter"
+        }
+      ],
+      "unit": null,
+      "trigger": {
+        "type": "craft-item",
+        "count": 1,
+        "item": "automation-science-pack"
+      }
+    }
+  },
+  "machines": {
+    "rocket-silo": {
+      "crafting_categories": [
+        "rocket-building"
+      ],
+      "crafting_speed": 1.0,
+      "collision_box": [
+        [
+          -4.42,
+          -4.2
+        ],
+        [
+          4.42,
+          4.2
+        ]
+      ],
+      "rocket_parts_required": 50,
+      "fluid_boxes": []
+    },
+    "assembling-machine-1": {
+      "crafting_categories": [
+        "crafting",
+        "advanced-crafting"
+      ],
+      "crafting_speed": 0.5,
+      "collision_box": [
+        [
+          -1.2,
+          -1.2
+        ],
+        [
+          1.2,
+          1.2
+        ]
+      ],
+      "fluid_boxes": []
+    },
+    "assembling-machine-2": {
+      "crafting_categories": [
+        "crafting",
+        "advanced-crafting"
+      ],
+      "crafting_speed": 0.75,
+      "collision_box": [
+        [
+          -1.2,
+          -1.2
+        ],
+        [
+          1.2,
+          1.2
+        ]
+      ],
+      "fluid_boxes": []
+    },
+    "steel-furnace": {
+      "crafting_categories": [
+        "smelting"
+      ],
+      "crafting_speed": 2.0,
+      "collision_box": [
+        [
+          -0.7,
+          -0.7
+        ],
+        [
+          0.7,
+          0.7
+        ]
+      ],
+      "fluid_boxes": []
+    },
+    "electric-furnace": {
+      "crafting_categories": [
+        "smelting"
+      ],
+      "crafting_speed": 2.0,
+      "collision_box": [
+        [
+          -0.7,
+          -0.7
+        ],
+        [
+          0.7,
+          0.7
+        ]
+      ],
+      "fluid_boxes": []
+    },
+    "stone-furnace": {
+      "crafting_categories": [
+        "smelting"
+      ],
+      "crafting_speed": 1.0,
+      "collision_box": [
+        [
+          -0.7,
+          -0.7
+        ],
+        [
+          0.7,
+          0.7
+        ]
+      ],
+      "fluid_boxes": []
+    },
+    "electric-mining-drill": {
+      "crafting_categories": [
+        "basic-solid"
+      ],
+      "crafting_speed": 0.5,
+      "collision_box": [
+        [
+          -1.2,
+          -1.2
+        ],
+        [
+          1.2,
+          1.2
+        ]
+      ],
+      "fluid_boxes": []
+    },
+    "burner-mining-drill": {
+      "crafting_categories": [
+        "basic-solid"
+      ],
+      "crafting_speed": 0.25,
+      "collision_box": [
+        [
+          -0.7,
+          -0.7
+        ],
+        [
+          0.7,
+          0.7
+        ]
+      ],
+      "fluid_boxes": []
+    },
+    "chemical-plant": {
+      "crafting_categories": [
+        "crafting-with-fluid",
+        "chemistry"
+      ],
+      "crafting_speed": 1.0,
+      "collision_box": [
+        [
+          -1.4,
+          -1.4
+        ],
+        [
+          1.4,
+          1.4
+        ]
+      ],
+      "fluid_boxes": [
+        {
+          "production_type": "input",
+          "base_area": 1,
+          "base_level": -1
+        },
+        {
+          "production_type": "output",
+          "base_area": 1,
+          "base_level": 1
+        }
+      ]
+    },
+    "oil-refinery": {
+      "crafting_categories": [
+        "oil-processing"
+      ],
+      "crafting_speed": 1.0,
+      "collision_box": [
+        [
+          -2.4,
+          -2.4
+        ],
+        [
+          2.4,
+          2.4
+        ]
+      ],
+      "fluid_boxes": [
+        {
+          "production_type": "input",
+          "base_area": 1,
+          "base_level": -1
+        },
+        {
+          "production_type": "output",
+          "base_area": 1,
+          "base_level": 1
+        },
+        {
+          "production_type": "output",
+          "base_area": 1,
+          "base_level": 1
+        }
+      ]
+    }
+  }
+}

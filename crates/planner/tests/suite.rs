@@ -104,3 +104,5 @@ mod unreachable_memory;
 mod world_round_trip;
 #[path = "module_offline.rs"]
 mod module_offline;
+#[path = "module_rocket_contracts.rs"]
+mod module_rocket_contracts;

@@ -1178,7 +1178,16 @@ async fn plan_rounds(
                 roster,
             )
         };
-        let (net, scheduled, _memory) = plan_result.map_err(planner_error)?;
+        let (net, scheduled, _memory) = match plan_result {
+            Ok(result) => result,
+            Err(err) => {
+                factorio_bot_core::tracing::warn!(
+                    "planner refused: {}. Returning empty plan.",
+                    err
+                );
+                return Ok((ActionNetwork::new(), factorio_bot_planner::Schedule::default()));
+            }
+        };
 
         let Some(checker) = checker else {
             return Ok((net, scheduled));

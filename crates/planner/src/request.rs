@@ -377,11 +377,12 @@ pub fn plan_best_compat(
 ) -> Result<(ActionNetwork, Schedule, ReplanMemory), PlannerError> {
     let control = PlanControl::new(BudgetLimits {
         maxima: std::collections::BTreeMap::from([
-            (WorkKind::Retry, 16),
-            (WorkKind::Goal, 1024),
-            (WorkKind::Site, 256),
-            (WorkKind::Assignment, 4096),
-            (WorkKind::LookaheadPair, 65536),
+            (WorkKind::Retry, 64),
+            (WorkKind::Goal, 16384),
+            (WorkKind::Site, 4096),
+            (WorkKind::GraphScan, 65536),
+            (WorkKind::Assignment, 65536),
+            (WorkKind::LookaheadPair, 262144),
         ]),
     });
     let state = state.clone().with_control(control.clone());
@@ -410,11 +411,12 @@ pub fn plan_best_modules(
 ) -> Result<(ActionNetwork, Schedule, ReplanMemory), PlannerError> {
     let control = PlanControl::new(BudgetLimits {
         maxima: std::collections::BTreeMap::from([
-            (WorkKind::Retry, 16),
-            (WorkKind::Goal, 1024),
-            (WorkKind::Site, 256),
-            (WorkKind::Assignment, 4096),
-            (WorkKind::LookaheadPair, 65536),
+            (WorkKind::Retry, 64),
+            (WorkKind::Goal, 16384),
+            (WorkKind::Site, 4096),
+            (WorkKind::GraphScan, 65536),
+            (WorkKind::Assignment, 65536),
+            (WorkKind::LookaheadPair, 262144),
         ]),
     });
     let state = state.clone().with_control(control.clone());

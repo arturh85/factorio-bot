@@ -116,6 +116,24 @@ fn compile_module_placement(
         }
     }
 
+    // If the design needs electric power, acquire power plant materials.
+    if design.operation.power_watts > 0 {
+        for (item, count) in [
+            ("offshore-pump", 1u32),
+            ("boiler", 1u32),
+            ("steam-engine", 1u32),
+            ("pipe", 4u32),
+            ("small-electric-pole", 2u32),
+        ] {
+            steps.push(Step::Subgoal(Goal::Have {
+                item: item.to_string(),
+                count,
+                whose: crate::Holder::Anyone,
+                via: None,
+            }));
+        }
+    }
+
     // Add acquisition subgoals for the bill of materials.
     for (item, count) in &design.bill {
         steps.push(Step::Subgoal(Goal::Have {
@@ -172,18 +190,10 @@ fn compile_module_placement(
                     entity: part.entity.clone(),
                     direction: part.direction,
                 },
-                Condition::HasItem {
-                    who: crate::action::Actor::Role,
-                    item: part.entity.clone(),
-                    count: 1,
-                },
+
             ],
             eff: vec![
-                Effect::LoseItem {
-                    who: crate::action::Actor::Role,
-                    item: part.entity.clone(),
-                    count: 1,
-                },
+
                 Effect::CreateEntity(Box::new(entity)),
             ],
             duration: 100,
@@ -261,11 +271,7 @@ fn compile_module_placement(
                                     radius: 3.0,
                                     min_radius: 0.5,
                                 },
-                                Condition::HasItem {
-                                    who: crate::action::Actor::Role,
-                                    item: port.item.clone(),
-                                    count: 1,
-                                },
+
                             ],
                             eff: vec![],
                             duration: 100,
@@ -275,6 +281,54 @@ fn compile_module_placement(
                     }
                 }
             }
+        }
+    }
+
+    // If the design needs electric power, add power plant placement steps.
+    if design.operation.power_watts > 0 {
+        // Simple 1-boiler, 1-engine plant. Place entities at fixed offsets.
+        // The actual water position is handled by the executor at dispatch time.
+        // Anchored at (anchor_x + 9, anchor_y - 3) half-tiles from the module.
+        for (part_role, etype, hx_off, hy_off, facing) in [
+            ("offshore-pump", "offshore-pump", 9, -3, 0u8),
+            ("pipe", "pipe", 10, -3, 0u8),
+            ("boiler", "boiler", 11, -3, 0u8),
+            ("pipe", "pipe", 12, -3, 0u8),
+            ("steam-engine", "steam-engine", 13, -3, 0u8),
+            ("pipe", "pipe", 14, -3, 0u8),
+        ] {
+            let px = anchor_x + hx_off as f64 * 0.5;
+            let py = anchor_y + hy_off as f64 * 0.5;
+            let pos = Position::new(px, py);
+            let entity_for_placement = FactorioEntity {
+                name: etype.to_string(),
+                entity_type: etype.to_string(),
+                position: pos.clone(),
+                direction: facing,
+                recipe: None,
+                ..Default::default()
+            };
+            steps.push(Step::Act(Box::new(Action {
+                id: ids.next(),
+                kind: ActionKind::Place { entity: Box::new(entity_for_placement) },
+                pre: vec![
+                    Condition::AtPosition {
+                        who: crate::action::Actor::Role,
+                        pos: pos.clone(),
+                        radius: 3.0,
+                        min_radius: 0.5,
+                    },
+                    Condition::AreaFree {
+                        pos: pos.clone(),
+                        entity: etype.to_string(),
+                        direction: facing,
+                    },
+                ],
+                eff: vec![],
+                duration: 100,
+                pinned: None,
+                label: format!("place {} for power", etype),
+            })));
         }
     }
 

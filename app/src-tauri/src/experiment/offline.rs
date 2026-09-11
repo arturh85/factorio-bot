@@ -59,7 +59,8 @@ pub fn run_offline_experiment(
 }
 
 fn run_single_trial(key: &TrialKey, map_dir: &Path) -> TrialResult {
-    let map_path = map_dir.join(format!("map-{}.json", key.seed));
+    // Try map-{seed}-t0.json first, then map-{seed}.json
+    let map_path = map_dir.join(format!("map-{}-t0.json", key.seed));
 
     // Load world
     let world_data = match std::fs::read_to_string(&map_path) {

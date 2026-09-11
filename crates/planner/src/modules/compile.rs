@@ -101,6 +101,20 @@ fn compile_module_placement(
 ) -> Vec<Step> {
     let mut steps: Vec<Step> = Vec::new();
 
+    // Add acquisition subgoals for input materials (non-OreToPlate modules).
+    for port in &design.ports {
+        if port.mode == crate::modules::artifact::PortMode::BeltInput
+            && design.family != crate::modules::artifact::ModuleFamily::OreToPlate
+        {
+            steps.push(Step::Subgoal(Goal::Have {
+                item: port.item.clone(),
+                count: 10,
+                whose: crate::Holder::Anyone,
+                via: None,
+            }));
+        }
+    }
+
     let anchor_x = instance.placement.half_x as f64 * 0.5;
     let anchor_y = instance.placement.half_y as f64 * 0.5;
 
@@ -214,6 +228,11 @@ fn compile_module_placement(
                                     pos: pos.clone(),
                                     radius: 3.0,
                                     min_radius: 0.5,
+                                },
+                                Condition::HasItem {
+                                    who: crate::action::Actor::Role,
+                                    item: port.item.clone(),
+                                    count: 1,
                                 },
                             ],
                             eff: vec![],
@@ -401,6 +420,10 @@ pub fn plan_with_session(
     // production. The module's placement steps already reserve the ground,
     // so any conflicting placements from the legacy expansion will be
     // detected by the scheduler.
+    // Infer edges so HasItem-dependent actions are ordered after
+    // their producers (craft/mine actions from subgoal expansion).
+    net.infer_edges();
+
     match schedule(&net, state, roster) {
         Ok(sched) => {
             let memory = ReplanMemory {

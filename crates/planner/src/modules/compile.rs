@@ -134,19 +134,15 @@ fn compile_module_placement(
         }
     }
 
-    // Add acquisition subgoals for the bill of materials.
+    // Acquire bill items that have crafting/smelting recipes (skip machines
+    // like chemical-plant and oil-refinery whose acquisition chain is complex).
     for (item, count) in &design.bill {
-        steps.push(Step::Subgoal(Goal::Have {
-            item: item.clone(),
-            count: *count as u32,
-            whose: crate::Holder::Anyone,
-            via: None,
-        }));
-    }
-
-
-    // Each entity to place needs to be crafted/mined first.
-    for (item, count) in &design.bill {
+        // Skip items that are themselves complex machines - they'll be placed as parts.
+        if item == "oil-refinery" || item == "chemical-plant" || item == "pumpjack"
+            || item == "assembling-machine-1" || item == "assembling-machine-2"
+        {
+            continue;
+        }
         steps.push(Step::Subgoal(Goal::Have {
             item: item.clone(),
             count: *count as u32,

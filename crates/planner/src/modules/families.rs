@@ -348,6 +348,14 @@ fn extract_assembler_cell(
     let ingredients = recipe.ingredients.as_ref().ok_or_else(|| ModuleError::Unsupported(format!(
         "assembler-cell: recipe for '{item}' has no ingredients"
     )))?;
+    // Only handle crafting recipes (not oil-processing, chemistry, etc.)
+    let category = recipe.category.as_str();
+    match category {
+        "crafting" | "crafting-with-fluid" | "advanced-crafting" => {}
+        _ => return Err(ModuleError::Unsupported(format!(
+            "assembler-cell: unsupported category '{category}' for '{item}'"
+        ))),
+    }
     let input_count = ingredients.len();
     if input_count > 2 {
         // 3-input cell not yet implemented in the planner.

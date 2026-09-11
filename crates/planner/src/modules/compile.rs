@@ -15,7 +15,8 @@ use crate::goal::Goal;
 
 use crate::ids::{ActionIdGen, BotId};
 use crate::memory::ReplanMemory;
-use crate::method::{run_steps, ExpansionCtx, MethodRegistry, Step};
+use crate::method::{
+run_steps, ExpansionCtx, MethodRegistry, Step};
 use crate::modules::artifact::ModuleDesign;
 pub use crate::modules::cache::CacheMode;
 use crate::modules::cache::LibraryCache;
@@ -426,8 +427,12 @@ pub fn plan_with_session(
 
     // Compile placement steps for each (design, instance) pair.
     for (design, instance) in selection.designs.iter().zip(selection.instances.iter()) {
-        let steps = compile_module_placement(design, instance, &mut ctx.ids);
-        if let Err(err) = run_steps(steps, &mut ctx, &mut net, registry, &mut promised) {
+        let mut all_steps: Vec<Step> = Vec::new();
+
+        // Add module placement steps.
+        all_steps.extend(compile_module_placement(design, instance, &mut ctx.ids));
+
+        if let Err(err) = run_steps(all_steps, &mut ctx, &mut net, registry, &mut promised) {
             return crate::request::PlanResult {
                 status: crate::request::PlanStatus::Infeasible,
                 incumbent: None,

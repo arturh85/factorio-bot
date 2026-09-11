@@ -71,6 +71,9 @@ const designs = ref<ModuleDesign[]>([]);
 const loading = ref(true);
 const error = ref<string | null>(null);
 
+/** Per-design tile count keyed by design id. */
+const tileCount = ref<Record<string, number>>({});
+
 const FALLBACK_DESIGNS: ModuleDesign[] = [
   {
     schema: 1, id: 'ore-to-plate-iron', family: 'OreToPlate',
@@ -140,40 +143,85 @@ onMounted(async () => {
 // ---------------------------------------------------------------------------
 
 /** Compute bounding box of all parts in half-tile units. */
-function designBounds(parts: Part[], ports: Port[]): {minX: number; minY: number; maxX: number; maxY: number} {
+
+function entityHalfSize(entity: string): {hw: number, hh: number} {
+  const sizes: Record<string, {hw: number, hh: number}> = {
+    'burner-mining-drill': {hw: 3, hh: 3},
+    'stone-furnace': {hw: 2, hh: 2},
+    'burner-inserter': {hw: 1, hh: 1},
+    'inserter': {hw: 1, hh: 1},
+    'assembling-machine-1': {hw: 2, hh: 2}
+  };
+  return sizes[entity] ?? {hw: 2, hh: 2};
+}
+
+function entityDx(dir: number, entity: string): number {
+  const half = entityHalfSize(entity);
+  const dirs: Record<number, number> = {0: 0, 2: half.hw, 4: 0, 6: -half.hw};
+  return dirs[dir] ?? 0;
+}
+
+function entityDy(dir: number, entity: string): number {
+  const half = entityHalfSize(entity);
+  const dirs: Record<number, number> = {0: -half.hh, 2: 0, 4: half.hh, 6: 0};
+  return dirs[dir] ?? 0;
+}
+
+function entityArrowEndX(dir: number, entity: string): number {
+  const half = entityHalfSize(entity);
+  const dirs: Record<number, number> = {0: 0, 2: half.hw + 1.5, 4: 0, 6: -(half.hw + 1.5)};
+  return dirs[dir] ?? 0;
+}
+
+function entityArrowEndY(dir: number, entity: string): number {
+  const half = entityHalfSize(entity);
+  const dirs: Record<number, number> = {0: -(half.hh + 1.5), 2: 0, 4: half.hh + 1.5, 6: 0};
+  return dirs[dir] ?? 0;
+}
+
+function tiledViewBox(design: ModuleDesign, tiles: number): string {
+  const stepY = tileStepY(design);
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const p of parts) {
-    const x = p.offset.half_x;
-    const y = p.offset.half_y;
-    minX = Math.min(minX, x - 1);
-    minY = Math.min(minY, y - 1);
-    maxX = Math.max(maxX, x + 2);
-    maxY = Math.max(maxY, y + 2);
+  for (const p of design.parts) {
+    const half = entityHalfSize(p.entity);
+    minX = Math.min(minX, p.offset.half_x - half.hw);
+    const topY = p.offset.half_y - half.hh;
+    const botY = p.offset.half_y + half.hh + (tiles - 1) * stepY;
+    minY = Math.min(minY, topY);
+    maxY = Math.max(maxY, botY);
+    maxX = Math.max(maxX, p.offset.half_x + half.hw);
   }
-  for (const p of ports) {
-    minX = Math.min(minX, p.offset.half_x - 1);
-    minY = Math.min(minY, p.offset.half_y - 1);
-    maxX = Math.max(maxX, p.offset.half_x + 1);
-    maxY = Math.max(maxY, p.offset.half_y + 1);
-  }
-  return {minX, minY, maxX, maxY};
+  const pad = 2;
+  return `${minX - pad} ${minY - pad} ${maxX - minX + pad * 2} ${maxY - minY + pad * 2}`;
 }
 
-/** SVG viewBox string for a design's parts and ports. */
-function designViewBox(parts: Part[], ports: Port[]): string {
-  const b = designBounds(parts, ports);
-  const pad = 1;
-  return `${b.minX - pad} ${b.minY - pad} ${b.maxX - b.minX + pad * 2} ${b.maxY - b.minY + pad * 2}`;
+/** Vertical spacing (in half-tile units) between tiled copies. */
+function tileStepY(design: ModuleDesign): number {
+  let maxY = 0;
+  for (const p of design.parts) {
+    const half = entityHalfSize(p.entity);
+    maxY = Math.max(maxY, p.offset.half_y + half.hh);
+  }
+  // Cell height + 2 half-tile gap (1 tile spacing between copies)
+  return maxY + 2;
 }
 
-function labelForMode(mode: string): string {
-  switch (mode) {
-    case 'BeltInput': return '⬅ Belt in';
-    case 'InventoryOutput': return '➡ Output';
-    case 'DirectLabOutput': return '🔬 Lab';
-    default: return mode;
+function scaledBill(bill: Record<string, number>, tiles: number): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(bill)) {
+    out[k] = v * tiles;
   }
+  return out;
 }
+
+function scaledRates(rates: Record<string, Rate>, tiles: number): Record<string, Rate> {
+  const out: Record<string, Rate> = {};
+  for (const [k, v] of Object.entries(rates)) {
+    out[k] = { numerator: v.numerator * tiles, ticks: v.ticks };
+  }
+  return out;
+}
+
 
 function ticksToMinutes(ticks: number): string {
   return (ticks / 3600).toFixed(1) + ' min';
@@ -188,7 +236,7 @@ function entityLabel(entity: string): string {
   <div class="mx-auto max-w-5xl p-6">
     <h1 class="mb-2 text-2xl font-bold">Blueprint Library</h1>
     <p class="mb-8 text-gray-500">
-      Reusable factory module designs. Each card shows the entity layout, ports, and operating contract.
+      Reusable factory module designs. Each card shows the entity layout, bill of materials, rates, and a tiling slider to preview how the cell expands.
     </p>
 
     <div v-if="loading" class="text-gray-500">Loading designs...</div>
@@ -206,13 +254,20 @@ function entityLabel(entity: string): string {
               {{ design.family }}
             </span>
           </div>
+          <!-- Tiling slider -->
+          <div class="flex items-center gap-3">
+            <label for="tile-count" class="text-xs text-gray-500">Tiles</label>
+            <input id="tile-count" type="range" min="1" max="12" v-model.number="tileCount[design.id]"
+                   class="w-24 h-1.5 rounded bg-gray-200 accent-blue-600 cursor-pointer" />
+            <span class="text-sm font-mono tabular-nums text-gray-700">{{ tileCount[design.id] || 1 }}×</span>
+          </div>
         </div>
 
         <div class="grid grid-cols-1 gap-6 lg:grid-cols-3">
           <!-- SVG Plan View -->
           <div class="lg:col-span-2">
             <div class="mb-2 text-sm font-medium text-gray-600">Layout</div>
-            <svg :viewBox="designViewBox(design.parts, design.ports)"
+            <svg :viewBox="tiledViewBox(design, tileCount[design.id] || 1)"
                  class="w-full max-w-sm rounded border bg-gray-50"
                  xmlns="http://www.w3.org/2000/svg">
 
@@ -228,50 +283,49 @@ function entityLabel(entity: string): string {
               </defs>
               <rect width="100%" height="100%" fill="url(#grid)"/>
 
-              <!-- Port indicators with directional arrows -->
-              <g v-for="port in design.ports" :key="port.id">
-                <circle :cx="port.offset.half_x" :cy="port.offset.half_y" r="0.5" fill="#bfdbfe" stroke="#3b82f6" stroke-width="0.3"/>
-                <line :x1="port.offset.half_x" :y1="port.offset.half_y"
-                      :x2="port.offset.half_x + 1.5 * Math.cos((port.direction / 4) * Math.PI)"
-                      :y2="port.offset.half_y + 1.5 * -Math.sin((port.direction / 4) * Math.PI)"
-                      stroke="#3b82f6" stroke-width="0.25"
-                      marker-end="url(#arrow-up)"/>
-                <text :x="port.offset.half_x" :y="port.offset.half_y - 0.8"
-                      text-anchor="middle" font-size="0.4" fill="#2563eb">{{ port.id }}</text>
+              <!-- Tiled entities -->
+              <g v-for="i in (tileCount[design.id] || 1)" :key="'tile-' + i">
+                <g :transform="'translate(0, ' + ((i-1) * tileStepY(design)) + ')'">
+                  <!-- Entity rectangles with direction indicators -->
+                  <g v-for="part in design.parts" :key="part.role">
+                    <rect :x="part.offset.half_x - entityHalfSize(part.entity).hw"
+                          :y="part.offset.half_y - entityHalfSize(part.entity).hh"
+                          :width="entityHalfSize(part.entity).hw * 2"
+                          :height="entityHalfSize(part.entity).hh * 2"
+                          rx="0.3"
+                          :fill="colorForEntityType(part.entity)"
+                          stroke="#374151" stroke-width="0.2"/>
+                    <line :x1="part.offset.half_x + entityDx(part.direction, part.entity)"
+                          :y1="part.offset.half_y + entityDy(part.direction, part.entity)"
+                          :x2="part.offset.half_x + entityArrowEndX(part.direction, part.entity)"
+                          :y2="part.offset.half_y + entityArrowEndY(part.direction, part.entity)"
+                          stroke="#fbbf24" stroke-width="0.5" stroke-linecap="round"/>
+                    <text :x="part.offset.half_x" :y="part.offset.half_y + 0.2"
+                          text-anchor="middle" font-size="0.45" fill="white"
+                          font-weight="bold">{{ entityLabel(part.role) }}</text>
+                  </g>
+                  <!-- Ore flow arrow from drill to furnace (direct feed) -->
+                  <line v-if="i > 1 || design.family === 'OreToPlate'"
+                        x1="0" :y1="3" x2="0" :y2="tileStepY(design) - 3"
+                        stroke="#9ca3af" stroke-width="0.3" stroke-dasharray="1 0.5"
+                        opacity="0.4"/>
+                </g>
               </g>
 
-              <!-- Entity rectangles with direction indicators -->
-              <g v-for="part in design.parts" :key="part.role">
-                <!-- Entity body with correct game size -->
-                <rect :x="part.offset.half_x - entityHalfSize(part.entity).hw"
-                      :y="part.offset.half_y - entityHalfSize(part.entity).hh"
-                      :width="entityHalfSize(part.entity).hw * 2"
-                      :height="entityHalfSize(part.entity).hh * 2"
-                      rx="0.3"
-                      :fill="colorForEntityType(part.entity)"
-                      stroke="#374151" stroke-width="0.2"/>
-                <!-- Direction arrow on the entity's facing side -->
-                <line :x1="part.offset.half_x + entityDx(part.direction, part.entity)"
-                      :y1="part.offset.half_y + entityDy(part.direction, part.entity)"
-                      :x2="part.offset.half_x + entityArrowEndX(part.direction, part.entity)"
-                      :y2="part.offset.half_y + entityArrowEndY(part.direction, part.entity)"
-                      stroke="#fbbf24" stroke-width="0.5"
-                      stroke-linecap="round"/>
-                <!-- Entity label -->
-                <text :x="part.offset.half_x" :y="part.offset.half_y + 0.2"
-                      text-anchor="middle" font-size="0.45" fill="white"
-                      font-weight="bold">{{ entityLabel(part.role) }}</text>
-              </g>
+              <!-- Tile-set label -->
+              <text x="12" y="0.8" text-anchor="middle" font-size="0.5" fill="#9ca3af">
+                {{ tileCount[design.id] || 1 }} cells stacked
+              </text>
             </svg>
           </div>
 
           <!-- Info panel -->
           <div class="space-y-4 text-sm">
-            <!-- Parts / Bill -->
+            <!-- Parts / Bill (scaled by tile count) -->
             <div>
               <div class="mb-1 font-medium text-gray-600">Bill of Materials</div>
               <ul class="space-y-0.5">
-                <li v-for="(count, name) in design.bill" :key="name"
+                <li v-for="(count, name) in scaledBill(design.bill, tileCount[design.id] || 1)" :key="name"
                     class="flex justify-between">
                   <span class="text-gray-600">{{ entityLabel(name) }}</span>
                   <span class="font-mono">×{{ count }}</span>
@@ -279,15 +333,15 @@ function entityLabel(entity: string): string {
               </ul>
             </div>
 
-            <!-- Operating contract -->
+            <!-- Operating contract (scaled) -->
             <div>
-              <div class="mb-1 font-medium text-gray-600">Rates</div>
-              <div v-for="(rate, item) in design.operation.outputs" :key="'out-'+item"
+              <div class="mb-1 font-medium text-gray-600">Rates <span class="text-gray-400 font-normal">(×{{ tileCount[design.id] || 1 }} tiles)</span></div>
+              <div v-for="(rate, item) in scaledRates(design.operation.outputs, tileCount[design.id] || 1)" :key="'out-'+item"
                    class="flex justify-between">
                 <span class="text-gray-600">▶ {{ item }}</span>
                 <span class="font-mono">{{ rate.numerator }}/{{ rate.ticks }}t</span>
               </div>
-              <div v-for="(rate, item) in design.operation.inputs" :key="'in-'+item"
+              <div v-for="(rate, item) in scaledRates(design.operation.inputs, tileCount[design.id] || 1)" :key="'in-'+item"
                    class="flex justify-between">
                 <span class="text-gray-600">◀ {{ item }}</span>
                 <span class="font-mono">{{ rate.numerator }}/{{ rate.ticks }}t</span>
@@ -296,20 +350,24 @@ function entityLabel(entity: string): string {
 
             <div v-if="design.operation.power_watts > 0">
               <span class="font-medium text-gray-600">Power:</span>
-              <span class="ml-1 font-mono">{{ (design.operation.power_watts / 1000).toFixed(0) }} kW</span>
+              <span class="ml-1 font-mono">{{ ((design.operation.power_watts * (tileCount[design.id] || 1)) / 1000).toFixed(0) }} kW</span>
             </div>
 
             <div>
-              <span class="font-medium text-gray-600">Startup:</span>
-              <span class="ml-1 font-mono">{{ ticksToMinutes(design.operation.startup_latency_ticks) }}</span>
+              <span class="font-medium text-gray-600">Hand feed</span>
+              <span class="ml-1 text-gray-500 text-xs">— place and fuel each cell by hand; collect plates from the furnace output</span>
             </div>
 
-            <!-- Ports -->
             <div>
-              <div class="mb-1 font-medium text-gray-600">Ports</div>
-              <div v-for="port in design.ports" :key="port.id"
+              <div class="mb-1 font-medium text-gray-600">Startup</div>
+              <div class="flex justify-between">
+                <span class="text-gray-600">Latency</span>
+                <span class="font-mono">{{ ticksToMinutes(design.operation.startup_latency_ticks) }}</span>
+              </div>
+              <div v-for="(qty, item) in design.operation.startup_items" :key="'start-'+item"
                    class="flex justify-between text-xs">
-                <span>{{ labelForMode(port.mode) }} <span class="text-gray-400">{{ port.item }}</span></span>
+                <span class="text-gray-500">{{ item }}</span>
+                <span class="font-mono">×{{ qty * (tileCount[design.id] || 1) }}</span>
               </div>
             </div>
           </div>

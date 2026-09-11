@@ -416,12 +416,7 @@ pub fn plan_with_session(
         }
     }
 
-    // Also expand the original goals through the legacy planner to handle
-    // production. The module's placement steps already reserve the ground,
-    // so any conflicting placements from the legacy expansion will be
-    // detected by the scheduler.
-    // Infer edges so HasItem-dependent actions are ordered after
-    // their producers (craft/mine actions from subgoal expansion).
+    // Module placements already handle production — no legacy fallback.
     net.infer_edges();
 
     match schedule(&net, state, roster) {

@@ -48,6 +48,8 @@ mod machine_named_by_category;
 mod module_connected_chain;
 #[path = "module_demand.rs"]
 mod module_demand;
+#[path = "module_fallback.rs"]
+mod module_fallback;
 #[path = "module_launch_memory.rs"]
 mod module_launch_memory;
 #[path = "module_launch_selection.rs"]

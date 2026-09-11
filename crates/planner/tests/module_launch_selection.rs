@@ -26,7 +26,7 @@ use factorio_bot_planner::modules::instance::{
 };
 use factorio_bot_planner::modules::reservations::{HalfRect, ReservationSet};
 use factorio_bot_planner::modules::select::{
-    module_footprint_rects, select_candidates, site_candidates, ProductionRequest,
+    ProductionRequest, module_footprint_rects, select_candidates, site_candidates,
 };
 use factorio_bot_planner::state::PlanState;
 
@@ -393,19 +393,22 @@ fn reservation_set_prevents_nauvis_overlaps() {
         .unwrap();
 
     // Same owner: allowed.
-    assert!(rs
-        .reserve(1, "nauvis", HalfRect::new(10, 10, 30, 30).unwrap())
-        .is_ok());
+    assert!(
+        rs.reserve(1, "nauvis", HalfRect::new(10, 10, 30, 30).unwrap())
+            .is_ok()
+    );
 
     // Different owner: refused.
-    assert!(rs
-        .reserve(2, "nauvis", HalfRect::new(5, 5, 15, 15).unwrap())
-        .is_err());
+    assert!(
+        rs.reserve(2, "nauvis", HalfRect::new(5, 5, 15, 15).unwrap())
+            .is_err()
+    );
 
     // Different surface: allowed.
-    assert!(rs
-        .reserve(2, "vulcanus", HalfRect::new(0, 0, 20, 20).unwrap())
-        .is_ok());
+    assert!(
+        rs.reserve(2, "vulcanus", HalfRect::new(0, 0, 20, 20).unwrap())
+            .is_ok()
+    );
 }
 
 /// Half-open semantics correctly separate adjacent rectangles.
@@ -418,12 +421,14 @@ fn adjacent_rectangles_do_not_conflict() {
         .unwrap();
 
     // Right rect [10,20) x [0,10) — shares an edge, does not overlap (half-open)
-    assert!(rs
-        .reserve(2, "nauvis", HalfRect::new(10, 0, 20, 10).unwrap())
-        .is_ok());
+    assert!(
+        rs.reserve(2, "nauvis", HalfRect::new(10, 0, 20, 10).unwrap())
+            .is_ok()
+    );
 
     // Below rect [0,10) x [10,20) — shares an edge, does not overlap (half-open)
-    assert!(rs
-        .reserve(2, "nauvis", HalfRect::new(0, 10, 10, 20).unwrap())
-        .is_ok());
+    assert!(
+        rs.reserve(2, "nauvis", HalfRect::new(0, 10, 10, 20).unwrap())
+            .is_ok()
+    );
 }

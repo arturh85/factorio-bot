@@ -251,13 +251,15 @@ mod tests {
         r.reserve(1, "nauvis", HalfRect::new(0, 0, 10, 10).unwrap())
             .unwrap();
         // Partially overlapping rect: refused.
-        assert!(r
-            .reserve(2, "nauvis", HalfRect::new(5, 5, 15, 15).unwrap())
-            .is_err());
+        assert!(
+            r.reserve(2, "nauvis", HalfRect::new(5, 5, 15, 15).unwrap())
+                .is_err()
+        );
         // Adjacent but not overlapping: allowed.
-        assert!(r
-            .reserve(2, "nauvis", HalfRect::new(10, 0, 20, 10).unwrap())
-            .is_ok());
+        assert!(
+            r.reserve(2, "nauvis", HalfRect::new(10, 0, 20, 10).unwrap())
+                .is_ok()
+        );
     }
 
     #[test]
@@ -333,16 +335,19 @@ mod tests {
         r.reserve(1, "nauvis", HalfRect::new(0, 0, 100, 100).unwrap())
             .unwrap();
         // Second owner on different surface: fine.
-        assert!(r
-            .reserve(2, "vulcanus", HalfRect::new(0, 0, 100, 100).unwrap())
-            .is_ok());
+        assert!(
+            r.reserve(2, "vulcanus", HalfRect::new(0, 0, 100, 100).unwrap())
+                .is_ok()
+        );
         // Third owner on another different surface: fine.
-        assert!(r
-            .reserve(3, "gleba", HalfRect::new(0, 0, 100, 100).unwrap())
-            .is_ok());
+        assert!(
+            r.reserve(3, "gleba", HalfRect::new(0, 0, 100, 100).unwrap())
+                .is_ok()
+        );
         // Fourth owner on original surface: blocked.
-        assert!(r
-            .reserve(4, "nauvis", HalfRect::new(0, 0, 10, 10).unwrap())
-            .is_err());
+        assert!(
+            r.reserve(4, "nauvis", HalfRect::new(0, 0, 10, 10).unwrap())
+                .is_err()
+        );
     }
 }

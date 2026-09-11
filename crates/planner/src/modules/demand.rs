@@ -124,11 +124,7 @@ fn rate_cmp(a: Rate, b: Rate) -> std::cmp::Ordering {
 
 /// GCD for u128 (used internally after checked multiplication).
 fn gcd_u128(a: u128, b: u128) -> u128 {
-    if b == 0 {
-        a
-    } else {
-        gcd_u128(b, a % b)
-    }
+    if b == 0 { a } else { gcd_u128(b, a % b) }
 }
 
 // ---------------------------------------------------------------------------

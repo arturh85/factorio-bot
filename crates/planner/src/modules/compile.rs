@@ -654,43 +654,58 @@ pub fn plan_with_session(
     let sched = match schedule(&net, state, roster) {
         Ok(s) => s,
         Err(_) => {
-            // Build a flat schedule from the network's topological order.
-            // This ensures dependencies are respected and avoids circular waits.
-            let order = net
-                .topo_order()
-                .unwrap_or_else(|_| net.actions().map(|a| a.id).collect());
-            let bots: Vec<BotId> = if roster.is_empty() {
-                vec![BotId(1)]
-            } else {
-                roster.to_vec()
-            };
-            let mut owner_ticks: std::collections::HashMap<BotId, u32> =
-                bots.iter().map(|b| (*b, 0u32)).collect();
-            let mut steps: Vec<ScheduledStep> = Vec::new();
-            for action_id in &order {
-                let action = match net.action(*action_id) {
-                    Some(a) => a,
-                    None => continue,
-                };
-                let dur = std::cmp::max(action.duration, 60);
-                let (bot, tick) = owner_ticks
-                    .iter()
-                    .min_by_key(|(_, t)| **t)
-                    .map(|(b, t)| (*b, *t))
-                    .unwrap_or((BotId(1), 0));
-                steps.push(ScheduledStep {
-                    what: StepKind::Act {
-                        action: action.id,
-                        label: String::new(),
-                    },
-                    bot,
-                    start: tick,
-                    end: tick + dur,
-                });
-                owner_ticks.insert(bot, tick + dur);
+            // Fallback: use schedule_fallback which respects chain ownership,
+            // travel, and precondition validation.
+            match crate::modules::fallback::schedule_fallback(
+                &net,
+                state,
+                roster,
+                control,
+            ) {
+                Ok(sched) => sched,
+                Err(fallback_err) => {
+                    factorio_bot_core::tracing::warn!(
+                        "primary schedule failed and fallback also failed: {fallback_err}"
+                    );
+                    // Last-resort: assign all actions to bot 1 sequentially,
+                    // respecting topological order only.
+                    let order = net
+                        .topo_order()
+                        .unwrap_or_else(|_| net.actions().map(|a| a.id).collect());
+                    let bots: Vec<BotId> = if roster.is_empty() {
+                        vec![BotId(1)]
+                    } else {
+                        roster.to_vec()
+                    };
+                    let mut owner_ticks: std::collections::HashMap<BotId, u32> =
+                        bots.iter().map(|b| (*b, 0u32)).collect();
+                    let mut steps: Vec<ScheduledStep> = Vec::new();
+                    for action_id in &order {
+                        let action = match net.action(*action_id) {
+                            Some(a) => a,
+                            None => continue,
+                        };
+                        let dur = std::cmp::max(action.duration, 60);
+                        let (bot, tick) = owner_ticks
+                            .iter()
+                            .min_by_key(|(_, t)| **t)
+                            .map(|(b, t)| (*b, *t))
+                            .unwrap_or((BotId(1), 0));
+                        steps.push(ScheduledStep {
+                            what: StepKind::Act {
+                                action: action.id,
+                                label: String::new(),
+                            },
+                            bot,
+                            start: tick,
+                            end: tick + dur,
+                        });
+                        owner_ticks.insert(bot, tick + dur);
+                    }
+                    let makespan = owner_ticks.values().max().copied().unwrap_or(0);
+                    Schedule { steps, makespan }
+                }
             }
-            let makespan = owner_ticks.values().max().copied().unwrap_or(0);
-            Schedule { steps, makespan }
         }
     };
     let memory = ReplanMemory {

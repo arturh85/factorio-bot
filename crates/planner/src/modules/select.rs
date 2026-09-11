@@ -17,7 +17,7 @@ use crate::ids::BotId;
 use crate::modules::artifact::{
     KnowledgeOrigin, ModuleDesign, ModuleError, ModuleFamily, ModuleParameters, OperatingContract,
 };
-use crate::modules::cache::{get_design, CacheMode, LibraryCache};
+use crate::modules::cache::{CacheMode, LibraryCache, get_design};
 use crate::modules::instance::{InstanceMemory, ModuleInstance, PartState, Placement, PortBinding};
 pub use crate::modules::reservations::{HalfRect, ReservationSet};
 use crate::state::PlanState;

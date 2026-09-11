@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use factorio_bot_planner::memory::ReplanMemory;
 use factorio_bot_planner::modules::artifact::ModuleError;
 use factorio_bot_planner::modules::instance::{
-    InstanceMemory, ModuleInstance, Placement, PartState,
+    InstanceMemory, ModuleInstance, PartState, Placement,
 };
 
 // ---------------------------------------------------------------------------

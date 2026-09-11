@@ -27,6 +27,36 @@ impl Subcommand for ExperimentCommand {
         Command::new("experiment")
             .about("Manage and analyse experiments")
             .subcommand(
+                Command::new("run")
+                    .about("Run an offline experiment comparing module vs legacy planning")
+                    .arg(
+                        Arg::new("manifest")
+                            .long("manifest")
+                            .short('m')
+                            .value_name("path")
+                            .required(true)
+                            .value_parser(value_parser!(PathBuf))
+                            .help("path to the experiment manifest JSON"),
+                    )
+                    .arg(
+                        Arg::new("maps")
+                            .long("maps")
+                            .short('M')
+                            .value_name("dir")
+                            .required(true)
+                            .value_parser(value_parser!(PathBuf))
+                            .help("directory containing map dumps (map-{seed}.json)"),
+                    )
+                    .arg(
+                        Arg::new("output")
+                            .long("output")
+                            .short('o')
+                            .value_name("path")
+                            .value_parser(value_parser!(PathBuf))
+                            .help("output directory for results [default: ./results]"),
+                    ),
+            )
+            .subcommand(
                 Command::new("report")
                     .about("Produce a comparison report from trial results")
                     .arg(
@@ -72,10 +102,47 @@ impl Subcommand for ExperimentCommand {
 
 fn run(args: &ArgMatches, _context: &mut Context) -> Result<()> {
     match args.subcommand() {
+        Some(("run", run_args)) => run_offline(run_args),
         Some(("report", report_args)) => run_report(report_args),
         Some((name, _)) => Err(miette!("unknown experiment subcommand: {name}")),
-        None => Err(miette!("experiment requires a subcommand (report)")),
+        None => Err(miette!("experiment requires a subcommand (run|report)")),
     }
+}
+
+fn run_offline(args: &ArgMatches) -> Result<()> {
+    let manifest_path = args
+        .get_one::<PathBuf>("manifest")
+        .ok_or_else(|| miette!("--manifest is required"))?;
+    let maps_dir = args
+        .get_one::<PathBuf>("maps")
+        .ok_or_else(|| miette!("--maps is required"))?;
+    let output_dir = args
+        .get_one::<PathBuf>("output")
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from("./results"));
+
+    std::fs::create_dir_all(&output_dir)
+        .into_diagnostic()
+        .map_err(|e| miette!("failed to create output dir: {e}"))?;
+
+    let manifest_json = std::fs::read_to_string(manifest_path)
+        .into_diagnostic()
+        .map_err(|e| miette!("failed to read manifest: {e}"))?;
+    let manifest: crate::experiment::manifest::Manifest = factorio_bot_core::serde_json::from_str(&manifest_json)
+        .into_diagnostic()
+        .map_err(|e| miette!("failed to parse manifest: {e}"))?;
+
+    let results = crate::experiment::offline::run_offline_experiment(
+        &manifest,
+        maps_dir,
+        &output_dir,
+    );
+
+    println!("Experiment complete: {}/{} successful",
+        results.iter().filter(|r| r.outcome == crate::experiment::runner::TrialOutcome::Success).count(),
+        results.len());
+
+    Ok(())
 }
 
 fn run_report(args: &ArgMatches) -> Result<()> {

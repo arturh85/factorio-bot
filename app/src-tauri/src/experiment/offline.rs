@@ -121,21 +121,26 @@ fn run_single_trial(key: &TrialKey, map_dir: &Path) -> TrialResult {
     let registry = factorio_bot_planner::registry_for(&bots);
 
     // Decide which planner variant to use
-    let result = match key.variant.as_str() {
-        "modules" => factorio_bot_planner::plan_best_modules(
+    let use_modules = match key.variant.as_str() {
+        "modules" | "modules-cache-on" | "modules-cache-off" => true,
+        _ => false,
+    };
+    let result = if use_modules {
+        factorio_bot_planner::plan_best_modules(
             &[make_goal(&key.task)],
             &state,
             &registry,
             chain_actor,
             &bots,
-        ),
-        _ => factorio_bot_planner::plan_best(
+        )
+    } else {
+        factorio_bot_planner::plan_best(
             &[make_goal(&key.task)],
             &state,
             &registry,
             chain_actor,
             &bots,
-        ),
+        )
     };
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -168,6 +173,13 @@ fn run_single_trial(key: &TrialKey, map_dir: &Path) -> TrialResult {
 fn make_goal(task: &str) -> factorio_bot_planner::Goal {
     match task {
         "automation" => factorio_bot_planner::Goal::Researched("automation".into()),
+        "red-delivery" => factorio_bot_planner::Goal::Produced {
+            item: "automation-science-pack".into(),
+            count: 10,
+            whose: factorio_bot_planner::Holder::Anyone,
+            unlocks: None,
+            via: None,
+        },
         "iron-plate" => factorio_bot_planner::Goal::Have {
             item: "iron-plate".into(),
             count: 5,

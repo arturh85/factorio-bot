@@ -25,13 +25,13 @@ fn ore_to_plate_design(item: &str, ore: &str) -> Value {
             { "role": "drill", "entity": "burner-mining-drill",
               "offset": { "half_x": 0, "half_y": 0 }, "direction": 0, "recipe": null, "half_size": { "half_x": 2, "half_y": 2 } },
             { "role": "furnace", "entity": "stone-furnace",
-              "offset": { "half_x": 1, "half_y": 5 }, "direction": 0, "recipe": item, "half_size": { "half_x": 2, "half_y": 2 } }
+              "offset": { "half_x": 0, "half_y": 4 }, "direction": 0, "recipe": item, "half_size": { "half_x": 2, "half_y": 2 } }
         ],
         "ports": [
             { "id": "belt-input", "mode": "BeltInput", "item": ore,
               "offset": { "half_x": -2, "half_y": 0 }, "direction": 12 },
             { "id": "inventory-output", "mode": "InventoryOutput", "item": item,
-              "offset": { "half_x": 1, "half_y": 7 }, "direction": 0 }
+              "offset": { "half_x": 0, "half_y": 6 }, "direction": 0 }
         ],
         "bill": { "burner-mining-drill": 1, "stone-furnace": 1 },
         "operation": {

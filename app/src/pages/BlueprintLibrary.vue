@@ -175,18 +175,22 @@ function svgArrowPoints(dir: number, entity: string, cx: number, cy: number): st
 
 function tiledViewBox(design: ModuleDesign, tiles: number): string {
   const stepY = tileStepY(design);
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  let factMinY = Infinity, factMaxY = -Infinity;
+  let minX = Infinity, maxX = -Infinity;
   for (const p of design.parts) {
     const half = entityHalfSize(p);
     minX = Math.min(minX, p.offset.half_x - half.hw);
-    const topY = p.offset.half_y - half.hh;
-    const botY = p.offset.half_y + half.hh + (tiles - 1) * stepY;
-    minY = Math.min(minY, topY);
-    maxY = Math.max(maxY, botY);
+    const southEdge = p.offset.half_y - half.hh;
+    const northEdge = p.offset.half_y + half.hh;
+    factMinY = Math.min(factMinY, southEdge);
+    factMaxY = Math.max(factMaxY, northEdge);
     maxX = Math.max(maxX, p.offset.half_x + half.hw);
   }
+  const lastSouth = factMinY - (tiles - 1) * stepY;
+  const svgTop = -(factMaxY);
+  const svgBottom = -(lastSouth);
   const pad = 2;
-  return `${minX - pad} ${minY - pad} ${maxX - minX + pad * 2} ${maxY - minY + pad * 2}`;
+  return `${minX - pad} ${svgTop - pad} ${maxX - minX + pad * 2} ${svgBottom - svgTop + pad * 2}`;
 }
 
 /** Vertical spacing (in half-tile units) between tiled copies.

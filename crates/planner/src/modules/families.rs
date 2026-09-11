@@ -64,13 +64,13 @@ fn extract_ore_to_plate(
             entity: "stone-furnace".into(),
             half_size: Some(state.entity_half_size("stone-furnace")),
             // Furnace placed so its south input face sits on the drill's
-            // output tile at y = 2. Furnace centre at (0.5, 2.5) tiles =
-            // offset (1, 5) in half-tiles, covering tile (0, 2)-(1, 3).
+            // output tile at y = 2. Furnace centre at (0, 2) tiles =
+            // offset (0, 4) in half-tiles, covering tile (-1, 1)-(0, 2).
             //
             // The stone-furnace is ~2x2 so it occupies tiles (0,2)-(1,3)
             // which overlaps the drill's output tile (0,2). Items pass
             // directly from drill to furnace without an inserter.
-            offset: Offset { half_x: 1, half_y: 5 },
+            offset: Offset { half_x: 0, half_y: 4 },
             direction: Direction::North as u8,
             recipe: Some(item.clone()),
             underground_half: None,
@@ -89,7 +89,7 @@ fn extract_ore_to_plate(
             id: "belt-input".into(),
             mode: PortMode::BeltInput,
             item: ore.into(),
-            offset: Offset { half_x: -2, half_y: 0 },
+            offset: Offset { half_x: -3, half_y: 0 },
             direction: Direction::West as u8,
             lane: None,
             maximum: Rate::new(1, 600).unwrap(),

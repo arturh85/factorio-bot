@@ -69,7 +69,7 @@ fn ore_to_plate_design(item: &str, ore: &str) -> Value {
         //   furnace at (0, 4), facing south, 2×2 → input at y=2
         "parts": [
             { "role": "drill", "entity": "burner-mining-drill",
-              "offset": { "half_x": -1, "half_y": 0 }, "direction": 0, "recipe": null,
+              "offset": { "half_x": 0, "half_y": 0 }, "direction": 0, "recipe": null,
               "half_size": hs("burner-mining-drill") },
             { "role": "furnace", "entity": "stone-furnace",
               "offset": { "half_x": 0, "half_y": 4 }, "direction": 0, "recipe": item,

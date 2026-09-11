@@ -42,7 +42,7 @@ use factorio_bot_planner::method::have::registry_for;
 use factorio_bot_planner::standing::{Standing, survivors_of_failure, world_after, world_with};
 use factorio_bot_planner::{
   ActionId, BotId, PlanReport, PlanState, PlannerError, StepKind, Ticks, pick_chain_actor,
-  plan_best,
+  plan_best, plan_best_modules,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -172,6 +172,13 @@ impl Subcommand for ThisCommand {
           .long("steps")
           .action(ArgAction::SetTrue)
           .help("also list every scheduled step, per bot, with its start and end tick"),
+      )
+      .arg(
+        Arg::new("planner-mode")
+          .long("planner-mode")
+          .value_name("mode")
+          .value_parser(["legacy", "modules"])
+          .help("planning engine: legacy (native methods) or modules (module designs) [default: legacy]"),
       )
       .args(standing_args())
   }
@@ -455,6 +462,8 @@ pub(crate) struct Replan {
   pub researched: Vec<String>,
   /// Rounds *after* the first plan. Zero is the plain command.
   pub rounds: u32,
+  /// Which planning engine to use: "legacy" (default) or "modules".
+  pub planner_mode: String,
   /// Only steps a schedule finishes by this tick are applied to the world
   /// before the next round; `None` applies the whole plan.
   pub done_by: Option<Ticks>,
@@ -549,7 +558,10 @@ fn plan_from_dump(
     // clock cannot be the regression guard on a box whose load ranged from 1
     // to 80 in one day.
     let (planned, work) = factorio_bot_core::plan_work::measure(|| {
-      plan_best(&goals, &state, &registry_for(&bots), chain_actor, &bots)
+      match replan.planner_mode.as_str() {
+        "modules" => plan_best_modules(&goals, &state, &registry_for(&bots), chain_actor, &bots),
+        _ => plan_best(&goals, &state, &registry_for(&bots), chain_actor, &bots),
+      }
     });
     let (net, scheduled, _memory) = match planned {
       Ok(plan) => plan,
@@ -873,6 +885,7 @@ fn run(args: &ArgMatches, _context: &mut Context) -> Result<()> {
     done_by: args.get_one::<u32>("done-by").copied(),
     fail: args.get_one::<String>("fail").cloned(),
     dump_standing: args.get_one::<PathBuf>("dump-standing").cloned(),
+    planner_mode: args.get_one::<String>("planner-mode").cloned().unwrap_or_else(|| "legacy".to_string()),
   };
 
   let mut notes = Vec::new();

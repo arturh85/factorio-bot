@@ -390,6 +390,43 @@ pub fn plan_best_compat(
     }
 }
 
+/// Module-mode equivalent of [`plan_best_compat`].
+///
+/// Creates a module planning session with default options and produces
+/// `(ActionNetwork, Schedule, ReplanMemory)` on success.
+/// Falls back to legacy for unsupported goals.
+pub fn plan_best_modules(
+    goals: &[Goal],
+    state: &PlanState,
+    registry: &MethodRegistry,
+    chain_actor: BotId,
+    roster: &[BotId],
+) -> Result<(ActionNetwork, Schedule, ReplanMemory), PlannerError> {
+    let control = PlanControl::new(BudgetLimits {
+        maxima: std::collections::BTreeMap::from([(WorkKind::Retry, 1)]),
+    });
+    let state = state.clone().with_control(control.clone());
+    let mut session = crate::modules::compile::PlannerSession::new();
+    let options = crate::modules::compile::PlannerOptions {
+        mode: crate::modules::compile::PlannerMode::Modules,
+        cache_mode: crate::modules::compile::CacheMode::On,
+        candidate_limit: 8,
+        support_ticks: 18000,
+    };
+
+    let result = crate::modules::compile::plan_with_session(
+        goals, &state, registry, chain_actor, roster, &control, &options, &mut session,
+    );
+
+    match (result.incumbent, result.diagnostic) {
+        (Some(milestone), _) => Ok((milestone.net, milestone.schedule, milestone.memory)),
+        (None, Some(err)) => Err(err),
+        (None, None) => Err(PlannerError::PlanningStopped {
+            reason: "no plan could be built".to_string(),
+        }),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

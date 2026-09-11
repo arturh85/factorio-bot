@@ -28,7 +28,7 @@ mod test_world;
 
 pub use action::{Action, ActionKind, Actor, Condition, Effect, InventorySlot};
 pub use control::{BudgetLimits, BudgetReport, PlanControl, PlanPhase, StopReason, WorkKind};
-pub use request::{PlanResult, PlanStatus, PlannedMilestone, plan_controlled};
+pub use request::{PlanResult, PlanStatus, PlannedMilestone, plan_controlled, plan_best_modules};
 pub use error::PlannerError;
 pub use goal::{Goal, Holder, Site};
 pub use ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGen, ItemId, Ticks};

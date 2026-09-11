@@ -8,6 +8,8 @@ use crate::cli::{Subcommand, SubcommandCallback};
 use crate::context::Context;
 use crate::experiment::{manifest::Manifest, report::{compare, write_report}};
 use clap::{Arg, ArgMatches, Command, value_parser};
+use std::path::PathBuf;
+
 use factorio_bot_core::miette::{IntoDiagnostic, Result, miette};
 /// Build the experiment subcommand.
 pub fn build() -> Box<dyn Subcommand> {
@@ -126,7 +128,7 @@ fn run_offline(args: &ArgMatches) -> Result<()> {
     let manifest_json = std::fs::read_to_string(manifest_path)
         .into_diagnostic()
         .map_err(|e| miette!("failed to read manifest: {e}"))?;
-    let _manifest: crate::experiment::manifest::Manifest = factorio_bot_core::serde_json::from_str(&manifest_json)
+    let manifest: Manifest = factorio_bot_core::serde_json::from_str(&manifest_json)
         .into_diagnostic()
         .map_err(|e| miette!("failed to parse manifest: {e}"))?;
 
@@ -231,11 +233,11 @@ fn parse_trials_csv(content: &str) -> Result<Vec<crate::experiment::runner::Tria
     use crate::experiment::runner::{TrialOutcome, TrialResult};
 
     let mut results = Vec::new();
-    for (line_no, _line) in content.lines().enumerate() {
-        if line_no == 0 || line.trim().is_empty() {
+    for (line_no, line_str) in content.lines().enumerate() {
+        if line_no == 0 || line_str.trim().is_empty() {
             continue; // header or empty
         }
-        let parts: Vec<&str> = line.split(',').collect();
+        let parts: Vec<&str> = line_str.split(',').collect();
         if parts.len() < 7 {
             return Err(miette!("CSV line {} has {} fields (expected >= 7)", line_no + 1, parts.len()));
         }

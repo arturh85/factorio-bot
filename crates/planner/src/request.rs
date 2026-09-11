@@ -410,7 +410,7 @@ pub fn plan_best_modules(
     let options = crate::modules::compile::PlannerOptions {
         mode: crate::modules::compile::PlannerMode::Modules,
         cache_mode: crate::modules::compile::CacheMode::On,
-        candidate_limit: 8,
+        candidate_limit: 1,
         support_ticks: 18000,
     };
 

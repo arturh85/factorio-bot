@@ -61,7 +61,7 @@ fn extract_ore_to_plate(
             // Furnace is 3 tiles north of the drill (in half-tile offset).
             // The drill is 3x3 (mining-drill) and the furnace is ~2x2, so
             // they need at least 1.5 + 0.7 = 2.2 tiles gap. 3 tiles works.
-            offset: Offset { half_x: 0, half_y: 8 },
+            offset: Offset { half_x: 0, half_y: 10 },
             direction: Direction::North as u8,
             recipe: Some(item.clone()),
             underground_half: None,
@@ -90,7 +90,7 @@ fn extract_ore_to_plate(
             id: "inventory-output".into(),
             mode: PortMode::InventoryOutput,
             item: item.clone(),
-            offset: Offset { half_x: 0, half_y: 8 },
+            offset: Offset { half_x: 0, half_y: 10 },
             direction: Direction::North as u8,
             lane: None,
             maximum: Rate::new(1, 600).unwrap(),
@@ -101,8 +101,8 @@ fn extract_ore_to_plate(
     let required_clearance = vec![
         Offset { half_x: -3, half_y: -1 },
         Offset { half_x: 3, half_y: -1 },
-        Offset { half_x: -3, half_y: 7 },
-        Offset { half_x: 3, half_y: 7 },
+        Offset { half_x: -3, half_y: 9 },
+        Offset { half_x: 3, half_y: 9 },
     ];
 
     // Precedence: drill must be placed before furnace (furnace may go
@@ -218,7 +218,7 @@ fn extract_red_science(
             mode: PortMode::InventoryOutput,
             item: item.clone(),
             // Output to the north
-            offset: Offset { half_x: 0, half_y: 4 },
+            offset: Offset { half_x: 0, half_y: 5 },
             direction: Direction::North as u8,
             lane: None,
             maximum: Rate::new(1, 180).unwrap(),

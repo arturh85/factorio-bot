@@ -31,7 +31,7 @@ pub fn extract_design(
 }
 
 fn extract_ore_to_plate(
-    _state: &PlanState,
+    state: &PlanState,
     parameters: &ModuleParameters,
 ) -> Result<ModuleDesign, ModuleError> {
     let item = &parameters.item;
@@ -50,6 +50,7 @@ fn extract_ore_to_plate(
         Part {
             role: "drill".into(),
             entity: "burner-mining-drill".into(),
+            half_size: Some(state.entity_half_size("burner-mining-drill")),
             // Drill at origin, facing north. Its output emerges on the
             // tile immediately north of its north face (at y = 1.0 tiles
             // from centre, since burner-mining-drill is 2x2).
@@ -61,6 +62,7 @@ fn extract_ore_to_plate(
         Part {
             role: "furnace".into(),
             entity: "stone-furnace".into(),
+            half_size: Some(state.entity_half_size("stone-furnace")),
             // Furnace placed so its south input face sits on the drill's
             // output tile at y = 2. Furnace centre at (0.5, 2.5) tiles =
             // offset (1, 5) in half-tiles, covering tile (0, 2)-(1, 3).
@@ -167,7 +169,7 @@ fn extract_ore_to_plate(
 
 
 fn extract_red_science(
-    _state: &PlanState,
+    state: &PlanState,
     _parameters: &ModuleParameters,
 ) -> Result<ModuleDesign, ModuleError> {
     let item = "automation-science-pack".to_string();
@@ -181,6 +183,7 @@ fn extract_red_science(
             role: "assembler".into(),
             entity: "assembling-machine-1".into(),
             offset: Offset { half_x: 0, half_y: 0 },
+            half_size: Some(state.entity_half_size("assembling-machine-1")),
             direction: Direction::North as u8,
             recipe: Some(item.clone()),
             underground_half: None,

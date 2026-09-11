@@ -3427,6 +3427,22 @@ impl PlanState {
         }
     }
 
+    /// Half-size in half-tile units of `name`'s visual footprint,
+    /// derived from the game prototype's collision box.
+    ///
+    /// E.g. a 2×2 tile entity returns `Offset { half_x: 2, half_y: 2 }`.
+    /// For an unknown prototype, falls back to 2×2.
+    pub fn entity_half_size(&self, name: &str) -> crate::modules::artifact::Offset {
+        match self.base.globals.entity_prototypes.get(name) {
+            Some(proto) => {
+                let hw = (proto.collision_box.right_bottom.x - proto.collision_box.left_top.x).ceil() as i32;
+                let hh = (proto.collision_box.right_bottom.y - proto.collision_box.left_top.y).ceil() as i32;
+                crate::modules::artifact::Offset { half_x: hw, half_y: hh }
+            }
+            None => crate::modules::artifact::Offset { half_x: 2, half_y: 2 },
+        }
+    }
+
     /// Is `name` a machine that has to stand **on** a resource to work?
     ///
     /// **This is a question about the machine, not about the ground, and it

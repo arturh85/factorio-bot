@@ -144,7 +144,7 @@ onMounted(async () => {
 
 /** Compute bounding box of all parts in half-tile units. */
 
-function entityHalfSize(entity: string): {hw: number, hh: number} {
+function entityHalfSize(part: Part): {hw: number, hh: number} {
   // Collision-box half-sizes measured from live Factorio 2.1.17 prototypes.
   const sizes: Record<string, {hw: number, hh: number}> = {
     'burner-mining-drill': {hw: 2, hh: 2},   // 2×2 tiles (not 3×3)
@@ -153,11 +153,11 @@ function entityHalfSize(entity: string): {hw: number, hh: number} {
     'inserter':           {hw: 1, hh: 1},    // 1×1 tile
     'assembling-machine-1': {hw: 2, hh: 2}
   };
-  return sizes[entity] ?? {hw: 2, hh: 2};
+  return sizes[part.entity] ?? {hw: 2, hh: 2};
 }
 
 function svgArrowPoints(dir: number, entity: string, cx: number, cy: number): string {
-  const half = entityHalfSize(entity);
+  const half = entityHalfSize({ entity: entity } as Part);
   // Arrow triangle inside the entity, pointing in the facing direction.
   // Base is at the entity centre, tip at ~60% toward the facing edge.
   const tip = 0.6;
@@ -177,7 +177,7 @@ function tiledViewBox(design: ModuleDesign, tiles: number): string {
   const stepY = tileStepY(design);
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const p of design.parts) {
-    const half = entityHalfSize(p.entity);
+    const half = entityHalfSize(p);
     minX = Math.min(minX, p.offset.half_x - half.hw);
     const topY = p.offset.half_y - half.hh;
     const botY = p.offset.half_y + half.hh + (tiles - 1) * stepY;
@@ -194,7 +194,7 @@ function tiledViewBox(design: ModuleDesign, tiles: number): string {
 function tileStepY(design: ModuleDesign): number {
   let minY = Infinity, maxY = -Infinity;
   for (const p of design.parts) {
-    const half = entityHalfSize(p.entity);
+    const half = entityHalfSize(p);
     minY = Math.min(minY, p.offset.half_y - half.hh);
     maxY = Math.max(maxY, p.offset.half_y + half.hh);
   }
@@ -283,10 +283,10 @@ function entityLabel(entity: string): string {
               <g v-for="i in (tileCount[design.id] || 1)" :key="'tile-' + i"
                  :transform="'translate(0, ' + (-(i-1) * tileStepY(design)) + ')'">
                 <g v-for="part in design.parts" :key="part.role">
-                  <rect :x="part.offset.half_x - entityHalfSize(part.entity).hw"
-                        :y="-(part.offset.half_y + entityHalfSize(part.entity).hh)"
-                        :width="entityHalfSize(part.entity).hw * 2"
-                        :height="entityHalfSize(part.entity).hh * 2"
+                  <rect :x="part.offset.half_x - entityHalfSize(part).hw"
+                        :y="-(part.offset.half_y + entityHalfSize(part).hh)"
+                        :width="entityHalfSize(part).hw * 2"
+                        :height="entityHalfSize(part).hh * 2"
                         rx="0.3"
                         :fill="colorForEntityType(part.entity)"
                         stroke="#374151" stroke-width="0.2"/>

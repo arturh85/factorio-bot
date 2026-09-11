@@ -135,6 +135,8 @@ pub struct Part {
     pub direction: u8,
     pub recipe: Option<String>,
     pub underground_half: Option<UndergroundHalf>,
+    /// Half-size of the entity's collision-box footprint in half-tile units.
+    pub half_size: Option<Offset>,
 }
 
 // ---------------------------------------------------------------------------

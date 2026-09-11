@@ -99,67 +99,46 @@ function svgArrowPoints(dir: number, hw: number, hh: number, cx: number, cy: num
   const spread = 0.5;
   const dirs: Record<number, [number, number, number, number, number, number]> = {
     0: [0, -tip * hh * 2, spread * hw, -base * hh * 2, -spread * hw, -base * hh * 2],
-    2: [tip * hw * 2, 0, base * hw * 2, -spread * hh, base * hw * 2, spread * hh],
-    4: [0, tip * hh * 2, spread * hw, base * hh * 2, -spread * hw, base * hh * 2],
-    6: [-tip * hw * 2, 0, -base * hw * 2, -spread * hh, -base * hw * 2, spread * hh]
+    4: [tip * hw * 2, 0, base * hw * 2, -spread * hh, base * hw * 2, spread * hh],
+    8: [0, tip * hh * 2, -spread * hw, base * hh * 2, spread * hw, base * hh * 2],
+    12: [tip * hw * 2, 0, base * hw * 2, -spread * hh, base * hw * 2, spread * hh]
   };
   const pts = dirs[dir] ?? [0, -hh];
   return `${cx + pts[0]},${cy + pts[1]} ${cx + pts[2]},${cy + pts[3]} ${cx + pts[4]},${cy + pts[5]}`;
 }
 
 function tiledViewBox(design: ModuleDesign, tiles: number): string {
-  const stepY = tileStepY(design);
-  let factMinY = Infinity, factMaxY = -Infinity;
-  let minX = Infinity, maxX = -Infinity;
-  for (const p of design.parts) {
-    const half = entityHalfSize(p);
-    minX = Math.min(minX, p.offset.half_x - half.hw);
-    const southEdge = p.offset.half_y - half.hh;
-    const northEdge = p.offset.half_y + half.hh;
-    factMinY = Math.min(factMinY, southEdge);
-    factMaxY = Math.max(factMaxY, northEdge);
-    maxX = Math.max(maxX, p.offset.half_x + half.hw);
-  }
-  const lastSouth = factMinY - (tiles - 1) * stepY;
-  const svgTop = -(factMaxY);
+  const bounds = designBounds(design);
+  const stepY = bounds.maxY - bounds.minY;
+  const lastSouth = bounds.minY - (tiles - 1) * stepY;
+  const svgTop = -(bounds.maxY);
   const svgBottom = -(lastSouth);
   const pad = 2;
-  return `${minX - pad} ${svgTop - pad} ${maxX - minX + pad * 2} ${svgBottom - svgTop + pad * 2}`;
+  return `${bounds.minX - pad} ${svgTop - pad} ${bounds.maxX - bounds.minX + pad * 2} ${svgBottom - svgTop + pad * 2}`;
 }
 
-/** Vertical spacing (in half-tile units) between tiled copies.
- *  Cell extent from lowest bottom edge to highest top edge, plus a 1-tile gap. */
 function viewBoxOriginX(design: ModuleDesign): number {
-  let minX = Infinity;
-  for (const p of design.parts) {
-    const half = entityHalfSize(p);
-    minX = Math.min(minX, p.offset.half_x - half.hw);
-  }
-  return minX - 2;  // same padding as tiledViewBox
+  return designBounds(design).minX - 2;
 }
 
 function viewBoxOriginY(design: ModuleDesign): number {
-  let factMinY = Infinity, factMaxY = -Infinity;
-  for (const p of design.parts) {
-    const half = entityHalfSize(p);
-    const southEdge = p.offset.half_y - half.hh;
-    const northEdge = p.offset.half_y + half.hh;
-    factMinY = Math.min(factMinY, southEdge);
-    factMaxY = Math.max(factMaxY, northEdge);
-  }
-  return -(factMaxY) - 2;
+  return -(designBounds(design).maxY) - 2;
 }
 
 function tileStepY(design: ModuleDesign): number {
-  let minY = Infinity, maxY = -Infinity;
+  return designBounds(design).maxY - designBounds(design).minY;
+}
+
+function designBounds(design: ModuleDesign): {minX: number, maxX: number, minY: number, maxY: number} {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   for (const p of design.parts) {
     const half = entityHalfSize(p);
+    minX = Math.min(minX, p.offset.half_x - half.hw);
+    maxX = Math.max(maxX, p.offset.half_x + half.hw);
     minY = Math.min(minY, p.offset.half_y - half.hh);
     maxY = Math.max(maxY, p.offset.half_y + half.hh);
   }
-  // Cell height, no gap — these are hand-fed starter cells with no
-  // belt connections between tiles.
-  return (maxY - minY);
+  return {minX, maxX, minY, maxY};
 }
 
 function scaledBill(bill: Record<string, number>, tiles: number): Record<string, number> {
@@ -183,6 +162,11 @@ function ticksToMinutes(ticks: number): string {
   return (ticks / 3600).toFixed(1) + ' min';
 }
 
+function hasArrow(role: string): boolean {
+  return role !== 'furnace' && role !== 'power-pole' && role !== 'pumpjack'
+      && role !== 'assembler' && !role.includes('drill');
+}
+
 function entityLabel(entity: string): string {
   return entity.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
@@ -192,7 +176,7 @@ function entityLabel(entity: string): string {
   <div class="mx-auto max-w-5xl p-6">
     <h1 class="mb-2 text-2xl font-bold">Blueprint Library</h1>
     <p class="mb-8 text-gray-500">
-      Reusable factory module designs. Each card shows the entity layout, bill of materials, rates, and a tiling slider to preview how the cell expands.
+      Module designs from the planner. Each card shows the layout, bill of materials, rates, and a tiling slider.
     </p>
 
     <div class="grid gap-8">
@@ -253,8 +237,8 @@ function entityLabel(entity: string): string {
                         font-weight="bold">{{ entityLabel(part.role) }}</text>
                   <text v-if="part.role === 'furnace'" :x="part.offset.half_x" :y="-(part.offset.half_y) + 3.5"
                         text-anchor="middle" font-size="0.35" fill="#fbbf24" font-weight="bold">hand</text>
-                  <polygon v-if="part.role !== 'furnace' && part.role !== 'power-pole' && part.role !== 'pumpjack' && !part.role.includes('drill')"
-                           :points="svgArrowPoints(part.direction, entityHalfSize(part).hw, entityHalfSize(part).hh, part.offset.half_x, part.offset.half_y)"
+                  <polygon v-if="hasArrow(part.role)"
+                           :points="svgArrowPoints(part.direction, entityHalfSize(part).hw, entityHalfSize(part).hh, part.offset.half_x, -part.offset.half_y)"
                            fill="#fbbf24" opacity="0.7"/>
                 </g>
               </g>
@@ -295,7 +279,7 @@ function entityLabel(entity: string): string {
               <span class="ml-1 font-mono">{{ ((design.operation.power_watts * (tileCount[design.id] || 1)) / 1000).toFixed(0) }} kW</span>
             </div>
 
-            <div>
+            <div v-if="design.operation.startup_items.coal">
               <span class="font-medium text-gray-600">Hand feed</span>
               <span class="ml-1 text-gray-500 text-xs">— place and fuel each cell by hand; collect plates from the furnace output</span>
             </div>

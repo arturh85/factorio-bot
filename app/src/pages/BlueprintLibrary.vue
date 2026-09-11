@@ -253,7 +253,7 @@ function entityLabel(entity: string): string {
                         font-weight="bold">{{ entityLabel(part.role) }}</text>
                   <text v-if="part.role === 'furnace'" :x="part.offset.half_x" :y="-(part.offset.half_y) + 3.5"
                         text-anchor="middle" font-size="0.35" fill="#fbbf24" font-weight="bold">hand</text>
-                  <polygon v-if="part.role !== 'furnace'"
+                  <polygon v-if="part.role !== 'furnace' && part.role !== 'power-pole' && part.role !== 'pumpjack' && !part.role.includes('drill')"
                            :points="svgArrowPoints(part.direction, entityHalfSize(part).hw, entityHalfSize(part).hh, part.offset.half_x, part.offset.half_y)"
                            fill="#fbbf24" opacity="0.7"/>
                 </g>

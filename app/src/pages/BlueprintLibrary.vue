@@ -166,7 +166,7 @@ function designLabel(design: ModuleDesign): string {
   const labels: Record<string, string> = {
     'assembler-1i1o': '1-Input Assembler Cell',
     'assembler-2i1o': '2-Input Assembler Cell',
-    'red-science-cell': '2-Input Assembler Cell (Red Science)',
+    'assembler-2i1o': '2-Input Assembler Cell',
     'assembler-3i1o': '3-Input Assembler Cell',
     'ore-to-plate-iron': 'Iron Ore-to-Plate Cell',
     'ore-to-plate-copper': 'Copper Ore-to-Plate Cell',

@@ -128,8 +128,8 @@ fn pumpjack_design() -> Value {
 fn red_science_design() -> Value {
     let hw = |name: &str| -> Value { PROTO_SIZES.half_size(name) };
     serde_json::json!({
-        "schema":1,"id":"red-science-cell","family":"RedScience",
-        "parameters":{"item":"automation-science-pack","with_pole":false,"labs":0},
+        "schema":1,"id":"assembler-2i1o","family":"AssemblerCell",
+        "parameters":{"item":"any","with_pole":true,"labs":0},
         "parts":[
             {"role":"gear-belt","entity":"transport-belt",
              "offset":{"half_x":-9,"half_y":-2},"direction":0,"recipe":null,
@@ -323,7 +323,7 @@ fn one_input_assembler_design() -> Value {
              "offset":{"half_x":-3,"half_y":0},"direction":12,"recipe":null,
              "half_size":hw("inserter")},
             {"role":"power-pole","entity":"small-electric-pole",
-             "offset":{"half_x":-3,"half_y":2},"direction":0,"recipe":null,
+             "offset":{"half_x":-3,"half_y":-4},"direction":0,"recipe":null,
              "half_size":hw("small-electric-pole")},
             {"role":"assembler","entity":"assembling-machine-1",
              "offset":{"half_x":-1,"half_y":0},"direction":4,"recipe":null,

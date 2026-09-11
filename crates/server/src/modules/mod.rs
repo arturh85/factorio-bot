@@ -160,7 +160,7 @@ fn red_science_design() -> Value {
              "half_size":hw("inserter")},
             {"role":"assembler","entity":"assembling-machine-1",
              "offset":{"half_x":-1,"half_y":0},"direction":4,
-             "recipe":"automation-science-pack",
+             "recipe":"output",
              "half_size":hw("assembling-machine-1")},
             {"role":"out-inserter","entity":"inserter",
              "offset":{"half_x":3,"half_y":0},"direction":12,"recipe":null,
@@ -176,22 +176,22 @@ fn red_science_design() -> Value {
              "half_size":hw("transport-belt")}
         ],
         "ports":[
-            {"id":"input-gears","mode":"BeltInput","item":"iron-gear-wheel",
+            {"id":"input1","mode":"BeltInput","item":"item1",
              "offset":{"half_x":-10,"half_y":-2},"direction":4},
-            {"id":"input-copper","mode":"BeltInput","item":"copper-plate",
+            {"id":"input2","mode":"BeltInput","item":"item2",
              "offset":{"half_x":-8,"half_y":-2},"direction":4},
-            {"id":"output","mode":"InventoryOutput","item":"automation-science-pack",
+            {"id":"output","mode":"InventoryOutput","item":"output",
              "offset":{"half_x":6,"half_y":2},"direction":0}
         ],
-        "bill":{"assembling-machine-1":1,"inserter":2,
-                "transport-belt":9,"small-electric-pole":1},
+        "bill":{"assembling-machine-1":1,"long-handed-inserter":1,
+                "inserter":1,"transport-belt":9,"small-electric-pole":1},
         "operation":{
-            "inputs":{"copper-plate":{"numerator":1,"ticks":180},
-                      "iron-gear-wheel":{"numerator":1,"ticks":180}},
-            "outputs":{"automation-science-pack":{"numerator":1,"ticks":180}},
+            "inputs":{"item1":{"numerator":1,"ticks":60},
+                      "item2":{"numerator":1,"ticks":60}},
+            "outputs":{"output":{"numerator":1,"ticks":60}},
             "power_watts":90000,"fuel_per_tick":{},
-            "startup_latency_ticks":180,
-            "startup_items":{"copper-plate":5,"iron-gear-wheel":5},
+            "startup_latency_ticks":60,
+            "startup_items":{},
             "required_research":["automation"],"required_surface":"nauvis"
         }
     })

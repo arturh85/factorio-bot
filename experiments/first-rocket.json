@@ -1,0 +1,268 @@
+{
+  "schema": 1,
+  "name": "first-rocket",
+  "description": "First rocket module chain: complete milestone from burner setup to rocket launch",
+  "seeds": [
+    31337,
+    104729,
+    130363
+  ],
+  "bots": [
+    4
+  ],
+  "stages": 10,
+  "rocket_parts_required": 50,
+  "policy_hash": {
+    "stages": [
+      {
+        "id": 1,
+        "name": "burner-mining-and-smelting",
+        "deadline_ticks": 36000,
+        "iron_target": 4,
+        "copper_target": 2
+      },
+      {
+        "id": 2,
+        "name": "burner-expansion-iron",
+        "deadline_ticks": 54000,
+        "iron_target": 8,
+        "copper_target": 4
+      },
+      {
+        "id": 3,
+        "name": "burner-expansion-copper",
+        "deadline_ticks": 72000,
+        "iron_target": 12,
+        "copper_target": 6
+      },
+      {
+        "id": 4,
+        "name": "coal-power",
+        "deadline_ticks": 86400
+      },
+      {
+        "id": 5,
+        "name": "automation-science",
+        "deadline_ticks": 108000,
+        "prerequisites": [
+          "automation"
+        ]
+      },
+      {
+        "id": 6,
+        "name": "logistics-science",
+        "deadline_ticks": 144000,
+        "prerequisites": [
+          "logistic-robotics",
+          "logistic-science-pack"
+        ]
+      },
+      {
+        "id": 7,
+        "name": "oil-processing",
+        "deadline_ticks": 180000,
+        "prerequisites": [
+          "oil-processing"
+        ]
+      },
+      {
+        "id": 8,
+        "name": "rocket-prerequisites",
+        "prerequisites": [
+          "advanced-material-processing-2",
+          "rocket-fuel",
+          "low-density-structure"
+        ]
+      },
+      {
+        "id": 9,
+        "name": "rocket-silo",
+        "prerequisites": [
+          "rocket-silo"
+        ]
+      },
+      {
+        "id": 10,
+        "name": "launch"
+      }
+    ],
+    "rocket_parts_required": 50,
+    "starter_pack": {
+      "foundation": 60,
+      "steel": 20,
+      "processing_units": 20
+    },
+    "foundation_cost": {
+      "steel": 20,
+      "copper_cable": 20
+    },
+    "total_payload_steel": 1220,
+    "total_payload_cable": 1200,
+    "rocket_part_ingredients": {
+      "processing_unit": 1,
+      "low_density_structure": 1,
+      "rocket_fuel": 1
+    },
+    "default_bots": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "preferred_roles": {
+      "builders": [
+        1,
+        2
+      ],
+      "acquisition_support": [
+        3
+      ],
+      "scout": [
+        4
+      ]
+    }
+  },
+  "recipe_preferences": {
+    "smelting": [
+      "stone-furnace",
+      "steel-furnace"
+    ],
+    "crafting": [
+      "assembling-machine-1",
+      "assembling-machine-2"
+    ],
+    "oil": [
+      "oil-refinery",
+      "chemical-plant"
+    ],
+    "rocket": [
+      "rocket-silo"
+    ]
+  },
+  "row_variants": {
+    "smelting": [
+      "single-row",
+      "double-row",
+      "electric"
+    ],
+    "science": [
+      "single-assembler",
+      "dual-assembler"
+    ],
+    "oil": [
+      "basic-refinery",
+      "advanced-refinery"
+    ]
+  },
+  "copy_budgets": {
+    "initial_drills": 2,
+    "furnace_pairs": 2,
+    "assembler_copies": 1,
+    "refinery_limit": 1,
+    "silo_limit": 1
+  },
+  "deadlines": {
+    "stage_1_tick": 36000,
+    "stage_4_tick": 86400,
+    "stage_7_tick": 180000,
+    "total_ticks": 216000,
+    "support_ticks": 18000
+  },
+  "support_horizon": {
+    "coal_support_ticks": 18000,
+    "rocket_fuel_buffer": 50,
+    "parts_buffer": 10
+  },
+  "research_priorities": [
+    {
+      "branch": 1,
+      "techs": [
+        "automation",
+        "electronics",
+        "steam-power"
+      ]
+    },
+    {
+      "branch": 2,
+      "techs": [
+        "logistics",
+        "automation-science-pack",
+        "logistic-science-pack"
+      ]
+    },
+    {
+      "branch": 3,
+      "techs": [
+        "engine",
+        "advanced-material-processing",
+        "advanced-material-processing-2",
+        "oil-processing"
+      ]
+    },
+    {
+      "branch": 4,
+      "techs": [
+        "plastics",
+        "chemical-science-pack",
+        "fluid-handling",
+        "sulfur-processing"
+      ]
+    },
+    {
+      "branch": 5,
+      "techs": [
+        "production-science-pack",
+        "utility-science-pack"
+      ]
+    },
+    {
+      "branch": 6,
+      "techs": [
+        "rocket-fuel",
+        "low-density-structure",
+        "rocket-silo"
+      ]
+    },
+    {
+      "branch": 7,
+      "techs": [
+        "space-platform",
+        "space-science-pack"
+      ]
+    }
+  ],
+  "materials": {
+    "foundation_cost": {
+      "steel": 20,
+      "copper_cable": 20
+    },
+    "payload_requirements": {
+      "steel": 1220,
+      "copper_cable": 1200,
+      "foundation": 60,
+      "processing_units": 20
+    },
+    "per_rocket_part": {
+      "processing_unit": 1,
+      "low_density_structure": 1,
+      "rocket_fuel": 1
+    }
+  },
+  "rate_export_distinction": {
+    "sustained_production": "flow_evidence_observed",
+    "peak_rate": "lab_capacity_packs_per_min",
+    "export": "manifest_written"
+  },
+  "surface": "nauvis",
+  "peaceful": false,
+  "visibility": "explored-only",
+  "game_speed": 10,
+  "pause_during_planning": true,
+  "game_tick_limit": 216000,
+  "trial_wall_seconds": 3600,
+  "planning_deadline_ms": 300000,
+  "candidate_limit": 8,
+  "support_ticks": 18000,
+  "reset_policy": "same-prepared-save-per-case",
+  "sink_policy": "available-research-by-name"
+}

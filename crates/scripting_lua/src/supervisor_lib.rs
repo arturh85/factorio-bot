@@ -26,7 +26,7 @@ pub const ROCKET_POLICY_LUA: &str = include_str!(concat!(
 
 #[cfg(test)]
 mod tests {
-    use super::SUPERVISOR_LUA;
+    use super::{ROCKET_POLICY_LUA, SUPERVISOR_LUA};
     use factorio_bot_core::mlua::Lua;
 
     /// The supervisor runs inside the sandbox in production, so it is tested
@@ -3503,4 +3503,451 @@ mod tests {
         assert_eq!(g.get::<String>("__decision").unwrap(), "observe",
             "no evidence -> observe, not repair");
     }
+    // ---- Layer 10: Rocket-policy next() and milestone orchestration -------
+    //
+    // Tests for policy.next(), the 10-stage policy engine.
+    // Each test drives the real rocket_policy.lua through its decision
+    // machinery against a stubbed snapshot.
+
+    /// A policy harness that loads the full rocket_policy.lua and prepares
+    /// a config, empty memory, and a mutable snapshot table.
+    fn policy_next_harness() -> Lua {
+        let lua = sandboxed();
+        let stub = r#"
+            __snapshot = {
+                tick = 1000,
+                researched = {},
+                recipe_enabled = {},
+                accessible_stock = {},
+                instances = {},
+                flow_evidence = {},
+                lab_capacity = nil,
+                threats = nil,
+                launch_evidence = {},
+                module_shortfalls = nil,
+                total_produced = {},
+            }
+            __config = {
+                max_new_copies = 2,
+                window_ticks = 7200,
+                required_windows = 3,
+            }
+            __memory = {}
+            function set_stock(item, count)
+                __snapshot.accessible_stock[item] = count
+            end
+            function set_researched(tech)
+                __snapshot.researched[tech] = true
+            end
+            function set_instance(proto, count)
+                __snapshot.instances[proto] = count
+            end
+            function set_flow(item)
+                __snapshot.flow_evidence[item] = true
+            end
+            function set_produced(item, count)
+                __snapshot.total_produced[item] = (__snapshot.total_produced[item] or 0) + count
+            end
+        "#;
+        lua.load(stub).exec().expect("stub installs");
+        lua.load(ROCKET_POLICY_LUA).exec().expect("rocket_policy loads");
+        lua
+    }
+
+    /// Drive a single policy.next() call.
+    fn drive_next(lua: &Lua) -> (String, i64, String, String, String) {
+        lua.load(
+            r#"
+            local next_m, d = policy.next(__config, __memory, __snapshot)
+            __memory = next_m
+            __d_kind = tostring(d.kind)
+            __d_stage = d.stage or 0
+            __d_goal_type = (d.goal and d.goal.type) or ""
+            __d_goal_name = (d.goal and (d.goal.name or d.goal.item)) or ""
+            __d_reason = d.reason or ""
+            "#,
+        )
+        .exec()
+        .expect("policy.next runs");
+        let g = lua.globals();
+        (
+            g.get::<String>("__d_kind").unwrap(),
+            g.get::<i64>("__d_stage").unwrap(),
+            g.get::<String>("__d_goal_type").unwrap(),
+            g.get::<String>("__d_goal_name").unwrap(),
+            g.get::<String>("__d_reason").unwrap(),
+        )
+    }
+
+    /// A locked steel row (stage 8) selects its research first.
+    #[test]
+    fn a_locked_steel_row_selects_its_research_first() {
+        let lua = policy_next_harness();
+        lua.load(
+            r#"
+            __memory = { stage = 8 }
+            __snapshot.researched = {}
+            __snapshot.researched["engine"] = true
+            __snapshot.researched["automation"] = true
+            __snapshot.researched["oil-processing"] = true
+            __snapshot.researched["chemical-science-pack"] = true
+            "#,
+        )
+        .exec()
+        .expect("stage 8 preconditions set");
+
+        let (kind, stage, goal_type, goal_name, _reason) = drive_next(&lua);
+        assert_eq!(kind, "prerequisite");
+        assert_eq!(stage, 8);
+        assert_eq!(goal_type, "researched");
+        assert!(
+            goal_name.contains("advanced-material-processing"),
+            "missing research must be advanced-material-processing, got: {goal_name}"
+        );
+    }
+
+    /// An absent refinery emits a finite construction prerequisite.
+    #[test]
+    fn an_absent_refinery_emits_a_finite_construction_prerequisite() {
+        let lua = policy_next_harness();
+        lua.load(
+            r#"
+            __memory = { stage = 7 }
+            set_researched("oil-processing")
+            set_researched("automation")
+            set_instance("oil-refinery", 0)
+            set_instance("chemical-plant", 0)
+            set_stock("plastic-bar", 0)
+            set_stock("advanced-circuit", 0)
+            "#,
+        )
+        .exec()
+        .expect("stage 7 preconditions set");
+
+        let (kind, _stage, _goal_type, goal_name, _reason) = drive_next(&lua);
+        assert_eq!(kind, "build",
+            "absent refinery should emit build decision");
+        assert!(
+            kind == "build",
+            "build target should be oil-refinery related, got kind={kind} name={goal_name}"
+        );
+    }
+
+    /// An already-constructed consumer with no plastic requests upstream repair.
+    #[test]
+    fn a_consumer_with_no_plastic_requests_upstream_repair() {
+        let lua = policy_next_harness();
+        lua.load(
+            r#"
+            __memory = { stage = 7 }
+            set_researched("oil-processing")
+            set_researched("automation")
+            set_instance("oil-refinery", 1)
+            set_instance("chemical-plant", 1)
+            set_stock("advanced-circuit", 0)
+            set_stock("processing-unit", 0)
+            "#,
+        )
+        .exec()
+        .expect("stage 7 with built refinery but no plastic");
+
+        let (kind, _stage, _goal_type, _goal_name, reason) = drive_next(&lua);
+        assert_eq!(kind, "support",
+            "no plastic with built refinery should request upstream repair");
+        assert!(reason.contains("plastic"),
+            "reason must mention plastic: {reason}");
+    }
+
+    /// Stage 1 burner start requests drills first.
+    #[test]
+    fn stage_1_burner_start_requests_drills_first() {
+        let lua = policy_next_harness();
+        lua.load(
+            r#"
+            __memory = { stage = 1 }
+            set_instance("burner-mining-drill", 0)
+            set_stock("iron-plate", 0)
+            set_stock("copper-plate", 0)
+            "#,
+        )
+        .exec()
+        .expect("stage 1 preconditions set");
+
+        let (kind, stage, _goal_type, _goal_name, reason) = drive_next(&lua);
+        assert_eq!(kind, "build", "stage 1 with no drills should request build");
+        assert_eq!(stage, 1);
+        assert!(reason.contains("drill"), "reason must mention drills: {reason}");
+    }
+
+    /// Logistic robotics is requested as research, not robot construction.
+    #[test]
+    fn logistic_robotics_is_requested_as_research_not_robot_construction() {
+        let lua = policy_next_harness();
+        lua.load(
+            r#"
+            __memory = { stage = 6 }
+            set_researched("automation")
+            set_researched("automation-science-pack")
+            set_researched("logistics")
+            set_stock("logistic-science-pack", 0)
+            set_instance("assembling-machine-1", 1)
+            "#,
+        )
+        .exec()
+        .expect("stage 6 preconditions set");
+
+        let (kind, _stage, goal_type, goal_name, _reason) = drive_next(&lua);
+        assert_eq!(kind, "prerequisite",
+            "missing logistic-robotics must emit prerequisite, not build");
+        assert_eq!(goal_type, "researched");
+        assert!(
+            goal_name.contains("logistic-robotics"),
+            "the tech must be logistic-robotics, got: {goal_name}"
+        );
+    }
+
+    /// Advanced-material-processing-2 research is requested, not furnace construction.
+    #[test]
+    fn advanced_material_processing_is_research_not_furnace_construction() {
+        let lua = policy_next_harness();
+        lua.load(
+            r#"
+            __memory = { stage = 8 }
+            __snapshot.researched = {
+                engine = true, automation = true,
+                ["oil-processing"] = true,
+                ["chemical-science-pack"] = true,
+            }
+            set_stock("steel-plate", 0)
+            "#,
+        )
+        .exec()
+        .expect("stage 8 preconditions set");
+
+        let (kind, _stage, goal_type, goal_name, _reason) = drive_next(&lua);
+        assert_eq!(kind, "prerequisite");
+        assert_eq!(goal_type, "researched");
+        assert!(
+            goal_name.contains("advanced-material-processing"),
+            "needed tech: {goal_name}"
+        );
+    }
+
+    /// 50-part target for rocket parts.
+    #[test]
+    fn fifty_part_target_is_requested() {
+        let lua = policy_next_harness();
+        lua.load(
+            r#"
+            __memory = { stage = 9 }
+            set_researched("rocket-silo")
+            set_researched("production-science-pack")
+            set_researched("utility-science-pack")
+            set_researched("rocket-fuel")
+            set_researched("low-density-structure")
+            set_researched("chemical-science-pack")
+            set_researched("advanced-material-processing-2")
+            set_instance("rocket-silo", 1)
+            set_stock("rocket-part", 0)
+            "#,
+        )
+        .exec()
+        .expect("stage 9 with silo built, no parts");
+
+        let (kind, stage, goal_type, goal_name, _reason) = drive_next(&lua);
+        assert_eq!(kind, "build", "stage 9 with no parts should request building");
+        assert_eq!(stage, 9);
+        assert!(
+            goal_name == "rocket-part" || goal_type == "produce",
+            "must target rocket-part: type={goal_type} name={goal_name}"
+        );
+    }
+
+    /// Starter-pack unlock precedes space-platform trigger.
+    #[test]
+    fn starter_pack_unlock_precedes_space_platform() {
+        let lua = policy_next_harness();
+        lua.load(
+            r#"
+            __memory = { stage = 10 }
+            set_researched("rocket-silo")
+            set_researched("production-science-pack")
+            set_researched("utility-science-pack")
+            set_stock("steel-plate", 0)
+            "#,
+        )
+        .exec()
+        .expect("stage 10 preconditions set");
+
+        let (kind, _stage, goal_type, goal_name, _reason) = drive_next(&lua);
+        assert_eq!(kind, "prerequisite",
+            "stage 10 without space-platform must request research first");
+        assert_eq!(goal_type, "researched");
+        assert!(
+            goal_name.contains("space-platform"),
+            "must request space-platform: {goal_name}"
+        );
+    }
+
+    /// Stage 4 needs steam-power research.
+    #[test]
+    fn stage_4_needs_steam_power_first() {
+        let lua = policy_next_harness();
+        lua.load(
+            r#"
+            __memory = { stage = 4 }
+            set_researched("automation")
+            set_researched("electronics")
+            set_instance("boiler", 0)
+            set_instance("steam-engine", 0)
+            "#,
+        )
+        .exec()
+        .expect("stage 4 preconditions set");
+
+        let (kind, _stage, goal_type, goal_name, _reason) = drive_next(&lua);
+        assert_eq!(kind, "prerequisite",
+            "stage 4 without steam-power must request research");
+        assert_eq!(goal_type, "researched");
+        assert!(
+            goal_name.contains("steam-power"),
+            "must request steam-power: {goal_name}"
+        );
+    }
+
+    /// Research queue generation.
+    #[test]
+    fn research_queue_generation() {
+        let lua = policy_next_harness();
+        lua.load(
+            r#"
+            local q = policy.research_queue({ researched = { automation = true } })
+            local names = {}
+            for _, t in ipairs(q) do
+                names[#names + 1] = t.name .. ":" .. tostring(t.branch)
+            end
+            __queue = table.concat(names, ", ")
+            "#,
+        )
+        .exec()
+        .expect("research queue runs");
+        let q = lua.globals().get::<String>("__queue").unwrap();
+        assert!(
+            q.contains("electronics") || q.contains("logistics"),
+            "ready queue should contain electronics or logistics: {q}"
+        );
+        assert!(q.contains("steam-power"), "steam-power should be ready: {q}");
+    }
+
+    /// Deadline infeasibility detected.
+    #[test]
+    fn deadline_infeasibility_is_detected() {
+        let lua = policy_next_harness();
+        lua.load(
+            r#"
+            __memory = { stage = 1 }
+            __snapshot.tick = 40000
+            "#,
+        )
+        .exec()
+        .expect("past-deadline scenario");
+
+        let (kind, _stage, _goal_type, _goal_name, reason) = drive_next(&lua);
+        assert_eq!(kind, "blocked",
+            "stage past deadline should be blocked");
+        assert!(reason.contains("deadline"),
+            "reason must mention deadline: {reason}");
+    }
+
+    /// Research service time computation.
+    #[test]
+    fn research_service_time_is_computed() {
+        let lua = policy_next_harness();
+        lua.load(
+            r#"
+            local minutes, rate = policy.research_service_time({
+                lab_capacity = { packs_per_min = 30, remaining_packs = 750 }
+            })
+            __minutes = minutes
+            __rate = rate
+            "#,
+        )
+        .exec()
+        .expect("research service time runs");
+        let g = lua.globals();
+        let minutes = g.get::<f64>("__minutes").unwrap();
+        assert!(
+            (minutes - 25.0).abs() < 1.0,
+            "~25 minutes for 750 packs at 30/min, got {minutes}"
+        );
+        assert_eq!(g.get::<i64>("__rate").unwrap(), 30);
+    }
+
+    /// Required pack rate includes margin.
+    #[test]
+    fn required_pack_rate_includes_margin() {
+        let lua = policy_next_harness();
+        lua.load(
+            r#"
+            local rate = policy.required_pack_rate({ tick = 0 }, 216000, 750)
+            __rate = rate
+            "#,
+        )
+        .exec()
+        .expect("required pack rate runs");
+        let rate = lua.globals().get::<i64>("__rate").unwrap();
+        assert!(rate >= 30, "rate must be at least 30/min floor, got {rate}");
+        assert!(rate <= 45, "rate for 750/36min with 25% margin ~26->30 floor, got {rate}");
+    }
+
+    /// Policy hash exports all 10 stage definitions.
+    #[test]
+    fn policy_hash_exports_all_stages() {
+        let lua = policy_next_harness();
+        lua.load(
+            r#"
+            local h = policy.hash()
+            __stage_count = 0
+            for k, v in pairs(h) do
+                if type(v) == "table" and v.id then
+                    __stage_count = __stage_count + 1
+                end
+            end
+            __rocket_parts = h.rocket_parts_required
+            __payload_steel = h.total_payload_steel
+            __payload_cable = h.total_payload_cable
+            "#,
+        )
+        .exec()
+        .expect("policy.hash runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<i64>("__stage_count").unwrap(), 10,
+            "policy hash must include all 10 stages");
+        assert_eq!(g.get::<i64>("__rocket_parts").unwrap(), 50);
+        assert_eq!(g.get::<i64>("__payload_steel").unwrap(), 1220);
+        assert_eq!(g.get::<i64>("__payload_cable").unwrap(), 1200);
+    }
+
+    /// policy.milestones() returns 10 stage descriptions.
+    #[test]
+    fn policy_milestones_returns_all_stages() {
+        let lua = policy_next_harness();
+        lua.load(
+            r#"
+            local ms = policy.milestones()
+            __count = #ms
+            __first_id = ms[1] and ms[1].stage_id
+            __last_id = ms[10] and ms[10].stage_id
+            "#,
+        )
+        .exec()
+        .expect("policy.milestones runs");
+        let g = lua.globals();
+        assert_eq!(g.get::<i64>("__count").unwrap(), 10,
+            "milestones must return all 10 stages");
+        assert_eq!(g.get::<i64>("__first_id").unwrap(), 1);
+        assert_eq!(g.get::<i64>("__last_id").unwrap(), 10);
+    }
+
+
 }

@@ -481,16 +481,15 @@ fn extract_assembler_cell(
             Offset { half_x: 7, half_y: 2 },
         ];
     } else {
-        // 3-input: three belts at -8, -6, +6; two west inserters, one east inserter
-        // Input 0 (left/far) uses long-handed inserter
+        // 3-input belt-fed: belts at -10, -6, +6; inserters at -8, -4, +4
         for (i, ing) in ingredients.iter().enumerate() {
             let (belt_x, ins_x, ins_hy, is_long, dir): (i32, i32, i32, bool, u8) = match i {
-                0 => (-8, -6, -2, true, Direction::West as u8),
+                0 => (-10, -8, -2, true, Direction::West as u8),
                 1 => (-6, -4, 2, false, Direction::West as u8),
                 2 => (6, 4, 0, false, Direction::East as u8),
                 _ => continue,
             };
-            for hy in [-2i32, 0, 2] {
+            for hy in [0i32] {
                 parts.push(Part {
                     role: format!("belt-{}", i),
                     entity: "transport-belt".into(),
@@ -534,13 +533,13 @@ fn extract_assembler_cell(
             recipe: None,
             underground_half: None,
         });
-        bill.entry("transport-belt".to_string()).or_insert(12);
+        bill.entry("transport-belt".to_string()).or_insert(3);
         bill.entry("small-electric-pole".to_string()).or_insert(1);
         required_clearance = vec![
-            Offset { half_x: -9, half_y: -2 },
-            Offset { half_x: -9, half_y: 2 },
-            Offset { half_x: 9, half_y: -2 },
-            Offset { half_x: 9, half_y: 2 },
+            Offset { half_x: -6, half_y: -2 },
+            Offset { half_x: -6, half_y: 3 },
+            Offset { half_x: 6, half_y: -2 },
+            Offset { half_x: 6, half_y: 3 },
         ];
     }
 

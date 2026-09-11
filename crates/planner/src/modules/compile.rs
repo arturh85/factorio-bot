@@ -273,54 +273,6 @@ fn compile_module_placement(
         }
     }
 
-    // If the design needs electric power, add power plant placement steps.
-    if design.operation.power_watts > 0 {
-        // Simple 1-boiler, 1-engine plant. Place entities at fixed offsets.
-        // The actual water position is handled by the executor at dispatch time.
-        // Anchored at (anchor_x + 9, anchor_y - 3) half-tiles from the module.
-        for (part_role, etype, hx_off, hy_off, facing) in [
-            ("offshore-pump", "offshore-pump", 9, -3, 0u8),
-            ("pipe", "pipe", 10, -3, 0u8),
-            ("boiler", "boiler", 11, -3, 0u8),
-            ("pipe", "pipe", 12, -3, 0u8),
-            ("steam-engine", "steam-engine", 13, -3, 0u8),
-            ("pipe", "pipe", 14, -3, 0u8),
-        ] {
-            let px = anchor_x + hx_off as f64 * 0.5;
-            let py = anchor_y + hy_off as f64 * 0.5;
-            let pos = Position::new(px, py);
-            let entity_for_placement = FactorioEntity {
-                name: etype.to_string(),
-                entity_type: etype.to_string(),
-                position: pos.clone(),
-                direction: facing,
-                recipe: None,
-                ..Default::default()
-            };
-            steps.push(Step::Act(Box::new(Action {
-                id: ids.next(),
-                kind: ActionKind::Place { entity: Box::new(entity_for_placement) },
-                pre: vec![
-                    Condition::AtPosition {
-                        who: crate::action::Actor::Role,
-                        pos: pos.clone(),
-                        radius: 3.0,
-                        min_radius: 0.5,
-                    },
-                    Condition::AreaFree {
-                        pos: pos.clone(),
-                        entity: etype.to_string(),
-                        direction: facing,
-                    },
-                ],
-                eff: vec![],
-                duration: 100,
-                pinned: None,
-                label: format!("place {} for power", etype),
-            })));
-        }
-    }
-
     // For each part with a recipe and an output in the design's contract,
     // add a Remove step to collect the output from the machine.
     for part in &design.parts {
@@ -492,6 +444,35 @@ pub fn plan_with_session(
                 diagnostic: Some(err),
                 budget: control.report(),
             };
+        }
+    }
+
+    // Power: call ensure_powered for each electric module instance.
+    for (design, instance) in selection.designs.iter().zip(selection.instances.iter()) {
+        let kw = design.operation.power_watts as f64 / 1000.0;
+        if kw <= 0.0 { continue; }
+        let site = Position::new(
+            instance.placement.half_x as f64 * 0.5,
+            instance.placement.half_y as f64 * 0.5,
+        );
+        let clearance = &design.required_clearance;
+        let max_hx = clearance.iter().map(|o| o.half_x.abs()).max().unwrap_or(6).abs();
+        let max_hy = clearance.iter().map(|o| o.half_y.abs()).max().unwrap_or(6).abs();
+        let site_area = factorio_bot_core::types::Rect {
+            left_top: Position::new(site.x - max_hx as f64 * 0.5, site.y - max_hy as f64 * 0.5),
+            right_bottom: Position::new(site.x + max_hx as f64 * 0.5, site.y + max_hy as f64 * 0.5),
+        };
+        let occupants: Vec<FactorioEntity> = Vec::new();
+        match crate::method::power::ensure_powered(
+            &mut ctx, "module", &site, &site_area, kw, 20.0, &occupants,
+        ) {
+            Ok(Some(powering)) => {
+                if let Err(e) = run_steps(powering.steps, &mut ctx, &mut net, registry, &mut promised) {
+                    factorio_bot_core::tracing::warn!("power steps failed: {e}");
+                }
+            }
+            Ok(None) => { }
+            Err(e) => { factorio_bot_core::tracing::warn!("power: {e}"); }
         }
     }
 

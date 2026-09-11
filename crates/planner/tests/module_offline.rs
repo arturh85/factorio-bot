@@ -10,8 +10,8 @@ fn module_planner_produces_valid_plan_for_iron_plate() {
     let state = factorio_bot_planner::PlanState::from_world(world, &roster);
     let registry = factorio_bot_planner::registry_for(&roster);
 
-    let chain_actor = factorio_bot_planner::pick_chain_actor(&state, &roster)
-        .expect("should have a chain actor");
+    let chain_actor =
+        factorio_bot_planner::pick_chain_actor(&state, &roster).expect("should have a chain actor");
 
     let result = factorio_bot_planner::plan_best_modules(
         &[factorio_bot_planner::Goal::Have {
@@ -30,8 +30,12 @@ fn module_planner_produces_valid_plan_for_iron_plate() {
         Ok((net, sched, _mem)) => {
             assert!(!sched.steps.is_empty(), "should have scheduled steps");
             let makespan = sched.steps.iter().map(|s| s.end).max().unwrap_or(0);
-            eprintln!("Module plan: {} actions, {} steps, makespan={} ticks",
-                net.actions().count(), sched.steps.len(), makespan);
+            eprintln!(
+                "Module plan: {} actions, {} steps, makespan={} ticks",
+                net.actions().count(),
+                sched.steps.len(),
+                makespan
+            );
         }
         Err(e) => {
             // The fixture world may have pre-existing entities that block
@@ -54,10 +58,18 @@ fn module_redscience_extracts_design() {
             item: "automation-science-pack".into(),
             with_pole: false,
             labs: 0,
+            machine: None,
+            units: None,
         },
-    ).expect("RedScience extraction should succeed");
+    )
+    .expect("RedScience extraction should succeed");
 
     assert_eq!(design.bill.len(), 3);
     assert_eq!(design.operation.outputs.len(), 1);
-    assert!(design.operation.outputs.contains_key("automation-science-pack"));
+    assert!(
+        design
+            .operation
+            .outputs
+            .contains_key("automation-science-pack")
+    );
 }

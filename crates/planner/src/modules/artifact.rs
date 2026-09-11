@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-
 /// SHA-256 content hash of a module design's canonical form.
 pub type DesignId = String;
 
@@ -98,6 +97,10 @@ pub enum KnowledgeOrigin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PortMode {
     BeltInput,
+    BeltOutput,
+    FluidInput,
+    FluidOutput,
+    InventoryInput,
     InventoryOutput,
     DirectLabOutput,
 }
@@ -120,6 +123,9 @@ pub struct Port {
     pub direction: u8,
     pub lane: Option<Lane>,
     pub maximum: Rate,
+    /// Index of the fluid box this port connects to (0-based), if any.
+    #[serde(default)]
+    pub fluid_box: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -154,8 +160,15 @@ pub struct Part {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ModuleParameters {
     pub item: String,
+    #[serde(default)]
     pub with_pole: bool,
     pub labs: u8,
+    /// Override the machine entity name (e.g. "electric-furnace").
+    #[serde(default)]
+    pub machine: Option<String>,
+    /// Number of identical production units to tile.
+    #[serde(default)]
+    pub units: Option<u16>,
 }
 
 impl std::hash::Hash for ModuleParameters {
@@ -163,6 +176,8 @@ impl std::hash::Hash for ModuleParameters {
         self.item.hash(state);
         self.with_pole.hash(state);
         self.labs.hash(state);
+        self.machine.hash(state);
+        self.units.hash(state);
     }
 }
 
@@ -205,7 +220,7 @@ pub struct OperatingContract {
 /// fields. The `id` field is excluded from its own hash.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleDesign {
-    /// Schema version (currently 1).
+    /// Schema version (currently 2).
     pub schema: u32,
     /// Stable content-hash identifier (derived from all other fields).
     #[serde(default)]
@@ -293,7 +308,9 @@ pub fn canonical_bytes(design: &ModuleDesign) -> Result<Vec<u8>, ModuleError> {
         .map_err(|e| ModuleError::InvalidArtifact(e.to_string()))
 }
 
-fn sort_json_value(value: factorio_bot_core::serde_json::Value) -> factorio_bot_core::serde_json::Value {
+fn sort_json_value(
+    value: factorio_bot_core::serde_json::Value,
+) -> factorio_bot_core::serde_json::Value {
     match value {
         factorio_bot_core::serde_json::Value::Object(map) => {
             let sorted: BTreeMap<String, factorio_bot_core::serde_json::Value> = map
@@ -303,7 +320,9 @@ fn sort_json_value(value: factorio_bot_core::serde_json::Value) -> factorio_bot_
             factorio_bot_core::serde_json::Value::Object(sorted.into_iter().collect())
         }
         factorio_bot_core::serde_json::Value::Array(arr) => {
-            factorio_bot_core::serde_json::Value::Array(arr.into_iter().map(sort_json_value).collect())
+            factorio_bot_core::serde_json::Value::Array(
+                arr.into_iter().map(sort_json_value).collect(),
+            )
         }
         other => other,
     }
@@ -334,15 +353,17 @@ mod tests {
     #[test]
     fn design_id_changes_with_semantic_fields() {
         let base = ModuleDesign {
-            schema: 1,
+            schema: 2,
             id: String::new(),
             family: ModuleFamily::OreToPlate,
-            generator_version: 1,
+            generator_version: 2,
             origin: KnowledgeOrigin::Extracted,
             parameters: ModuleParameters {
                 item: "iron-plate".into(),
                 with_pole: false,
                 labs: 0,
+                machine: None,
+                units: None,
             },
             prototype_hash: "abc123".into(),
             mod_versions: BTreeMap::new(),
@@ -351,7 +372,10 @@ mod tests {
             parts: vec![Part {
                 role: "drill".into(),
                 entity: "burner-mining-drill".into(),
-                offset: Offset { half_x: 0, half_y: 0 },
+                offset: Offset {
+                    half_x: 0,
+                    half_y: 0,
+                },
                 direction: 0,
                 recipe: None,
                 underground_half: None,
@@ -380,10 +404,10 @@ mod tests {
 
         // Changing a recipe should change the id.
         let mut modified = base.clone();
-        modified.operation.outputs.insert(
-            "copper-plate".into(),
-            Rate::new(1, 600).unwrap(),
-        );
+        modified
+            .operation
+            .outputs
+            .insert("copper-plate".into(), Rate::new(1, 600).unwrap());
         let id2 = design_id(&modified).unwrap();
         assert_ne!(id1, id2, "different content must produce different ids");
 

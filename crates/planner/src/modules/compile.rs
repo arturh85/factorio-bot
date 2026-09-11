@@ -15,14 +15,15 @@ use crate::goal::Goal;
 
 use crate::ids::{ActionIdGen, BotId};
 use crate::memory::ReplanMemory;
-use crate::method::{
-run_steps, ExpansionCtx, MethodRegistry, Step};
+use crate::method::{ExpansionCtx, MethodRegistry, Step, run_steps};
 use crate::modules::artifact::ModuleDesign;
 pub use crate::modules::cache::CacheMode;
 use crate::modules::cache::LibraryCache;
 use crate::modules::instance::ModuleInstance;
 use crate::modules::ledger::OperatingLedger;
-use crate::modules::select::{select_candidates, site_candidates, ModuleSelection, ProductionRequest};
+use crate::modules::select::{
+    ModuleSelection, ProductionRequest, select_candidates, site_candidates,
+};
 use crate::network::ActionNetwork;
 use crate::schedule::{Schedule, ScheduledStep, StepKind, schedule};
 use crate::state::PlanState;
@@ -179,12 +180,8 @@ fn compile_module_placement(
                     entity: part.entity.clone(),
                     direction: part.direction,
                 },
-
             ],
-            eff: vec![
-
-                Effect::CreateEntity(Box::new(entity)),
-            ],
+            eff: vec![Effect::CreateEntity(Box::new(entity))],
             duration: 100,
             pinned: None,
             label: format!("place {} for {}", part.entity, part.role),
@@ -201,14 +198,12 @@ fn compile_module_placement(
                     item: "coal".into(),
                     count: 5,
                 },
-                pre: vec![
-                    Condition::AtPosition {
-                        who: crate::action::Actor::Role,
-                        pos: pos.clone(),
-                        radius: 3.0,
-                        min_radius: 0.5,
-                    },
-                ],
+                pre: vec![Condition::AtPosition {
+                    who: crate::action::Actor::Role,
+                    pos: pos.clone(),
+                    radius: 3.0,
+                    min_radius: 0.5,
+                }],
                 eff: vec![],
                 duration: 200,
                 pinned: None,
@@ -225,14 +220,12 @@ fn compile_module_placement(
                     entity: part.entity.clone(),
                     recipe: recipe.clone(),
                 },
-                pre: vec![
-                    Condition::AtPosition {
-                        who: crate::action::Actor::Role,
-                        pos: pos.clone(),
-                        radius: 3.0,
-                        min_radius: 0.5,
-                    },
-                ],
+                pre: vec![Condition::AtPosition {
+                    who: crate::action::Actor::Role,
+                    pos: pos.clone(),
+                    radius: 3.0,
+                    min_radius: 0.5,
+                }],
                 eff: vec![],
                 duration: 60,
                 pinned: None,
@@ -253,15 +246,12 @@ fn compile_module_placement(
                                 item: port.item.clone(),
                                 count: 1,
                             },
-                            pre: vec![
-                                Condition::AtPosition {
-                                    who: crate::action::Actor::Role,
-                                    pos: pos.clone(),
-                                    radius: 3.0,
-                                    min_radius: 0.5,
-                                },
-
-                            ],
+                            pre: vec![Condition::AtPosition {
+                                who: crate::action::Actor::Role,
+                                pos: pos.clone(),
+                                radius: 3.0,
+                                min_radius: 0.5,
+                            }],
                             eff: vec![],
                             duration: 100,
                             pinned: None,
@@ -293,21 +283,17 @@ fn compile_module_placement(
                         item: output_item.clone(),
                         count: rate.numerator as u32,
                     },
-                    pre: vec![
-                        Condition::AtPosition {
-                            who: crate::action::Actor::Role,
-                            pos: pos.clone(),
-                            radius: 3.0,
-                            min_radius: 0.5,
-                        },
-                    ],
-                    eff: vec![
-                        Effect::GainItem {
-                            who: crate::action::Actor::Role,
-                            item: output_item.clone(),
-                            count: rate.numerator as u32,
-                        },
-                    ],
+                    pre: vec![Condition::AtPosition {
+                        who: crate::action::Actor::Role,
+                        pos: pos.clone(),
+                        radius: 3.0,
+                        min_radius: 0.5,
+                    }],
+                    eff: vec![Effect::GainItem {
+                        who: crate::action::Actor::Role,
+                        item: output_item.clone(),
+                        count: rate.numerator as u32,
+                    }],
                     duration: rate.ticks.get() as u32,
                     pinned: None,
                     label: format!("take {} {} from {}", rate.numerator, output_item, part.role),
@@ -322,7 +308,8 @@ fn compile_module_placement(
 fn output_slot_for_entity(name: &str) -> InventorySlot {
     if name.contains("furnace") || name.contains("smelter") {
         InventorySlot::FurnaceResult
-    } else if name.contains("assembling") || name.contains("assembler") || name.contains("crafting") {
+    } else if name.contains("assembling") || name.contains("assembler") || name.contains("crafting")
+    {
         InventorySlot::AssemblerOutput
     } else {
         InventorySlot::FurnaceResult
@@ -331,8 +318,10 @@ fn output_slot_for_entity(name: &str) -> InventorySlot {
 
 /// Returns true for entity names known to burn fuel.
 fn is_burner_entity(name: &str) -> bool {
-    matches!(name, "burner-mining-drill" | "stone-furnace" | "steel-furnace"
-        | "burner-inserter" | "boiler")
+    matches!(
+        name,
+        "burner-mining-drill" | "stone-furnace" | "steel-furnace" | "burner-inserter" | "boiler"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -355,24 +344,46 @@ pub fn plan_with_session(
 ) -> crate::request::PlanResult {
     // Check mode: Legacy skips the module path entirely.
     if options.mode == PlannerMode::Legacy {
-        return crate::request::plan_controlled(goals, state, registry, chain_actor, roster, control);
+        return crate::request::plan_controlled(
+            goals,
+            state,
+            registry,
+            chain_actor,
+            roster,
+            control,
+        );
     }
 
     // Check for module-supported production goals.
-    let prod_items: Vec<(String, u32)> = goals.iter().filter_map(production_item_from_goal).collect();
+    let prod_items: Vec<(String, u32)> =
+        goals.iter().filter_map(production_item_from_goal).collect();
 
     if prod_items.is_empty() {
         // No module-supported goals; fall back to legacy.
-        return crate::request::plan_controlled(goals, state, registry, chain_actor, roster, control);
+        return crate::request::plan_controlled(
+            goals,
+            state,
+            registry,
+            chain_actor,
+            roster,
+            control,
+        );
     }
 
     // Check if any goal is already satisfied by the current world state.
     // If ALL production goals are satisfied, skip module compilation.
-    let all_satisfied = goals.iter().all(|g| {
-        crate::method::have::holds(g, state).unwrap_or(false)
-    });
+    let all_satisfied = goals
+        .iter()
+        .all(|g| crate::method::have::holds(g, state).unwrap_or(false));
     if all_satisfied {
-        return crate::request::plan_controlled(goals, state, registry, chain_actor, roster, control);
+        return crate::request::plan_controlled(
+            goals,
+            state,
+            registry,
+            chain_actor,
+            roster,
+            control,
+        );
     }
 
     // For each production item, select module designs.
@@ -386,15 +397,23 @@ pub fn plan_with_session(
             support_ticks: options.support_ticks,
         };
 
-        match select_candidates(&request, state, &mut session.library, options.cache_mode, control) {
+        match select_candidates(
+            &request,
+            state,
+            &mut session.library,
+            options.cache_mode,
+            control,
+        ) {
             Ok(designs) => {
                 for design in designs.iter().take(options.candidate_limit) {
-                    let near = state.bot(chain_actor)
+                    let near = state
+                        .bot(chain_actor)
                         .map(|b| b.position.clone())
                         .unwrap_or_else(|| Position::new(0.0, 0.0));
 
                     // Compute how many copies of this module are needed.
-                    let copies = design_instances_needed(design, *per_minute, options.support_ticks.into());
+                    let copies =
+                        design_instances_needed(design, *per_minute, options.support_ticks.into());
                     match site_candidates(design, state, &near, copies as u32, control) {
                         Ok(instances) => {
                             for inst in instances {
@@ -411,18 +430,28 @@ pub fn plan_with_session(
     }
 
     if all_instances.is_empty() {
-        return crate::request::plan_controlled(goals, state, registry, chain_actor, roster, control);
+        return crate::request::plan_controlled(
+            goals,
+            state,
+            registry,
+            chain_actor,
+            roster,
+            control,
+        );
     }
 
     // Build a fake ModuleSelection and compile.
     let selection = ModuleSelection {
         designs: all_designs,
         instances: all_instances,
-        requests: prod_items.iter().map(|(item, per_minute)| ProductionRequest {
-            item: item.clone(),
-            per_minute: *per_minute,
-            support_ticks: options.support_ticks,
-        }).collect(),
+        requests: prod_items
+            .iter()
+            .map(|(item, per_minute)| ProductionRequest {
+                item: item.clone(),
+                per_minute: *per_minute,
+                support_ticks: options.support_ticks,
+            })
+            .collect(),
     };
 
     // Build ExpansionCtx and compile.
@@ -450,14 +479,26 @@ pub fn plan_with_session(
     // Power: call ensure_powered for each electric module instance.
     for (design, instance) in selection.designs.iter().zip(selection.instances.iter()) {
         let kw = design.operation.power_watts as f64 / 1000.0;
-        if kw <= 0.0 { continue; }
+        if kw <= 0.0 {
+            continue;
+        }
         let site = Position::new(
             instance.placement.half_x as f64 * 0.5,
             instance.placement.half_y as f64 * 0.5,
         );
         let clearance = &design.required_clearance;
-        let max_hx = clearance.iter().map(|o| o.half_x.abs()).max().unwrap_or(6).abs();
-        let max_hy = clearance.iter().map(|o| o.half_y.abs()).max().unwrap_or(6).abs();
+        let max_hx = clearance
+            .iter()
+            .map(|o| o.half_x.abs())
+            .max()
+            .unwrap_or(6)
+            .abs();
+        let max_hy = clearance
+            .iter()
+            .map(|o| o.half_y.abs())
+            .max()
+            .unwrap_or(6)
+            .abs();
         let site_area = factorio_bot_core::types::Rect {
             left_top: Position::new(site.x - max_hx as f64 * 0.5, site.y - max_hy as f64 * 0.5),
             right_bottom: Position::new(site.x + max_hx as f64 * 0.5, site.y + max_hy as f64 * 0.5),
@@ -467,12 +508,16 @@ pub fn plan_with_session(
             &mut ctx, "module", &site, &site_area, kw, 20.0, &occupants,
         ) {
             Ok(Some(powering)) => {
-                if let Err(e) = run_steps(powering.steps, &mut ctx, &mut net, registry, &mut promised) {
+                if let Err(e) =
+                    run_steps(powering.steps, &mut ctx, &mut net, registry, &mut promised)
+                {
                     factorio_bot_core::tracing::warn!("power steps failed: {e}");
                 }
             }
-            Ok(None) => { }
-            Err(e) => { factorio_bot_core::tracing::warn!("power: {e}"); }
+            Ok(None) => {}
+            Err(e) => {
+                factorio_bot_core::tracing::warn!("power: {e}");
+            }
         }
     }
 
@@ -484,15 +529,15 @@ pub fn plan_with_session(
         Err(_) => {
             // Build a flat schedule from the network's topological order.
             // This ensures dependencies are respected and avoids circular waits.
-            let order = net.topo_order().unwrap_or_else(|_| {
-                net.actions().map(|a| a.id).collect()
-            });
+            let order = net
+                .topo_order()
+                .unwrap_or_else(|_| net.actions().map(|a| a.id).collect());
             let bots: Vec<BotId> = if roster.is_empty() {
                 vec![BotId(1)]
             } else {
                 roster.to_vec()
             };
-            let mut owner_ticks: std::collections::HashMap<BotId, u32> = 
+            let mut owner_ticks: std::collections::HashMap<BotId, u32> =
                 bots.iter().map(|b| (*b, 0u32)).collect();
             let mut steps: Vec<ScheduledStep> = Vec::new();
             for action_id in &order {
@@ -501,12 +546,16 @@ pub fn plan_with_session(
                     None => continue,
                 };
                 let dur = std::cmp::max(action.duration, 60);
-                let (bot, tick) = owner_ticks.iter()
+                let (bot, tick) = owner_ticks
+                    .iter()
                     .min_by_key(|(_, t)| **t)
                     .map(|(b, t)| (*b, *t))
                     .unwrap_or((BotId(1), 0));
                 steps.push(ScheduledStep {
-                    what: StepKind::Act { action: action.id, label: String::new() },
+                    what: StepKind::Act {
+                        action: action.id,
+                        label: String::new(),
+                    },
                     bot,
                     start: tick,
                     end: tick + dur,
@@ -544,7 +593,10 @@ pub fn plan_with_session(
 /// ensures we don't over-allocate modules while still producing enough.
 fn design_instances_needed(design: &ModuleDesign, per_minute: u32, support_ticks: u64) -> usize {
     // Find the highest output rate across all output ports.
-    let max_rate = design.operation.outputs.values()
+    let max_rate = design
+        .operation
+        .outputs
+        .values()
         .map(|r| r.numerator as f64 / r.ticks.get() as f64)
         .fold(0.0f64, |a, b| a.max(b));
 
@@ -622,7 +674,10 @@ mod tests {
         );
 
         // Should produce a plan (or at least not panic).
-        assert!(result.incumbent.is_some() || matches!(result.status, crate::request::PlanStatus::Infeasible));
+        assert!(
+            result.incumbent.is_some()
+                || matches!(result.status, crate::request::PlanStatus::Infeasible)
+        );
     }
 
     #[test]
@@ -631,33 +686,66 @@ mod tests {
         use crate::modules::instance::Placement;
 
         let design = ModuleDesign {
-            schema: 1, id: "test".into(), family: ModuleFamily::OreToPlate,
-            generator_version: 1, origin: KnowledgeOrigin::Extracted,
-            parameters: ModuleParameters { item: "iron-plate".into(), with_pole: false, labs: 0 },
-            prototype_hash: "test".into(), mod_versions: BTreeMap::new(),
-            parents: vec![], training_manifest: None,
-            parts: vec![
-                Part { role: "drill".into(), entity: "burner-mining-drill".into(),
-                    offset: Offset { half_x: 0, half_y: 0 }, direction: 0,
-                    recipe: None, underground_half: None, half_size: None },
-            ],
-            ports: vec![], required_clearance: vec![], expansion_space: vec![],
-            bill: BTreeMap::new(), precedence: vec![],
+            schema: 1,
+            id: "test".into(),
+            family: ModuleFamily::OreToPlate,
+            generator_version: 1,
+            origin: KnowledgeOrigin::Extracted,
+            parameters: ModuleParameters {
+                item: "iron-plate".into(),
+                with_pole: false,
+                labs: 0,
+                machine: None,
+                units: None,
+            },
+            prototype_hash: "test".into(),
+            mod_versions: BTreeMap::new(),
+            parents: vec![],
+            training_manifest: None,
+            parts: vec![Part {
+                role: "drill".into(),
+                entity: "burner-mining-drill".into(),
+                offset: Offset {
+                    half_x: 0,
+                    half_y: 0,
+                },
+                direction: 0,
+                recipe: None,
+                underground_half: None,
+                half_size: None,
+            }],
+            ports: vec![],
+            required_clearance: vec![],
+            expansion_space: vec![],
+            bill: BTreeMap::new(),
+            precedence: vec![],
             operation: OperatingContract {
-                inputs: BTreeMap::new(), outputs: BTreeMap::from([("iron-plate".into(), Rate::new(1, 600).unwrap())]),
-                power_watts: 0, fuel_per_tick: BTreeMap::new(),
-                startup_latency_ticks: 0, startup_items: BTreeMap::new(),
+                inputs: BTreeMap::new(),
+                outputs: BTreeMap::from([("iron-plate".into(), Rate::new(1, 600).unwrap())]),
+                power_watts: 0,
+                fuel_per_tick: BTreeMap::new(),
+                startup_latency_ticks: 0,
+                startup_items: BTreeMap::new(),
                 local_buffer_capacity: BTreeMap::new(),
-                required_research: vec![], required_surface: "nauvis".into(),
+                required_research: vec![],
+                required_surface: "nauvis".into(),
                 unsupported_mechanisms: vec![],
             },
         };
 
         let instance = ModuleInstance {
-            id: 1, design_id: "test".into(),
-            placement: Placement { surface: "nauvis".into(), half_x: 0, half_y: 0, direction: 0 },
-            bindings: vec![], parts: BTreeMap::new(),
-            construction_actions: BTreeMap::new(), commissioned_tick: None,
+            id: 1,
+            design_id: "test".into(),
+            placement: Placement {
+                surface: "nauvis".into(),
+                half_x: 0,
+                half_y: 0,
+                direction: 0,
+            },
+            bindings: vec![],
+            parts: BTreeMap::new(),
+            construction_actions: BTreeMap::new(),
+            commissioned_tick: None,
         };
 
         let mut ids = ActionIdGen::new();
@@ -665,17 +753,18 @@ mod tests {
         // 1 drill part (no recipe): Place + Fuel = 2 steps
         assert_eq!(steps.len(), 2, "1 drill part: Place + Fuel");
         // 2 Act steps: Place(0) + Fuel(1), next id = 2
-        assert_eq!(ids.next(), crate::ids::ActionId(2), "2 ActionIds: Place + Fuel");
+        assert_eq!(
+            ids.next(),
+            crate::ids::ActionId(2),
+            "2 ActionIds: Place + Fuel"
+        );
     }
 
     #[test]
     fn module_pipeline_produces_scheduled_steps() {
         use std::sync::Arc;
 
-        let state = PlanState::from_world(
-            Arc::new(fixture_world()),
-            &[BotId(1)],
-        );
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[BotId(1)]);
         let control = make_control();
         let options = PlannerOptions {
             mode: PlannerMode::Modules,
@@ -707,36 +796,48 @@ mod tests {
         // so either Complete or Infeasible are acceptable outcomes.
         if result.status == crate::request::PlanStatus::Complete {
             let milestone = result.incumbent.unwrap();
-            assert!(!milestone.schedule.steps.is_empty(), "should have scheduled steps");
+            assert!(
+                !milestone.schedule.steps.is_empty(),
+                "should have scheduled steps"
+            );
 
             // Compute makespan from the schedule.
-            let makespan = milestone.schedule.steps.iter()
+            let makespan = milestone
+                .schedule
+                .steps
+                .iter()
                 .map(|step| step.end)
-                .max().unwrap_or(0);
+                .max()
+                .unwrap_or(0);
             assert!(makespan > 0, "makespan should be positive");
 
             // Find the ActionNetwork and check for Place actions.
-            let place_actions: Vec<&str> = milestone.net.actions()
+            let place_actions: Vec<&str> = milestone
+                .net
+                .actions()
                 .filter_map(|action| match &action.kind {
                     crate::action::ActionKind::Place { entity } => Some(entity.name.as_str()),
                     _ => None,
                 })
                 .collect();
             // With OreToPlate, at minimum we should have drill or furnace placement.
-            assert!(!place_actions.is_empty(), "should have at least one Place action");
+            assert!(
+                !place_actions.is_empty(),
+                "should have at least one Place action"
+            );
         }
         // If Infeasible, the diagnostic should explain why (occupied ground, etc.)
         if result.status == crate::request::PlanStatus::Infeasible {
-            assert!(result.diagnostic.is_some(), "Infeasible should carry a diagnostic");
+            assert!(
+                result.diagnostic.is_some(),
+                "Infeasible should carry a diagnostic"
+            );
         }
     }
 
     #[test]
     fn module_pipeline_refuses_unknown_items() {
-        let state = PlanState::from_world(
-            std::sync::Arc::new(fixture_world()),
-            &[BotId(1)],
-        );
+        let state = PlanState::from_world(std::sync::Arc::new(fixture_world()), &[BotId(1)]);
         let control = make_control();
         let options = PlannerOptions::default();
         let mut session = PlannerSession::new();
@@ -759,8 +860,11 @@ mod tests {
             &mut session,
         );
 
-        assert!(result.status == crate::request::PlanStatus::Complete
-            || result.status == crate::request::PlanStatus::Infeasible,
-            "unexpected status: {:?}", result.status);
+        assert!(
+            result.status == crate::request::PlanStatus::Complete
+                || result.status == crate::request::PlanStatus::Infeasible,
+            "unexpected status: {:?}",
+            result.status
+        );
     }
 }

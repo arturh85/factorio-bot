@@ -9,9 +9,8 @@ use std::collections::BTreeMap;
 use factorio_bot_core::types::Direction;
 
 use crate::modules::artifact::{
-    KnowledgeOrigin, ModuleDesign, ModuleError, ModuleFamily, ModuleParameters,
-    Offset, OperatingContract, Part, Port, PortMode, Rate,
-    design_id,
+    KnowledgeOrigin, ModuleDesign, ModuleError, ModuleFamily, ModuleParameters, Offset,
+    OperatingContract, Part, Port, PortMode, Rate, design_id,
 };
 use crate::state::PlanState;
 
@@ -28,7 +27,9 @@ pub fn extract_design(
         ModuleFamily::OreToPlate => extract_ore_to_plate(state, parameters),
         ModuleFamily::RedScience => extract_red_science(state, parameters),
         ModuleFamily::AssemblerCell => extract_assembler_cell(state, parameters),
-        ModuleFamily::OilRefinery | ModuleFamily::ChemicalPlant => extract_fluid_manufacturing(state, family, parameters),
+        ModuleFamily::OilRefinery | ModuleFamily::ChemicalPlant => {
+            extract_fluid_manufacturing(state, family, parameters)
+        }
         ModuleFamily::RocketSilo => extract_rocket_silo(state, parameters),
         ModuleFamily::SpacePlatform => extract_space_platform(state, parameters),
         ModuleFamily::SmelterArray => extract_smelter_array(state, parameters),
@@ -46,7 +47,13 @@ fn extract_ore_to_plate(
             "ore-to-plate: unsupported item '{item}', expected iron-plate or copper-plate"
         )));
     }
-    let ore = if item == "iron-plate" { "iron-ore" } else if item == "copper-plate" { "copper-ore" } else { "crude-oil" };
+    let ore = if item == "iron-plate" {
+        "iron-ore"
+    } else if item == "copper-plate" {
+        "copper-ore"
+    } else {
+        "crude-oil"
+    };
 
     // Build the static geometry of one ore-to-plate cell.
     // The native layout places a burner-mining-drill facing east, with a
@@ -60,7 +67,10 @@ fn extract_ore_to_plate(
             // Drill at origin, facing north. Its output emerges on the
             // tile immediately north of its north face (at y = 1.0 tiles
             // from centre, since burner-mining-drill is 2x2).
-            offset: Offset { half_x: 0, half_y: 0 },
+            offset: Offset {
+                half_x: 0,
+                half_y: 0,
+            },
             direction: Direction::North as u8,
             recipe: None,
             underground_half: None,
@@ -76,7 +86,10 @@ fn extract_ore_to_plate(
             // The stone-furnace is ~2x2 so it occupies tiles (0,2)-(1,3)
             // which overlaps the drill's output tile (0,2). Items pass
             // directly from drill to furnace without an inserter.
-            offset: Offset { half_x: 0, half_y: 4 },
+            offset: Offset {
+                half_x: 0,
+                half_y: 4,
+            },
             direction: Direction::North as u8,
             recipe: Some(item.clone()),
             underground_half: None,
@@ -85,10 +98,7 @@ fn extract_ore_to_plate(
 
     // Bill of materials: 1 drill + 1 furnace.
     let bill: BTreeMap<String, u64> = if item == "crude-oil" {
-        BTreeMap::from([
-            ("pumpjack".to_string(), 1u64),
-            ("pipe".to_string(), 2u64),
-        ])
+        BTreeMap::from([("pumpjack".to_string(), 1u64), ("pipe".to_string(), 2u64)])
     } else {
         BTreeMap::from([
             ("burner-mining-drill".to_string(), 1u64),
@@ -98,36 +108,46 @@ fn extract_ore_to_plate(
 
     // Ports: ore belt input on the drill's west face, plate output on furnace's north face.
     let ports: Vec<Port> = if item == "crude-oil" {
-        vec![
-            Port {
-                id: "output".into(),
-                mode: PortMode::InventoryOutput,
-                item: "crude-oil".into(),
-                offset: Offset { half_x: -1, half_y: 3 },
-                direction: Direction::North as u8,
-                lane: None,
-                maximum: Rate::new(1, 120).unwrap(),
+        vec![Port {
+            id: "output".into(),
+            mode: PortMode::InventoryOutput,
+            item: "crude-oil".into(),
+            offset: Offset {
+                half_x: -1,
+                half_y: 3,
             },
-        ]
+            direction: Direction::North as u8,
+            lane: None,
+            maximum: Rate::new(1, 120).unwrap(),
+            fluid_box: None,
+        }]
     } else {
         vec![
             Port {
                 id: "belt-input".into(),
                 mode: PortMode::BeltInput,
                 item: ore.into(),
-                offset: Offset { half_x: -3, half_y: 0 },
+                offset: Offset {
+                    half_x: -3,
+                    half_y: 0,
+                },
                 direction: Direction::West as u8,
                 lane: None,
                 maximum: Rate::new(1, 600).unwrap(),
+                fluid_box: None,
             },
             Port {
                 id: "inventory-output".into(),
                 mode: PortMode::InventoryOutput,
                 item: item.clone(),
-                offset: Offset { half_x: 1, half_y: 8 },
+                offset: Offset {
+                    half_x: 1,
+                    half_y: 8,
+                },
                 direction: Direction::North as u8,
                 lane: None,
                 maximum: Rate::new(1, 600).unwrap(),
+                fluid_box: None,
             },
         ]
     };
@@ -135,25 +155,47 @@ fn extract_ore_to_plate(
     // Required clearance: a corridor around the cell.
     let required_clearance: Vec<Offset> = if item == "crude-oil" {
         vec![
-            Offset { half_x: -4, half_y: -4 },
-            Offset { half_x: 4, half_y: -4 },
-            Offset { half_x: -4, half_y: 4 },
-            Offset { half_x: 4, half_y: 4 },
+            Offset {
+                half_x: -4,
+                half_y: -4,
+            },
+            Offset {
+                half_x: 4,
+                half_y: -4,
+            },
+            Offset {
+                half_x: -4,
+                half_y: 4,
+            },
+            Offset {
+                half_x: 4,
+                half_y: 4,
+            },
         ]
     } else {
         vec![
-            Offset { half_x: -3, half_y: -1 },
-            Offset { half_x: 3, half_y: -1 },
-            Offset { half_x: -3, half_y: 9 },
-            Offset { half_x: 3, half_y: 9 },
+            Offset {
+                half_x: -3,
+                half_y: -1,
+            },
+            Offset {
+                half_x: 3,
+                half_y: -1,
+            },
+            Offset {
+                half_x: -3,
+                half_y: 9,
+            },
+            Offset {
+                half_x: 3,
+                half_y: 9,
+            },
         ]
     };
 
     // Precedence: drill must be placed before furnace (furnace may go
     // on the drill's output).
-    let precedence = vec![
-        ("drill".into(), "furnace".into()),
-    ];
+    let precedence = vec![("drill".into(), "furnace".into())];
 
     let operation: OperatingContract = if item == "crude-oil" {
         OperatingContract {
@@ -173,18 +215,10 @@ fn extract_ore_to_plate(
             inputs: BTreeMap::from([(ore.into(), Rate::new(1, 600).unwrap())]),
             outputs: BTreeMap::from([(item.clone(), Rate::new(1, 600).unwrap())]),
             power_watts: 0, // burner cell, no electric draw
-            fuel_per_tick: BTreeMap::from([
-                ("coal".into(), Rate::new(1, 4800).unwrap()),
-            ]),
+            fuel_per_tick: BTreeMap::from([("coal".into(), Rate::new(1, 4800).unwrap())]),
             startup_latency_ticks: 4800,
-            startup_items: BTreeMap::from([
-                ("coal".to_string(), 10u64),
-                (ore.to_string(), 5u64),
-            ]),
-            local_buffer_capacity: BTreeMap::from([
-                (ore.into(), 50u64),
-                (item.clone(), 10u64),
-            ]),
+            startup_items: BTreeMap::from([("coal".to_string(), 10u64), (ore.to_string(), 5u64)]),
+            local_buffer_capacity: BTreeMap::from([(ore.into(), 50u64), (item.clone(), 10u64)]),
             required_research: vec![],
             required_surface: "nauvis".into(),
             unsupported_mechanisms: vec![],
@@ -192,10 +226,10 @@ fn extract_ore_to_plate(
     };
 
     let mut design = ModuleDesign {
-        schema: 1,
+        schema: 2,
         id: String::new(),
         family: ModuleFamily::OreToPlate,
-        generator_version: 1,
+        generator_version: 2,
         origin: KnowledgeOrigin::Extracted,
         parameters: parameters.clone(),
         prototype_hash: "extracted-v1".into(),
@@ -217,8 +251,6 @@ fn extract_ore_to_plate(
     Ok(design)
 }
 
-
-
 fn extract_red_science(
     state: &PlanState,
     parameters: &ModuleParameters,
@@ -235,17 +267,18 @@ fn extract_red_science(
     // and one copper-plate), outputting to a third chest.
     // The native layout places the assembler at origin, with input chests to the
     // left and right, and an output chest to the north.
-    let parts = vec![
-        Part {
-            role: "assembler".into(),
-            entity: "assembling-machine-1".into(),
-            offset: Offset { half_x: 0, half_y: 0 },
-            half_size: Some(state.entity_half_size("assembling-machine-1")),
-            direction: Direction::North as u8,
-            recipe: Some(item.clone()),
-            underground_half: None,
+    let parts = vec![Part {
+        role: "assembler".into(),
+        entity: "assembling-machine-1".into(),
+        offset: Offset {
+            half_x: 0,
+            half_y: 0,
         },
-    ];
+        half_size: Some(state.entity_half_size("assembling-machine-1")),
+        direction: Direction::North as u8,
+        recipe: Some(item.clone()),
+        underground_half: None,
+    }];
 
     // Bill of materials: 1 assembling-machine-1 + 3 inserters + 3 chests.
     let bill = BTreeMap::from([
@@ -261,42 +294,66 @@ fn extract_red_science(
             mode: PortMode::BeltInput,
             item: "copper-plate".into(),
             // Copper input from the west
-            offset: Offset { half_x: -4, half_y: 0 },
+            offset: Offset {
+                half_x: -4,
+                half_y: 0,
+            },
             direction: Direction::West as u8,
             lane: None,
             // 1 pack needs 1 copper-plate, assembler assembles with speed 0.5,
             // recipe energy 5 -> 180 ticks per pack = 1/180 packs/tick
             maximum: Rate::new(1, 180).unwrap(),
+            fluid_box: None,
         },
         Port {
             id: "input-gears".into(),
             mode: PortMode::BeltInput,
             item: "iron-gear-wheel".into(),
             // Gear input from the east
-            offset: Offset { half_x: 4, half_y: 0 },
+            offset: Offset {
+                half_x: 4,
+                half_y: 0,
+            },
             direction: Direction::East as u8,
             lane: None,
             // 1 pack needs 1 gear wheel
             maximum: Rate::new(1, 180).unwrap(),
+            fluid_box: None,
         },
         Port {
             id: "output".into(),
             mode: PortMode::InventoryOutput,
             item: item.clone(),
             // Output to the north
-            offset: Offset { half_x: 0, half_y: 5 },
+            offset: Offset {
+                half_x: 0,
+                half_y: 5,
+            },
             direction: Direction::North as u8,
             lane: None,
             maximum: Rate::new(1, 180).unwrap(),
+            fluid_box: None,
         },
     ];
 
     // Required clearance: 3-tile corridor around the cell.
     let required_clearance: Vec<Offset> = vec![
-        Offset { half_x: -3, half_y: -3 },
-        Offset { half_x: 3, half_y: -3 },
-        Offset { half_x: -3, half_y: 3 },
-        Offset { half_x: 3, half_y: 3 },
+        Offset {
+            half_x: -3,
+            half_y: -3,
+        },
+        Offset {
+            half_x: 3,
+            half_y: -3,
+        },
+        Offset {
+            half_x: -3,
+            half_y: 3,
+        },
+        Offset {
+            half_x: 3,
+            half_y: 3,
+        },
     ];
 
     let operation = OperatingContract {
@@ -316,12 +373,18 @@ fn extract_red_science(
     };
 
     let design = ModuleDesign {
-        schema: 1,
+        schema: 2,
         id: format!("red-science-cell"),
         family: ModuleFamily::RedScience,
-        generator_version: 1,
+        generator_version: 2,
         origin: KnowledgeOrigin::Extracted,
-        parameters: ModuleParameters { item: "automation-science-pack".into(), with_pole: false, labs: 0 },
+        parameters: ModuleParameters {
+            item: "automation-science-pack".into(),
+            with_pole: false,
+            labs: 0,
+            machine: None,
+            units: None,
+        },
         prototype_hash: "red-science-1".into(),
         mod_versions: BTreeMap::new(),
         parents: vec![],
@@ -346,19 +409,23 @@ fn extract_assembler_cell(
 
     // Count ingredients from the recipe prototype.
     let recipes = state.base().entity_graph.recipes();
-    let recipe = recipes.get(item).ok_or_else(|| ModuleError::Unsupported(format!(
-        "assembler-cell: no recipe for '{item}'"
-    )))?;
-    let ingredients = recipe.ingredients.as_ref().ok_or_else(|| ModuleError::Unsupported(format!(
-        "assembler-cell: recipe for '{item}' has no ingredients"
-    )))?;
+    let recipe = recipes.get(item).ok_or_else(|| {
+        ModuleError::Unsupported(format!("assembler-cell: no recipe for '{item}'"))
+    })?;
+    let ingredients = recipe.ingredients.as_ref().ok_or_else(|| {
+        ModuleError::Unsupported(format!(
+            "assembler-cell: recipe for '{item}' has no ingredients"
+        ))
+    })?;
     // Only handle crafting recipes (not oil-processing, chemistry, etc.)
     let category = recipe.category.as_str();
     match category {
         "crafting" | "crafting-with-fluid" | "advanced-crafting" => {}
-        _ => return Err(ModuleError::Unsupported(format!(
-            "assembler-cell: unsupported category '{category}' for '{item}'"
-        ))),
+        _ => {
+            return Err(ModuleError::Unsupported(format!(
+                "assembler-cell: unsupported category '{category}' for '{item}'"
+            )));
+        }
     }
     let input_count = ingredients.len();
     if input_count > 3 {
@@ -381,7 +448,10 @@ fn extract_assembler_cell(
                 role: "belt".into(),
                 entity: "transport-belt".into(),
                 half_size: Some(state.entity_half_size("transport-belt")),
-                offset: Offset { half_x: -6, half_y: hy },
+                offset: Offset {
+                    half_x: -6,
+                    half_y: hy,
+                },
                 direction: Direction::North as u8,
                 recipe: None,
                 underground_half: None,
@@ -391,7 +461,10 @@ fn extract_assembler_cell(
             role: "inserter".into(),
             entity: "inserter".into(),
             half_size: Some(state.entity_half_size("inserter")),
-            offset: Offset { half_x: -4, half_y: 0 },
+            offset: Offset {
+                half_x: -4,
+                half_y: 0,
+            },
             direction: Direction::West as u8,
             recipe: None,
             underground_half: None,
@@ -400,7 +473,10 @@ fn extract_assembler_cell(
             role: "power-pole".into(),
             entity: "small-electric-pole".into(),
             half_size: Some(state.entity_half_size("small-electric-pole")),
-            offset: Offset { half_x: -4, half_y: -2 },
+            offset: Offset {
+                half_x: -4,
+                half_y: -2,
+            },
             direction: Direction::North as u8,
             recipe: None,
             underground_half: None,
@@ -409,19 +485,35 @@ fn extract_assembler_cell(
             id: "belt-input".into(),
             mode: PortMode::BeltInput,
             item: ingredients[0].name.clone(),
-            offset: Offset { half_x: -7, half_y: -2 },
+            offset: Offset {
+                half_x: -7,
+                half_y: -2,
+            },
             direction: Direction::West as u8,
             lane: None,
             maximum: Rate::new(1, 60).unwrap(),
+            fluid_box: None,
         });
         bill.entry("inserter".to_string()).or_insert(2);
         bill.entry("transport-belt".to_string()).or_insert(6);
         bill.entry("small-electric-pole".to_string()).or_insert(1);
         required_clearance = vec![
-            Offset { half_x: -7, half_y: -2 },
-            Offset { half_x: -7, half_y: 2 },
-            Offset { half_x: 7, half_y: -2 },
-            Offset { half_x: 7, half_y: 2 },
+            Offset {
+                half_x: -7,
+                half_y: -2,
+            },
+            Offset {
+                half_x: -7,
+                half_y: 2,
+            },
+            Offset {
+                half_x: 7,
+                half_y: -2,
+            },
+            Offset {
+                half_x: 7,
+                half_y: 2,
+            },
         ];
     } else if input_count == 2 {
         // 2-input: two belts at -8, -6; two inserters at (-4,-2) and (-4,2).
@@ -432,7 +524,10 @@ fn extract_assembler_cell(
                     role: format!("belt-{}", i),
                     entity: "transport-belt".into(),
                     half_size: Some(state.entity_half_size("transport-belt")),
-                    offset: Offset { half_x: belt_x, half_y: hy },
+                    offset: Offset {
+                        half_x: belt_x,
+                        half_y: hy,
+                    },
                     direction: Direction::North as u8,
                     recipe: None,
                     underground_half: None,
@@ -442,12 +537,26 @@ fn extract_assembler_cell(
             let ins_hy = -2 + i as i32 * 4;
             let is_long = i == 0; // far belt needs long-handed
             parts.push(Part {
-                role: if i == 0 { "gear-inserter".into() } else { "copper-inserter".into() },
-                entity: if is_long { "long-handed-inserter" } else { "inserter" }.into(),
-                half_size: Some(state.entity_half_size(
-                    if is_long { "long-handed-inserter" } else { "inserter" }
-                )),
-                offset: Offset { half_x: ins_x, half_y: ins_hy },
+                role: if i == 0 {
+                    "gear-inserter".into()
+                } else {
+                    "copper-inserter".into()
+                },
+                entity: if is_long {
+                    "long-handed-inserter"
+                } else {
+                    "inserter"
+                }
+                .into(),
+                half_size: Some(state.entity_half_size(if is_long {
+                    "long-handed-inserter"
+                } else {
+                    "inserter"
+                })),
+                offset: Offset {
+                    half_x: ins_x,
+                    half_y: ins_hy,
+                },
                 direction: Direction::West as u8,
                 recipe: None,
                 underground_half: None,
@@ -456,20 +565,34 @@ fn extract_assembler_cell(
                 id: format!("input-{i}"),
                 mode: PortMode::BeltInput,
                 item: ing.name.clone(),
-                offset: Offset { half_x: belt_x - 1, half_y: -2 },
+                offset: Offset {
+                    half_x: belt_x - 1,
+                    half_y: -2,
+                },
                 direction: Direction::West as u8,
                 lane: None,
                 maximum: Rate::new(1, 60).unwrap(),
+                fluid_box: None,
             });
             bill.entry(
-                if is_long { "long-handed-inserter" } else { "inserter" }.to_string()
-            ).and_modify(|c| *c += 1).or_insert(1);
+                if is_long {
+                    "long-handed-inserter"
+                } else {
+                    "inserter"
+                }
+                .to_string(),
+            )
+            .and_modify(|c| *c += 1)
+            .or_insert(1);
         }
         parts.push(Part {
             role: "power-pole".into(),
             entity: "small-electric-pole".into(),
             half_size: Some(state.entity_half_size("small-electric-pole")),
-            offset: Offset { half_x: -4, half_y: 0 },
+            offset: Offset {
+                half_x: -4,
+                half_y: 0,
+            },
             direction: Direction::North as u8,
             recipe: None,
             underground_half: None,
@@ -477,10 +600,22 @@ fn extract_assembler_cell(
         bill.entry("transport-belt".to_string()).or_insert(9);
         bill.entry("small-electric-pole".to_string()).or_insert(1);
         required_clearance = vec![
-            Offset { half_x: -9, half_y: -2 },
-            Offset { half_x: -9, half_y: 2 },
-            Offset { half_x: 7, half_y: -2 },
-            Offset { half_x: 7, half_y: 2 },
+            Offset {
+                half_x: -9,
+                half_y: -2,
+            },
+            Offset {
+                half_x: -9,
+                half_y: 2,
+            },
+            Offset {
+                half_x: 7,
+                half_y: -2,
+            },
+            Offset {
+                half_x: 7,
+                half_y: 2,
+            },
         ];
     } else {
         // 3-input belt-fed: belts at -10, -6, +6; inserters at -8, -4, +4
@@ -496,7 +631,10 @@ fn extract_assembler_cell(
                     role: format!("belt-{}", i),
                     entity: "transport-belt".into(),
                     half_size: Some(state.entity_half_size("transport-belt")),
-                    offset: Offset { half_x: belt_x, half_y: hy },
+                    offset: Offset {
+                        half_x: belt_x,
+                        half_y: hy,
+                    },
                     direction: Direction::North as u8,
                     recipe: None,
                     underground_half: None,
@@ -504,11 +642,21 @@ fn extract_assembler_cell(
             }
             parts.push(Part {
                 role: format!("inserter-{}", i),
-                entity: if is_long { "long-handed-inserter" } else { "inserter" }.into(),
-                half_size: Some(state.entity_half_size(
-                    if is_long { "long-handed-inserter" } else { "inserter" }
-                )),
-                offset: Offset { half_x: ins_x, half_y: ins_hy },
+                entity: if is_long {
+                    "long-handed-inserter"
+                } else {
+                    "inserter"
+                }
+                .into(),
+                half_size: Some(state.entity_half_size(if is_long {
+                    "long-handed-inserter"
+                } else {
+                    "inserter"
+                })),
+                offset: Offset {
+                    half_x: ins_x,
+                    half_y: ins_hy,
+                },
                 direction: dir,
                 recipe: None,
                 underground_half: None,
@@ -517,20 +665,34 @@ fn extract_assembler_cell(
                 id: format!("input-{}", i),
                 mode: PortMode::BeltInput,
                 item: ing.name.clone(),
-                offset: Offset { half_x: belt_x - 1, half_y: -2 },
+                offset: Offset {
+                    half_x: belt_x - 1,
+                    half_y: -2,
+                },
                 direction: Direction::West as u8,
                 lane: None,
                 maximum: Rate::new(1, 60).unwrap(),
+                fluid_box: None,
             });
             bill.entry(
-                if is_long { "long-handed-inserter" } else { "inserter" }.to_string()
-            ).and_modify(|c| *c += 1).or_insert(1);
+                if is_long {
+                    "long-handed-inserter"
+                } else {
+                    "inserter"
+                }
+                .to_string(),
+            )
+            .and_modify(|c| *c += 1)
+            .or_insert(1);
         }
         parts.push(Part {
             role: "power-pole".into(),
             entity: "small-electric-pole".into(),
             half_size: Some(state.entity_half_size("small-electric-pole")),
-            offset: Offset { half_x: 0, half_y: -2 },
+            offset: Offset {
+                half_x: 0,
+                half_y: -2,
+            },
             direction: Direction::North as u8,
             recipe: None,
             underground_half: None,
@@ -538,10 +700,22 @@ fn extract_assembler_cell(
         bill.entry("transport-belt".to_string()).or_insert(3);
         bill.entry("small-electric-pole".to_string()).or_insert(1);
         required_clearance = vec![
-            Offset { half_x: -6, half_y: -2 },
-            Offset { half_x: -6, half_y: 3 },
-            Offset { half_x: 6, half_y: -2 },
-            Offset { half_x: 6, half_y: 3 },
+            Offset {
+                half_x: -6,
+                half_y: -2,
+            },
+            Offset {
+                half_x: -6,
+                half_y: 3,
+            },
+            Offset {
+                half_x: 6,
+                half_y: -2,
+            },
+            Offset {
+                half_x: 6,
+                half_y: 3,
+            },
         ];
     }
 
@@ -550,7 +724,10 @@ fn extract_assembler_cell(
         role: "assembler".into(),
         entity: "assembling-machine-1".into(),
         half_size: Some(state.entity_half_size("assembling-machine-1")),
-        offset: Offset { half_x: 0, half_y: 0 },
+        offset: Offset {
+            half_x: 0,
+            half_y: 0,
+        },
         direction: Direction::East as u8,
         recipe: Some(item.clone()),
         underground_half: None,
@@ -559,7 +736,10 @@ fn extract_assembler_cell(
         role: "out-inserter".into(),
         entity: "inserter".into(),
         half_size: Some(state.entity_half_size("inserter")),
-        offset: Offset { half_x: 4, half_y: 0 },
+        offset: Offset {
+            half_x: 4,
+            half_y: 0,
+        },
         direction: Direction::West as u8,
         recipe: None,
         underground_half: None,
@@ -569,7 +749,10 @@ fn extract_assembler_cell(
             role: "output-belt".into(),
             entity: "transport-belt".into(),
             half_size: Some(state.entity_half_size("transport-belt")),
-            offset: Offset { half_x: 6, half_y: hy },
+            offset: Offset {
+                half_x: 6,
+                half_y: hy,
+            },
             direction: Direction::North as u8,
             recipe: None,
             underground_half: None,
@@ -580,10 +763,14 @@ fn extract_assembler_cell(
         id: "output".into(),
         mode: PortMode::InventoryOutput,
         item: item.clone(),
-        offset: Offset { half_x: 7, half_y: 2 },
+        offset: Offset {
+            half_x: 7,
+            half_y: 2,
+        },
         direction: Direction::North as u8,
         lane: None,
         maximum: Rate::new(1, 60).unwrap(),
+        fluid_box: None,
     });
 
     bill.entry("assembling-machine-1".to_string()).or_insert(1);
@@ -592,9 +779,10 @@ fn extract_assembler_cell(
         .or_insert(1);
 
     let operation = OperatingContract {
-        inputs: ingredients.iter().map(|ing| {
-            (ing.name.clone(), Rate::new(1, 60).unwrap())
-        }).collect(),
+        inputs: ingredients
+            .iter()
+            .map(|ing| (ing.name.clone(), Rate::new(1, 60).unwrap()))
+            .collect(),
         outputs: BTreeMap::from([(item.clone(), Rate::new(1, 60).unwrap())]),
         power_watts: 90000,
         fuel_per_tick: BTreeMap::new(),
@@ -607,10 +795,10 @@ fn extract_assembler_cell(
     };
 
     let mut design = ModuleDesign {
-        schema: 1,
+        schema: 2,
         id: String::new(),
         family: ModuleFamily::AssemblerCell,
-        generator_version: 1,
+        generator_version: 2,
         origin: KnowledgeOrigin::Extracted,
         parameters: parameters.clone(),
         prototype_hash: "assembler-cell-v1".into(),
@@ -630,8 +818,6 @@ fn extract_assembler_cell(
     Ok(design)
 }
 
-
-
 fn extract_rocket_silo(
     state: &PlanState,
     parameters: &ModuleParameters,
@@ -646,33 +832,51 @@ fn extract_rocket_silo(
         ("rocket-silo".to_string(), 1u64),
         ("small-electric-pole".to_string(), 2u64),
     ]);
-    let parts = vec![
-        Part {
-            role: "rocket-silo".into(),
-            entity: "rocket-silo".into(),
-            half_size: Some(Offset { half_x: 5, half_y: 5 }),
-            offset: Offset { half_x: 0, half_y: 0 },
-            direction: Direction::North as u8,
-            recipe: Some("rocket-part".into()),
-            underground_half: None,
+    let parts = vec![Part {
+        role: "rocket-silo".into(),
+        entity: "rocket-silo".into(),
+        half_size: Some(Offset {
+            half_x: 5,
+            half_y: 5,
+        }),
+        offset: Offset {
+            half_x: 0,
+            half_y: 0,
         },
-    ];
-    let ports = vec![
-        Port {
-            id: "output".into(),
-            mode: PortMode::InventoryOutput,
-            item: "rocket-part".into(),
-            offset: Offset { half_x: 5, half_y: 0 },
-            direction: Direction::North as u8,
-            lane: None,
-            maximum: Rate::new(1, 180).unwrap(),
+        direction: Direction::North as u8,
+        recipe: Some("rocket-part".into()),
+        underground_half: None,
+    }];
+    let ports = vec![Port {
+        id: "output".into(),
+        mode: PortMode::InventoryOutput,
+        item: "rocket-part".into(),
+        offset: Offset {
+            half_x: 5,
+            half_y: 0,
         },
-    ];
+        direction: Direction::North as u8,
+        lane: None,
+        maximum: Rate::new(1, 180).unwrap(),
+        fluid_box: None,
+    }];
     let required_clearance = vec![
-        Offset { half_x: -6, half_y: -6 },
-        Offset { half_x: 6, half_y: -6 },
-        Offset { half_x: -6, half_y: 6 },
-        Offset { half_x: 6, half_y: 6 },
+        Offset {
+            half_x: -6,
+            half_y: -6,
+        },
+        Offset {
+            half_x: 6,
+            half_y: -6,
+        },
+        Offset {
+            half_x: -6,
+            half_y: 6,
+        },
+        Offset {
+            half_x: 6,
+            half_y: 6,
+        },
     ];
     let operation = OperatingContract {
         inputs: BTreeMap::from([
@@ -691,16 +895,23 @@ fn extract_rocket_silo(
         unsupported_mechanisms: vec![],
     };
     Ok(ModuleDesign {
-        schema: 1,
+        schema: 2,
         id: String::new(),
         family: ModuleFamily::RocketSilo,
-        generator_version: 1,
+        generator_version: 2,
         origin: KnowledgeOrigin::Extracted,
         parameters: parameters.clone(),
         prototype_hash: "rocket-silo-v1".into(),
-        mod_versions: BTreeMap::new(), parents: vec![], training_manifest: None,
-        parts, ports, required_clearance, expansion_space: vec![], bill,
-        precedence: vec![], operation,
+        mod_versions: BTreeMap::new(),
+        parents: vec![],
+        training_manifest: None,
+        parts,
+        ports,
+        required_clearance,
+        expansion_space: vec![],
+        bill,
+        precedence: vec![],
+        operation,
     })
 }
 
@@ -718,41 +929,65 @@ fn extract_space_platform(
         ("assembling-machine-3".to_string(), 1u64),
         ("small-electric-pole".to_string(), 1u64),
     ]);
-    let parts = vec![
-        Part {
-            role: "assembler".into(),
-            entity: "assembling-machine-3".into(),
-            half_size: Some(Offset { half_x: 3, half_y: 3 }),
-            offset: Offset { half_x: 0, half_y: 0 },
-            direction: Direction::East as u8,
-            recipe: Some("space-platform-starter-pack".into()),
-            underground_half: None,
+    let parts = vec![Part {
+        role: "assembler".into(),
+        entity: "assembling-machine-3".into(),
+        half_size: Some(Offset {
+            half_x: 3,
+            half_y: 3,
+        }),
+        offset: Offset {
+            half_x: 0,
+            half_y: 0,
         },
-    ];
-    let ports = vec![
-        Port {
-            id: "output".into(),
-            mode: PortMode::InventoryOutput,
-            item: "space-platform-starter-pack".into(),
-            offset: Offset { half_x: 4, half_y: 0 },
-            direction: Direction::North as u8,
-            lane: None,
-            maximum: Rate::new(1, 600).unwrap(),
+        direction: Direction::East as u8,
+        recipe: Some("space-platform-starter-pack".into()),
+        underground_half: None,
+    }];
+    let ports = vec![Port {
+        id: "output".into(),
+        mode: PortMode::InventoryOutput,
+        item: "space-platform-starter-pack".into(),
+        offset: Offset {
+            half_x: 4,
+            half_y: 0,
         },
-    ];
+        direction: Direction::North as u8,
+        lane: None,
+        maximum: Rate::new(1, 600).unwrap(),
+        fluid_box: None,
+    }];
     let required_clearance = vec![
-        Offset { half_x: -3, half_y: -3 },
-        Offset { half_x: 3, half_y: -3 },
-        Offset { half_x: -3, half_y: 3 },
-        Offset { half_x: 3, half_y: 3 },
+        Offset {
+            half_x: -3,
+            half_y: -3,
+        },
+        Offset {
+            half_x: 3,
+            half_y: -3,
+        },
+        Offset {
+            half_x: -3,
+            half_y: 3,
+        },
+        Offset {
+            half_x: 3,
+            half_y: 3,
+        },
     ];
     let operation = OperatingContract {
         inputs: BTreeMap::from([
             ("steel-plate".into(), Rate::new(1, 60).unwrap()),
             ("processing-unit".into(), Rate::new(1, 60).unwrap()),
-            ("space-platform-foundation".into(), Rate::new(1, 60).unwrap()),
+            (
+                "space-platform-foundation".into(),
+                Rate::new(1, 60).unwrap(),
+            ),
         ]),
-        outputs: BTreeMap::from([("space-platform-starter-pack".into(), Rate::new(1, 600).unwrap())]),
+        outputs: BTreeMap::from([(
+            "space-platform-starter-pack".into(),
+            Rate::new(1, 600).unwrap(),
+        )]),
         power_watts: 250000,
         fuel_per_tick: BTreeMap::new(),
         startup_latency_ticks: 120,
@@ -763,19 +998,25 @@ fn extract_space_platform(
         unsupported_mechanisms: vec![],
     };
     Ok(ModuleDesign {
-        schema: 1,
+        schema: 2,
         id: String::new(),
         family: ModuleFamily::SpacePlatform,
-        generator_version: 1,
+        generator_version: 2,
         origin: KnowledgeOrigin::Extracted,
         parameters: parameters.clone(),
         prototype_hash: "space-platform-v1".into(),
-        mod_versions: BTreeMap::new(), parents: vec![], training_manifest: None,
-        parts, ports, required_clearance, expansion_space: vec![], bill,
-        precedence: vec![], operation,
+        mod_versions: BTreeMap::new(),
+        parents: vec![],
+        training_manifest: None,
+        parts,
+        ports,
+        required_clearance,
+        expansion_space: vec![],
+        bill,
+        precedence: vec![],
+        operation,
     })
 }
-
 
 fn extract_smelter_array(
     state: &PlanState,
@@ -789,22 +1030,31 @@ fn extract_smelter_array(
             "smelter-array: unsupported item '{item}'"
         )));
     }
-    // Determine ore and furnace count per belt
-    // Yellow belt = 15/s = 900/min
-    // Stone furnace = 0.3125/s = 18.75/min -> 48 per belt
-    // Steel furnace = 0.625/s = 37.5/min -> 24 per belt
-    // Electric furnace = 0.625/s = 37.5/min -> 24 per belt
-    let furnace_entity = "steel-furnace";
-    let furnaces_per_belt: u64 = 24;
-    let belts = 1u64; // start with 1 belt
-    let total = furnaces_per_belt * belts;
+    // Determine furnace count, entity and rate from parameters.
+    // Default unit count (used when units is None):
+    //   steel-furnace: 24 per belt (0.625/s each, 15/s belt)
+    //   stone-furnace: 48 per belt (0.3125/s each, 15/s belt)
+    let furnace_entity: &str = parameters.machine.as_deref().unwrap_or("steel-furnace");
+    let unit_count: u64 = parameters
+        .units
+        .map(|u| u as u64)
+        .unwrap_or(match furnace_entity {
+            "stone-furnace" => 48,
+            "electric-furnace" => 24,
+            _ => 24, // steel-furnace and default
+        });
+    let total = unit_count;
 
     let ore = match item.as_str() {
         "iron-plate" => "iron-ore",
         "copper-plate" => "copper-ore",
         "stone-brick" => "stone",
         "steel-plate" => "iron-plate",
-        _ => return Err(ModuleError::Unsupported(format!("smelter-array: no ore for '{item}'"))),
+        _ => {
+            return Err(ModuleError::Unsupported(format!(
+                "smelter-array: no ore for '{item}'"
+            )));
+        }
     };
 
     // Two rows of furnaces: north row offset (0, -2), south row offset (0, +2)
@@ -840,8 +1090,15 @@ fn extract_smelter_array(
             role: format!("in-inserter-{}", i).into(),
             entity: "inserter".into(),
             half_size: Some(state.entity_half_size("inserter")),
-            offset: Offset { half_x: half_x - 2, half_y: ins_hy },
-            direction: if row == 0 { Direction::South as u8 } else { Direction::North as u8 },
+            offset: Offset {
+                half_x: half_x - 2,
+                half_y: ins_hy,
+            },
+            direction: if row == 0 {
+                Direction::South as u8
+            } else {
+                Direction::North as u8
+            },
             recipe: None,
             underground_half: None,
         });
@@ -851,8 +1108,15 @@ fn extract_smelter_array(
             role: format!("out-inserter-{}", i).into(),
             entity: "inserter".into(),
             half_size: Some(state.entity_half_size("inserter")),
-            offset: Offset { half_x: half_x + 2, half_y: out_hy },
-            direction: if row == 0 { Direction::North as u8 } else { Direction::South as u8 },
+            offset: Offset {
+                half_x: half_x + 2,
+                half_y: out_hy,
+            },
+            direction: if row == 0 {
+                Direction::North as u8
+            } else {
+                Direction::South as u8
+            },
             recipe: None,
             underground_half: None,
         });
@@ -865,7 +1129,10 @@ fn extract_smelter_array(
             role: "belt".into(),
             entity: "transport-belt".into(),
             half_size: Some(state.entity_half_size("transport-belt")),
-            offset: Offset { half_x: hx, half_y: 0 },
+            offset: Offset {
+                half_x: hx,
+                half_y: 0,
+            },
             direction: Direction::East as u8,
             recipe: None,
             underground_half: None,
@@ -877,44 +1144,77 @@ fn extract_smelter_array(
             id: "input".into(),
             mode: PortMode::BeltInput,
             item: ore.into(),
-            offset: Offset { half_x: -2, half_y: 0 },
+            offset: Offset {
+                half_x: -2,
+                half_y: 0,
+            },
             direction: Direction::West as u8,
             lane: None,
             maximum: Rate::new(1, 1).unwrap(),
+            fluid_box: None,
         },
         Port {
             id: "output".into(),
             mode: PortMode::InventoryOutput,
             item: item.clone(),
-            offset: Offset { half_x: (total as i32 / 2) * 4, half_y: 0 },
+            offset: Offset {
+                half_x: (total as i32 / 2) * 4,
+                half_y: 0,
+            },
             direction: Direction::East as u8,
             lane: None,
             maximum: Rate::new(1, 1).unwrap(),
+            fluid_box: None,
         },
     ];
 
     let left = -2i32;
     let right = (total as i32 / 2) * 4 + 2;
     let required_clearance = vec![
-        Offset { half_x: left, half_y: -6 },
-        Offset { half_x: right, half_y: -6 },
-        Offset { half_x: left, half_y: 6 },
-        Offset { half_x: right, half_y: 6 },
+        Offset {
+            half_x: left,
+            half_y: -6,
+        },
+        Offset {
+            half_x: right,
+            half_y: -6,
+        },
+        Offset {
+            half_x: left,
+            half_y: 6,
+        },
+        Offset {
+            half_x: right,
+            half_y: 6,
+        },
     ];
 
-    let plates_per_tick = total as f64 * 0.625 / 60.0;
+    // Determine per-furnace crafting speed from prototype.
+    let crafting_speed = match furnace_entity {
+        "stone-furnace" => 1.0f64,
+        "electric-furnace" => 2.0f64,
+        _ => 2.0f64, // steel-furnace and default
+    };
+    let per_furnace_rate = crafting_speed * 0.3125; // steel plate base is 3.2s = 0.3125/s
+    let plates_per_tick = total as f64 * per_furnace_rate / 60.0;
     let plates_per_tick_u64 = (plates_per_tick * 60.0) as u64;
+    let furnace_power = match furnace_entity {
+        "electric-furnace" => 180000u64,
+        _ => 0u64,
+    };
+    let requires_fuel = furnace_entity != "electric-furnace";
 
     let operation = OperatingContract {
         inputs: BTreeMap::from([(ore.into(), Rate::new(plates_per_tick_u64, 60).unwrap())]),
         outputs: BTreeMap::from([(item.clone(), Rate::new(plates_per_tick_u64, 60).unwrap())]),
-        power_watts: if furnace_entity == "electric-furnace" { total * 180000 } else { 0 },
-        fuel_per_tick: BTreeMap::from([("coal".into(), Rate::new(total, 4800).unwrap())]),
+        power_watts: total * furnace_power,
+        fuel_per_tick: if requires_fuel {
+            BTreeMap::from([("coal".into(), Rate::new(total, 4800).unwrap())])
+        } else {
+            BTreeMap::new()
+        },
         startup_latency_ticks: 600,
-        startup_items: BTreeMap::from([
-            ("coal".into(), total * 10),
-            (ore.into(), total * 5),
-        ]),
+        startup_items: BTreeMap::from([("coal".into(), total * 10), (ore.into(), total * 5)]),
         local_buffer_capacity: BTreeMap::from([
             (ore.into(), total * 10),
             (item.clone(), total * 5),
@@ -925,13 +1225,23 @@ fn extract_smelter_array(
     };
 
     Ok(ModuleDesign {
-        schema: 1, id: String::new(), family: ModuleFamily::SmelterArray,
-        generator_version: 1, origin: KnowledgeOrigin::Extracted,
+        schema: 2,
+        id: String::new(),
+        family: ModuleFamily::SmelterArray,
+        generator_version: 2,
+        origin: KnowledgeOrigin::Extracted,
         parameters: parameters.clone(),
         prototype_hash: "smelter-array-v1".into(),
-        mod_versions: BTreeMap::new(), parents: vec![], training_manifest: None,
-        parts, ports, required_clearance, expansion_space: vec![], bill,
-        precedence: vec![], operation,
+        mod_versions: BTreeMap::new(),
+        parents: vec![],
+        training_manifest: None,
+        parts,
+        ports,
+        required_clearance,
+        expansion_space: vec![],
+        bill,
+        precedence: vec![],
+        operation,
     })
 }
 
@@ -945,19 +1255,32 @@ fn extract_drill_array(
         "copper-ore" => "copper-ore",
         "coal" => "coal",
         "stone" => "stone",
-        _ => return Err(ModuleError::Unsupported(format!(
-            "drill-array: unsupported item '{item}'"
-        ))),
+        _ => {
+            return Err(ModuleError::Unsupported(format!(
+                "drill-array: unsupported item '{item}'"
+            )));
+        }
     };
 
-    // Electric mining drill: 0.5 ore/s
-    // Yellow belt: 15/s -> 30 drills per belt
-    let drills_per_belt = 30u64;
-    let total = drills_per_belt;
+    // Determine drill count, entity and rate from parameters.
+    // Default: electric-mining-drill, 30 drills per yellow belt (0.5/s each, 15/s).
+    // Burner-mining-drill: 0.25 ore/s -> 60 per belt.
+    let drill_entity: &str = parameters
+        .machine
+        .as_deref()
+        .unwrap_or("electric-mining-drill");
+    let unit_count: u64 = parameters
+        .units
+        .map(|u| u as u64)
+        .unwrap_or(match drill_entity {
+            "burner-mining-drill" => 60,
+            _ => 30, // electric-mining-drill and default
+        });
+    let total = unit_count;
 
     let mut parts = Vec::new();
     let mut bill = BTreeMap::new();
-    bill.insert("electric-mining-drill".to_string(), total);
+    bill.insert(drill_entity.to_string(), total);
     bill.insert("small-electric-pole".to_string(), total / 4 + 1);
 
     for i in 0..total {
@@ -968,8 +1291,8 @@ fn extract_drill_array(
 
         parts.push(Part {
             role: format!("drill-{}", i).into(),
-            entity: "electric-mining-drill".into(),
-            half_size: Some(state.entity_half_size("electric-mining-drill")),
+            entity: drill_entity.into(),
+            half_size: Some(state.entity_half_size(drill_entity)),
             offset: Offset { half_x, half_y },
             direction: Direction::North as u8,
             recipe: None,
@@ -977,51 +1300,111 @@ fn extract_drill_array(
         });
     }
 
-    let ports = vec![
-        Port {
-            id: "output".into(),
-            mode: PortMode::InventoryOutput,
-            item: ore.into(),
-            offset: Offset { half_x: 2, half_y: 0 },
-            direction: Direction::East as u8,
-            lane: None,
-            maximum: Rate::new(1, 1).unwrap(),
+    let ports = vec![Port {
+        id: "output".into(),
+        mode: PortMode::InventoryOutput,
+        item: ore.into(),
+        offset: Offset {
+            half_x: 2,
+            half_y: 0,
         },
-    ];
+        direction: Direction::East as u8,
+        lane: None,
+        maximum: Rate::new(1, 1).unwrap(),
+        fluid_box: None,
+    }];
 
     let left = -2i32;
     let right = (total as i32 / 2) * 4;
     let required_clearance = vec![
-        Offset { half_x: left, half_y: -4 },
-        Offset { half_x: right, half_y: -4 },
-        Offset { half_x: left, half_y: 4 },
-        Offset { half_x: right, half_y: 4 },
+        Offset {
+            half_x: left,
+            half_y: -4,
+        },
+        Offset {
+            half_x: right,
+            half_y: -4,
+        },
+        Offset {
+            half_x: left,
+            half_y: 4,
+        },
+        Offset {
+            half_x: right,
+            half_y: 4,
+        },
     ];
 
-    let ore_per_tick = total as f64 * 0.5 / 60.0;
+    // Determine per-drill mining speed from prototype.
+    let mining_speed = match drill_entity {
+        "burner-mining-drill" => 0.25f64,
+        _ => 0.5f64, // electric-mining-drill
+    };
+    let ore_per_tick = total as f64 * mining_speed / 60.0;
+    let drill_power = match drill_entity {
+        "burner-mining-drill" => 0u64,
+        _ => 90000u64,
+    };
+    let required_research = match drill_entity {
+        "burner-mining-drill" => vec![],
+        _ => vec!["electric-energy-distribution-1".into()],
+    };
 
     let operation = OperatingContract {
         inputs: BTreeMap::new(),
         outputs: BTreeMap::from([(ore.into(), Rate::new(1, 2).unwrap())]),
-        power_watts: total * 90000,
+        power_watts: total * drill_power,
         fuel_per_tick: BTreeMap::new(),
         startup_latency_ticks: 60,
         startup_items: BTreeMap::new(),
         local_buffer_capacity: BTreeMap::new(),
-        required_research: vec!["electric-energy-distribution-1".into()],
+        required_research,
         required_surface: "nauvis".into(),
         unsupported_mechanisms: vec![],
     };
 
     Ok(ModuleDesign {
-        schema: 1, id: String::new(), family: ModuleFamily::DrillArray,
-        generator_version: 1, origin: KnowledgeOrigin::Extracted,
+        schema: 2,
+        id: String::new(),
+        family: ModuleFamily::DrillArray,
+        generator_version: 2,
+        origin: KnowledgeOrigin::Extracted,
         parameters: parameters.clone(),
         prototype_hash: "drill-array-v1".into(),
-        mod_versions: BTreeMap::new(), parents: vec![], training_manifest: None,
-        parts, ports, required_clearance, expansion_space: vec![], bill,
-        precedence: vec![], operation,
+        mod_versions: BTreeMap::new(),
+        parents: vec![],
+        training_manifest: None,
+        parts,
+        ports,
+        required_clearance,
+        expansion_space: vec![],
+        bill,
+        precedence: vec![],
+        operation,
     })
+}
+
+// ---------------------------------------------------------------------------
+// batch_rate: checked rational rate from batch parameters
+// ---------------------------------------------------------------------------
+
+/// Compute the rate of producing `product_amount` of an item per `crafts_per_period`
+/// crafts over `period_ticks`, given `count` parallel production units.
+///
+/// Returns `ArithmeticOverflow` if any intermediate multiplication overflows u64.
+pub fn batch_rate(
+    count: u64,
+    crafts_per_period: u64,
+    product_amount: u64,
+    period_ticks: u64,
+) -> Result<Rate, ModuleError> {
+    let per_period = count
+        .checked_mul(crafts_per_period)
+        .ok_or(ModuleError::ArithmeticOverflow)?;
+    let total_amount = per_period
+        .checked_mul(product_amount)
+        .ok_or(ModuleError::ArithmeticOverflow)?;
+    Rate::new(total_amount, period_ticks)
 }
 
 #[cfg(test)]
@@ -1032,27 +1415,36 @@ mod tests {
 
     #[test]
     fn red_science_extraction_works() {
-        let state = PlanState::from_world(
-            Arc::new(fixture_world()),
-            &[crate::ids::BotId(1)],
-        );
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[crate::ids::BotId(1)]);
         let design = extract_design(
             &state,
             ModuleFamily::RedScience,
-            &ModuleParameters { item: "automation-science-pack".into(), with_pole: false, labs: 0 },
-        ).unwrap();
+            &ModuleParameters {
+                item: "automation-science-pack".into(),
+                with_pole: false,
+                labs: 0,
+                machine: None,
+                units: None,
+            },
+        )
+        .unwrap();
         assert_eq!(design.family, ModuleFamily::RedScience);
-        assert_eq!(design.operation.outputs.get("automation-science-pack").unwrap().numerator, 1);
+        assert_eq!(
+            design
+                .operation
+                .outputs
+                .get("automation-science-pack")
+                .unwrap()
+                .numerator,
+            1
+        );
         assert_eq!(design.bill.len(), 3);
         assert_eq!(design.ports.len(), 3);
     }
 
     #[test]
     fn extracted_iron_cell_still_contains_the_actual_pair() {
-        let state = PlanState::from_world(
-            Arc::new(fixture_world()),
-            &[crate::ids::BotId(1)],
-        );
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[crate::ids::BotId(1)]);
         let design = extract_design(
             &state,
             ModuleFamily::OreToPlate,
@@ -1060,6 +1452,8 @@ mod tests {
                 item: "iron-plate".into(),
                 with_pole: false,
                 labs: 0,
+                machine: None,
+                units: None,
             },
         )
         .unwrap();
@@ -1070,10 +1464,7 @@ mod tests {
 
     #[test]
     fn copper_plate_extraction_works() {
-        let state = PlanState::from_world(
-            Arc::new(fixture_world()),
-            &[crate::ids::BotId(1)],
-        );
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[crate::ids::BotId(1)]);
         let design = extract_design(
             &state,
             ModuleFamily::OreToPlate,
@@ -1081,6 +1472,8 @@ mod tests {
                 item: "copper-plate".into(),
                 with_pole: false,
                 labs: 0,
+                machine: None,
+                units: None,
             },
         )
         .unwrap();
@@ -1090,10 +1483,7 @@ mod tests {
 
     #[test]
     fn unsupported_item_is_refused() {
-        let state = PlanState::from_world(
-            Arc::new(fixture_world()),
-            &[crate::ids::BotId(1)],
-        );
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[crate::ids::BotId(1)]);
         let result = extract_design(
             &state,
             ModuleFamily::OreToPlate,
@@ -1101,14 +1491,31 @@ mod tests {
                 item: "stone-brick".into(),
                 with_pole: false,
                 labs: 0,
+                machine: None,
+                units: None,
             },
         );
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ModuleError::Unsupported(_)));
     }
+
+    #[test]
+    fn steel_rate_uses_steel_recipe_time() {
+        // steel: 24 furnaces, 2 steel per craft (5 iron plates -> 1 steel plate),
+        // 1 product per craft output, over 960 ticks = 48 steel / 960 ticks
+        assert_eq!(
+            super::batch_rate(24, 2, 1, 960).unwrap(),
+            Rate::new(48, 960).unwrap()
+        );
+        // iron input: 24 furnaces, 2 crafts per period, 5 iron-ore per craft
+        assert_eq!(
+            super::batch_rate(24, 2, 5, 960).unwrap(),
+            Rate::new(240, 960).unwrap()
+        );
+        // overflow
+        assert!(super::batch_rate(u64::MAX, 2, 1, 960).is_err());
+    }
 }
-
-
 
 fn extract_fluid_manufacturing(
     state: &PlanState,
@@ -1117,16 +1524,18 @@ fn extract_fluid_manufacturing(
 ) -> Result<ModuleDesign, ModuleError> {
     let item = &parameters.item;
     let recipes = state.base().entity_graph.recipes();
-    let recipe = recipes.get(item).ok_or_else(|| ModuleError::Unsupported(format!(
-        "fluid-mfg: no recipe for '{item}'"
-    )))?;
+    let recipe = recipes
+        .get(item)
+        .ok_or_else(|| ModuleError::Unsupported(format!("fluid-mfg: no recipe for '{item}'")))?;
     let category = recipe.category.as_str();
     let entity = match category {
         "oil-processing" => "oil-refinery",
         "chemistry" | "crafting-with-fluid" => "chemical-plant",
-        _ => return Err(ModuleError::Unsupported(format!(
-            "fluid-mfg: unsupported category '{category}' for '{item}'"
-        ))),
+        _ => {
+            return Err(ModuleError::Unsupported(format!(
+                "fluid-mfg: unsupported category '{category}' for '{item}'"
+            )));
+        }
     };
 
     let mut bill = BTreeMap::new();
@@ -1150,44 +1559,68 @@ fn extract_fluid_manufacturing(
     let is_3x3 = entity == "oil-refinery";
     let half = if is_3x3 { 3 } else { 2 };
 
-    let parts = vec![
-        Part {
-            role: entity.into(),
-            entity: entity.into(),
-            half_size: Some(Offset { half_x: half, half_y: half }),
-            offset: Offset { half_x: 0, half_y: 0 },
-            direction: Direction::North as u8,
-            recipe: Some(item.clone()),
-            underground_half: None,
+    let parts = vec![Part {
+        role: entity.into(),
+        entity: entity.into(),
+        half_size: Some(Offset {
+            half_x: half,
+            half_y: half,
+        }),
+        offset: Offset {
+            half_x: 0,
+            half_y: 0,
         },
-    ];
+        direction: Direction::North as u8,
+        recipe: Some(item.clone()),
+        underground_half: None,
+    }];
 
     let ports = vec![
         Port {
             id: "fluid-input".into(),
             mode: PortMode::BeltInput,
             item: "pipe".into(),
-            offset: Offset { half_x: -2, half_y: -3 },
+            offset: Offset {
+                half_x: -2,
+                half_y: -3,
+            },
             direction: Direction::West as u8,
             lane: None,
             maximum: Rate::new(1, 60).unwrap(),
+            fluid_box: None,
         },
         Port {
             id: "fluid-output".into(),
             mode: PortMode::InventoryOutput,
             item: output.clone(),
-            offset: Offset { half_x: 2, half_y: 3 },
+            offset: Offset {
+                half_x: 2,
+                half_y: 3,
+            },
             direction: Direction::North as u8,
             lane: None,
             maximum: Rate::new(1, 60).unwrap(),
+            fluid_box: None,
         },
     ];
 
     let required_clearance = vec![
-        Offset { half_x: -3, half_y: -3 },
-        Offset { half_x: 3, half_y: -3 },
-        Offset { half_x: -3, half_y: 3 },
-        Offset { half_x: 3, half_y: 3 },
+        Offset {
+            half_x: -3,
+            half_y: -3,
+        },
+        Offset {
+            half_x: 3,
+            half_y: -3,
+        },
+        Offset {
+            half_x: -3,
+            half_y: 3,
+        },
+        Offset {
+            half_x: 3,
+            half_y: 3,
+        },
     ];
 
     let power = if is_3x3 { 420000u64 } else { 210000u64 };
@@ -1196,7 +1629,10 @@ fn extract_fluid_manufacturing(
     let mut inps = BTreeMap::new();
     if let Some(ref ing) = recipe.ingredients {
         for ingr in ing.iter() {
-            inps.insert(ingr.name.clone(), Rate::new(ingr.amount as u64, energy_ticks).unwrap());
+            inps.insert(
+                ingr.name.clone(),
+                Rate::new(ingr.amount as u64, energy_ticks).unwrap(),
+            );
         }
     }
     let mut outs = BTreeMap::new();
@@ -1219,10 +1655,10 @@ fn extract_fluid_manufacturing(
     };
 
     Ok(ModuleDesign {
-        schema: 1,
+        schema: 2,
         id: String::new(),
         family,
-        generator_version: 1,
+        generator_version: 2,
         origin: KnowledgeOrigin::Extracted,
         parameters: parameters.clone(),
         prototype_hash: "extracted-v1".into(),

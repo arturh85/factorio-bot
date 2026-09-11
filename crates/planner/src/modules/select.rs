@@ -13,13 +13,10 @@ use factorio_bot_core::types::Position;
 use crate::control::PlanControl;
 use crate::ids::BotId;
 use crate::modules::artifact::{
-    ModuleDesign, ModuleError, ModuleFamily, ModuleParameters, KnowledgeOrigin,
-    OperatingContract,
+    KnowledgeOrigin, ModuleDesign, ModuleError, ModuleFamily, ModuleParameters, OperatingContract,
 };
-use crate::modules::cache::{get_design, CacheMode, LibraryCache};
-use crate::modules::instance::{
-    InstanceMemory, ModuleInstance, PartState, Placement, PortBinding,
-};
+use crate::modules::cache::{CacheMode, LibraryCache, get_design};
+use crate::modules::instance::{InstanceMemory, ModuleInstance, PartState, Placement, PortBinding};
 use crate::state::PlanState;
 
 // ---------------------------------------------------------------------------
@@ -83,7 +80,13 @@ pub fn select_candidates(
         let params = ModuleParameters {
             item: request.item.clone(),
             with_pole: false,
-            labs: if *family == ModuleFamily::RedScience { 1 } else { 0 },
+            labs: if *family == ModuleFamily::RedScience {
+                1
+            } else {
+                0
+            },
+            machine: None,
+            units: None,
         };
 
         match get_design(cache, state, *family, &params, mode) {
@@ -159,7 +162,8 @@ pub fn site_candidates(
                 }
 
                 control.checkpoint().map_err(|_| ModuleError::Cancelled)?;
-                control.charge(crate::control::WorkKind::Site)
+                control
+                    .charge(crate::control::WorkKind::Site)
                     .map_err(|_| ModuleError::Cancelled)?;
 
                 let half_x = anchor_hx + dx * 12; // 6-tile spacing
@@ -172,7 +176,10 @@ pub fn site_candidates(
                     let px = half_x + part.offset.half_x;
                     let py = half_y + part.offset.half_y;
                     let pos = Position::new(px as f64 * 0.5, py as f64 * 0.5);
-                    let dir = <Direction as factorio_bot_core::num_traits::FromPrimitive>::from_u8(part.direction).unwrap_or(Direction::North);
+                    let dir = <Direction as factorio_bot_core::num_traits::FromPrimitive>::from_u8(
+                        part.direction,
+                    )
+                    .unwrap_or(Direction::North);
                     direction = part.direction;
 
                     if !state.is_area_free_facing(&part.entity, &pos, dir) {
@@ -243,8 +250,8 @@ mod tests {
             support_ticks: 36000,
         };
 
-        let candidates = select_candidates(&request, &state, &mut cache, CacheMode::On, &control)
-            .unwrap();
+        let candidates =
+            select_candidates(&request, &state, &mut cache, CacheMode::On, &control).unwrap();
         assert!(!candidates.is_empty());
         assert_eq!(candidates[0].family, ModuleFamily::OreToPlate);
         assert_eq!(candidates[0].parameters.item, "iron-plate");
@@ -262,8 +269,8 @@ mod tests {
             support_ticks: 36000,
         };
 
-        let candidates = select_candidates(&request, &state, &mut cache, CacheMode::On, &control)
-            .unwrap();
+        let candidates =
+            select_candidates(&request, &state, &mut cache, CacheMode::On, &control).unwrap();
         assert!(!candidates.is_empty());
         assert_eq!(candidates[0].family, ModuleFamily::OreToPlate);
     }
@@ -280,8 +287,8 @@ mod tests {
             support_ticks: 36000,
         };
 
-        let candidates = select_candidates(&request, &state, &mut cache, CacheMode::On, &control)
-            .unwrap();
+        let candidates =
+            select_candidates(&request, &state, &mut cache, CacheMode::On, &control).unwrap();
         assert!(candidates.is_empty());
     }
 
@@ -292,15 +299,17 @@ mod tests {
 
         // Create a minimal design.
         let design = ModuleDesign {
-            schema: 1,
+            schema: 2,
             id: "test".into(),
             family: ModuleFamily::OreToPlate,
-            generator_version: 1,
+            generator_version: 2,
             origin: KnowledgeOrigin::Extracted,
             parameters: ModuleParameters {
                 item: "iron-plate".into(),
                 with_pole: false,
                 labs: 0,
+                machine: None,
+                units: None,
             },
             prototype_hash: "test".into(),
             mod_versions: BTreeMap::new(),
@@ -340,15 +349,17 @@ mod tests {
         });
 
         let design = ModuleDesign {
-            schema: 1,
+            schema: 2,
             id: "test".into(),
             family: ModuleFamily::OreToPlate,
-            generator_version: 1,
+            generator_version: 2,
             origin: KnowledgeOrigin::Extracted,
             parameters: ModuleParameters {
                 item: "iron-plate".into(),
                 with_pole: false,
                 labs: 0,
+                machine: None,
+                units: None,
             },
             prototype_hash: "test".into(),
             mod_versions: BTreeMap::new(),

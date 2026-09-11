@@ -242,22 +242,25 @@ mod tests {
                 item: "iron-plate".into(),
                 with_pole: false,
                 labs: 0,
+                machine: None,
+                units: None,
             },
             prototype_hash: "test".into(),
             mod_versions: BTreeMap::new(),
             parents: vec![],
             training_manifest: None,
-            parts: vec![
-                crate::modules::artifact::Part {
-                    role: "drill".into(),
-                    entity: "burner-mining-drill".into(),
-                    offset: crate::modules::artifact::Offset { half_x: 0, half_y: 0 },
-                    direction: 0,
-                    recipe: None,
-                    underground_half: None,
-                    half_size: None,
+            parts: vec![crate::modules::artifact::Part {
+                role: "drill".into(),
+                entity: "burner-mining-drill".into(),
+                offset: crate::modules::artifact::Offset {
+                    half_x: 0,
+                    half_y: 0,
                 },
-            ],
+                direction: 0,
+                recipe: None,
+                underground_half: None,
+                half_size: None,
+            }],
             ports: vec![],
             required_clearance: vec![],
             expansion_space: vec![],
@@ -293,8 +296,11 @@ mod tests {
         state.create_entity(drill_entity.clone());
 
         let result = reconcile(instance, &design, &state).unwrap();
-        assert_eq!(result.parts.get("drill"), Some(&PartState::Standing),
-            "drill should be Standing after attaching entity");
+        assert_eq!(
+            result.parts.get("drill"),
+            Some(&PartState::Standing),
+            "drill should be Standing after attaching entity"
+        );
         // Furnace is not in the design's parts, so it won't appear in result.
     }
 }

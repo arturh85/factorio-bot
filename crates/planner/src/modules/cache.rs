@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use crate::modules::artifact::{
     DesignId, ModuleDesign, ModuleError, ModuleFamily, ModuleParameters, Rate,
 };
-use std::collections::BTreeSet;
 use crate::modules::families::extract_design;
 use crate::state::PlanState;
+use std::collections::BTreeSet;
 
 // ---------------------------------------------------------------------------
 // Validation
@@ -159,6 +159,15 @@ pub fn get_design(
         // For now, iterate to find a matching design.
         for design in cache.designs.values() {
             if design.family == family && design.parameters == *parameters {
+                // Reject cached designs from an incompatible schema version.
+                if design.schema < 2 {
+                    // Remove stale entry and treat as a miss.
+                    let stale_id = design.id.clone();
+                    let _ = design;
+                    cache.designs.remove(&stale_id);
+                    cache.misses += 1;
+                    break;
+                }
                 cache.hits += 1;
                 return Ok(design.clone());
             }
@@ -195,6 +204,14 @@ pub fn validate_design(
     design: &ModuleDesign,
     _state: &PlanState,
 ) -> Result<ValidationEvidence, ModuleError> {
+    // 0. Reject designs from an incompatible schema version.
+    if design.schema < 2 {
+        return Err(ModuleError::Incompatible(format!(
+            "design schema {} is incompatible with current schema 2",
+            design.schema
+        )));
+    }
+
     // 1. Check for duplicate role IDs.
     let mut role_set = BTreeMap::new();
     for part in &design.parts {
@@ -300,7 +317,7 @@ pub fn validate_design(
 mod tests {
     use super::*;
 
-use crate::modules::artifact::{
+    use crate::modules::artifact::{
         KnowledgeOrigin, ModuleFamily, ModuleParameters, Offset, OperatingContract, Part, Rate,
     };
     use crate::state::PlanState;
@@ -311,31 +328,34 @@ use crate::modules::artifact::{
     fn test_design() -> ModuleDesign {
         // A minimal valid design for cache testing.
         ModuleDesign {
-            schema: 1,
+            schema: 2,
             id: "test-id".into(),
             family: ModuleFamily::OreToPlate,
-            generator_version: 1,
+            generator_version: 2,
             origin: KnowledgeOrigin::Extracted,
             parameters: ModuleParameters {
                 item: "iron-plate".into(),
                 with_pole: false,
                 labs: 0,
+                machine: None,
+                units: None,
             },
             prototype_hash: "test-hash".into(),
             mod_versions: BTreeMap::new(),
             parents: vec![],
             training_manifest: None,
-            parts: vec![
-                Part {
-                    role: "drill".into(),
-                    entity: "burner-mining-drill".into(),
-                    offset: Offset { half_x: 0, half_y: 0 },
-                    direction: 0,
-                    recipe: None,
-                    underground_half: None,
-                    half_size: None,
+            parts: vec![Part {
+                role: "drill".into(),
+                entity: "burner-mining-drill".into(),
+                offset: Offset {
+                    half_x: 0,
+                    half_y: 0,
                 },
-            ],
+                direction: 0,
+                recipe: None,
+                underground_half: None,
+                half_size: None,
+            }],
             ports: vec![],
             required_clearance: vec![],
             expansion_space: vec![],
@@ -358,57 +378,80 @@ use crate::modules::artifact::{
 
     #[test]
     fn identical_requests_generate_once() {
-        let state = PlanState::from_world(
-            Arc::new(fixture_world()),
-            &[crate::ids::BotId(1)],
-        );
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[crate::ids::BotId(1)]);
         let mut cache = LibraryCache::new();
 
         let parameters = ModuleParameters {
             item: "iron-plate".into(),
             with_pole: false,
             labs: 0,
+            machine: None,
+            units: None,
         };
 
         // First call: cache miss, generates.
-        let _a = get_design(&mut cache, &state, ModuleFamily::OreToPlate, &parameters, CacheMode::On).unwrap();
+        let _a = get_design(
+            &mut cache,
+            &state,
+            ModuleFamily::OreToPlate,
+            &parameters,
+            CacheMode::On,
+        )
+        .unwrap();
         assert_eq!(cache.generated, 1);
         assert_eq!(cache.misses, 1);
         assert_eq!(cache.hits, 0);
 
         // Second call: cache hit.
-        let _b = get_design(&mut cache, &state, ModuleFamily::OreToPlate, &parameters, CacheMode::On).unwrap();
+        let _b = get_design(
+            &mut cache,
+            &state,
+            ModuleFamily::OreToPlate,
+            &parameters,
+            CacheMode::On,
+        )
+        .unwrap();
         assert_eq!(cache.generated, 1, "no new generation on cache hit");
         assert_eq!(cache.hits, 1, "hit counter incremented");
     }
 
     #[test]
     fn cache_off_generates_every_time() {
-        let state = PlanState::from_world(
-            Arc::new(fixture_world()),
-            &[crate::ids::BotId(1)],
-        );
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[crate::ids::BotId(1)]);
         let mut cache = LibraryCache::new();
 
         let parameters = ModuleParameters {
             item: "iron-plate".into(),
             with_pole: false,
             labs: 0,
+            machine: None,
+            units: None,
         };
 
-        let _a = get_design(&mut cache, &state, ModuleFamily::OreToPlate, &parameters, CacheMode::Off).unwrap();
+        let _a = get_design(
+            &mut cache,
+            &state,
+            ModuleFamily::OreToPlate,
+            &parameters,
+            CacheMode::Off,
+        )
+        .unwrap();
         assert_eq!(cache.generated, 1);
 
-        let _b = get_design(&mut cache, &state, ModuleFamily::OreToPlate, &parameters, CacheMode::Off).unwrap();
+        let _b = get_design(
+            &mut cache,
+            &state,
+            ModuleFamily::OreToPlate,
+            &parameters,
+            CacheMode::Off,
+        )
+        .unwrap();
         assert_eq!(cache.generated, 2, "CacheMode::Off regenerates");
     }
 
     #[test]
     fn validate_valid_design_succeeds() {
-        let state = PlanState::from_world(
-            Arc::new(fixture_world()),
-            &[crate::ids::BotId(1)],
-        );
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[crate::ids::BotId(1)]);
         let design = test_design();
         let evidence = validate_design(&design, &state).unwrap();
         assert_eq!(evidence.level, ValidationLevel::Structural);
@@ -416,16 +459,16 @@ use crate::modules::artifact::{
 
     #[test]
     fn validate_duplicate_role_is_rejected() {
-        let state = PlanState::from_world(
-            Arc::new(fixture_world()),
-            &[crate::ids::BotId(1)],
-        );
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[crate::ids::BotId(1)]);
         let mut design = test_design();
         // Add a second part with the same role.
         design.parts.push(Part {
             role: "drill".into(),
             entity: "stone-furnace".into(),
-            offset: Offset { half_x: 2, half_y: 0 },
+            offset: Offset {
+                half_x: 2,
+                half_y: 0,
+            },
             direction: 0,
             recipe: None,
             underground_half: None,
@@ -436,27 +479,26 @@ use crate::modules::artifact::{
 
     #[test]
     fn validate_unknown_precedence_role_is_rejected() {
-        let state = PlanState::from_world(
-            Arc::new(fixture_world()),
-            &[crate::ids::BotId(1)],
-        );
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[crate::ids::BotId(1)]);
         let mut design = test_design();
-        design.precedence.push(("nonexistent".into(), "drill".into()));
+        design
+            .precedence
+            .push(("nonexistent".into(), "drill".into()));
         assert!(validate_design(&design, &state).is_err());
     }
 
     #[test]
     fn validate_cyclic_precedence_is_rejected() {
-        let state = PlanState::from_world(
-            Arc::new(fixture_world()),
-            &[crate::ids::BotId(1)],
-        );
+        let state = PlanState::from_world(Arc::new(fixture_world()), &[crate::ids::BotId(1)]);
         let mut design = test_design();
         // Add a second part so we can create a cycle.
         design.parts.push(Part {
             role: "furnace".into(),
             entity: "stone-furnace".into(),
-            offset: Offset { half_x: 0, half_y: 4 },
+            offset: Offset {
+                half_x: 0,
+                half_y: 4,
+            },
             direction: 0,
             recipe: Some("iron-plate".into()),
             underground_half: None,

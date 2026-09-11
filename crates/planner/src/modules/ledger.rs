@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::modules::artifact::{ModuleError, Rate, InstanceId};
+use crate::modules::artifact::{InstanceId, ModuleError, Rate};
 
 // ---------------------------------------------------------------------------
 // Interval
@@ -25,7 +25,11 @@ pub struct Interval {
 impl Interval {
     /// Create a new interval. Returns `None` if `end <= start`.
     pub fn new(start: u64, end: u64) -> Option<Self> {
-        if end <= start { None } else { Some(Self { start, end }) }
+        if end <= start {
+            None
+        } else {
+            Some(Self { start, end })
+        }
     }
 
     /// Duration of this interval in ticks.
@@ -124,14 +128,25 @@ impl OperatingLedger {
     /// Returns `Err` if the claim would exceed the source's available capacity
     /// during any part of the requested interval.
     pub fn reserve_flow(&mut self, claim: FlowClaim) -> Result<(), ModuleError> {
-        let source = self.sources.get(&claim.source).ok_or_else(|| {
-            ModuleError::Unfunded(format!("unknown source '{}'", claim.source))
-        })?;
+        let source = self
+            .sources
+            .get(&claim.source)
+            .ok_or_else(|| ModuleError::Unfunded(format!("unknown source '{}'", claim.source)))?;
 
-        // The claim must be within the source's available period.
-        if !source.available.overlaps(&claim.interval) {
+        // Validate that the claim interval is non-empty.
+        if claim.interval.start >= claim.interval.end {
+            return Err(ModuleError::InvalidArtifact(format!(
+                "claim interval [{}, {}) is empty",
+                claim.interval.start, claim.interval.end
+            )));
+        }
+
+        // The source must fully contain the claim interval.
+        if source.available.start > claim.interval.start
+            || source.available.end < claim.interval.end
+        {
             return Err(ModuleError::Unfunded(format!(
-                "claim interval {:?} does not overlap source '{}' availability {:?}",
+                "claim interval {:?} is not fully contained in source '{}' availability {:?}",
                 claim.interval, claim.source, source.available
             )));
         }
@@ -171,14 +186,14 @@ impl OperatingLedger {
         for window in boundaries.windows(2) {
             let seg_start = window[0];
             let seg_end = window[1];
-            if seg_start >= seg_end { continue; }
+            if seg_start >= seg_end {
+                continue;
+            }
 
             // Compute total rate claimed by existing flows in this segment.
             let mut total_existing = 0u128;
             for existing in &self.flows {
-                if existing.source == claim.source
-                    && existing.interval.contains(seg_start)
-                {
+                if existing.source == claim.source && existing.interval.contains(seg_start) {
                     total_existing = total_existing
                         .checked_add(existing.rate.numerator as u128)
                         .ok_or(ModuleError::ArithmeticOverflow)?;
@@ -219,7 +234,8 @@ impl OperatingLedger {
     pub fn reserve_stock(&mut self, key: &str, claim: StockClaim) -> Result<(), ModuleError> {
         // Compute available stock at the claim time.
         let initial = self.initial_stock.get(key).copied().unwrap_or(0);
-        let total_delivered: u64 = self.stock_deliveries
+        let total_delivered: u64 = self
+            .stock_deliveries
             .get(key)
             .map(|d| {
                 d.iter()
@@ -228,7 +244,8 @@ impl OperatingLedger {
                     .sum()
             })
             .unwrap_or(0);
-        let total_claimed_before: u64 = self.stock_claims
+        let total_claimed_before: u64 = self
+            .stock_claims
             .get(key)
             .map(|c| {
                 c.iter()
@@ -290,7 +307,10 @@ mod tests {
             id: "iron-out".into(),
             item: "iron-plate".into(),
             rate: rate_per_min(15),
-            available: Interval { start: 100, end: 18100 },
+            available: Interval {
+                start: 100,
+                end: 18100,
+            },
         });
 
         let claim = FlowClaim {
@@ -298,10 +318,20 @@ mod tests {
             consumer: 1,
             item: "iron-plate".into(),
             rate: rate_per_min(10),
-            interval: Interval { start: 100, end: 18100 },
+            interval: Interval {
+                start: 100,
+                end: 18100,
+            },
         };
         ledger.reserve_flow(claim.clone()).unwrap();
-        assert!(ledger.reserve_flow(FlowClaim { consumer: 2, ..claim }).is_err());
+        assert!(
+            ledger
+                .reserve_flow(FlowClaim {
+                    consumer: 2,
+                    ..claim
+                })
+                .is_err()
+        );
         assert_eq!(ledger.flows.len(), 1);
     }
 
@@ -311,27 +341,40 @@ mod tests {
         ledger.add_source(SourceCapacity {
             id: "belt-1".into(),
             item: "iron-plate".into(),
-            rate: rate_per_min(15),  // one yellow belt
-            available: Interval { start: 0, end: 36000 },
+            rate: rate_per_min(15), // one yellow belt
+            available: Interval {
+                start: 0,
+                end: 36000,
+            },
         });
 
         // First consumer takes 10/min
-        ledger.reserve_flow(FlowClaim {
-            source: "belt-1".into(),
-            consumer: 1,
-            item: "iron-plate".into(),
-            rate: rate_per_min(10),
-            interval: Interval { start: 0, end: 18000 },
-        }).unwrap();
+        ledger
+            .reserve_flow(FlowClaim {
+                source: "belt-1".into(),
+                consumer: 1,
+                item: "iron-plate".into(),
+                rate: rate_per_min(10),
+                interval: Interval {
+                    start: 0,
+                    end: 18000,
+                },
+            })
+            .unwrap();
 
         // Second consumer takes 5/min in a different sub-interval = OK
-        ledger.reserve_flow(FlowClaim {
-            source: "belt-1".into(),
-            consumer: 2,
-            item: "iron-plate".into(),
-            rate: rate_per_min(5),
-            interval: Interval { start: 18000, end: 36000 },
-        }).unwrap();
+        ledger
+            .reserve_flow(FlowClaim {
+                source: "belt-1".into(),
+                consumer: 2,
+                item: "iron-plate".into(),
+                rate: rate_per_min(5),
+                interval: Interval {
+                    start: 18000,
+                    end: 36000,
+                },
+            })
+            .unwrap();
 
         assert_eq!(ledger.flows.len(), 2);
     }
@@ -343,25 +386,38 @@ mod tests {
             id: "coal-out".into(),
             item: "coal".into(),
             rate: rate_per_min(30),
-            available: Interval { start: 0, end: 72000 },
+            available: Interval {
+                start: 0,
+                end: 72000,
+            },
         });
 
         // Two non-overlapping intervals should both succeed.
-        ledger.reserve_flow(FlowClaim {
-            source: "coal-out".into(),
-            consumer: 1,
-            item: "coal".into(),
-            rate: rate_per_min(20),
-            interval: Interval { start: 0, end: 10000 },
-        }).unwrap();
+        ledger
+            .reserve_flow(FlowClaim {
+                source: "coal-out".into(),
+                consumer: 1,
+                item: "coal".into(),
+                rate: rate_per_min(20),
+                interval: Interval {
+                    start: 0,
+                    end: 10000,
+                },
+            })
+            .unwrap();
 
-        ledger.reserve_flow(FlowClaim {
-            source: "coal-out".into(),
-            consumer: 2,
-            item: "coal".into(),
-            rate: rate_per_min(20),
-            interval: Interval { start: 10000, end: 20000 },
-        }).unwrap();
+        ledger
+            .reserve_flow(FlowClaim {
+                source: "coal-out".into(),
+                consumer: 2,
+                item: "coal".into(),
+                rate: rate_per_min(20),
+                interval: Interval {
+                    start: 10000,
+                    end: 20000,
+                },
+            })
+            .unwrap();
 
         assert_eq!(ledger.flows.len(), 2);
     }
@@ -371,14 +427,30 @@ mod tests {
         let mut ledger = OperatingLedger::default();
         ledger.set_initial_stock("iron-chest", 100);
 
-        ledger.reserve_stock("iron-chest", StockClaim {
-            consumer: 1, at: 1000, quantity: 60,
-        }).unwrap();
+        ledger
+            .reserve_stock(
+                "iron-chest",
+                StockClaim {
+                    consumer: 1,
+                    at: 1000,
+                    quantity: 60,
+                },
+            )
+            .unwrap();
 
         // Second claim of 50 should fail (only 40 remaining).
-        assert!(ledger.reserve_stock("iron-chest", StockClaim {
-            consumer: 2, at: 1000, quantity: 50,
-        }).is_err());
+        assert!(
+            ledger
+                .reserve_stock(
+                    "iron-chest",
+                    StockClaim {
+                        consumer: 2,
+                        at: 1000,
+                        quantity: 50,
+                    }
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -387,17 +459,170 @@ mod tests {
         ledger.set_initial_stock("coal-chest", 10);
 
         // Deliver 50 coal at tick 500.
-        ledger.deliver_stock("coal-chest", StockDelivery { at: 500, quantity: 50 });
+        ledger.deliver_stock(
+            "coal-chest",
+            StockDelivery {
+                at: 500,
+                quantity: 50,
+            },
+        );
 
         // Claim 30 at tick 1000 (after delivery) should succeed.
-        ledger.reserve_stock("coal-chest", StockClaim {
-            consumer: 1, at: 1000, quantity: 30,
-        }).unwrap();
+        ledger
+            .reserve_stock(
+                "coal-chest",
+                StockClaim {
+                    consumer: 1,
+                    at: 1000,
+                    quantity: 30,
+                },
+            )
+            .unwrap();
 
         // Remaining: 10 + 50 - 30 = 30. Claiming 40 should fail.
-        assert!(ledger.reserve_stock("coal-chest", StockClaim {
-            consumer: 2, at: 1000, quantity: 40,
-        }).is_err());
+        assert!(
+            ledger
+                .reserve_stock(
+                    "coal-chest",
+                    StockClaim {
+                        consumer: 2,
+                        at: 1000,
+                        quantity: 40,
+                    }
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn partial_overlap_does_not_fund_a_longer_claim() {
+        let mut l = OperatingLedger::default();
+        l.add_source(SourceCapacity {
+            id: "iron".into(),
+            item: "iron-plate".into(),
+            rate: Rate::new(60, 3600).unwrap(),
+            available: Interval::new(100, 200).unwrap(),
+        });
+        let claim = FlowClaim {
+            source: "iron".into(),
+            consumer: 1,
+            item: "iron-plate".into(),
+            rate: Rate::new(30, 3600).unwrap(),
+            interval: Interval::new(50, 150).unwrap(),
+        };
+        assert!(l.reserve_flow(claim).is_err());
+        assert!(l.flows.is_empty());
+    }
+
+    #[test]
+    fn fractional_overlap_is_rejected() {
+        let mut l = OperatingLedger::default();
+        l.add_source(SourceCapacity {
+            id: "copper".into(),
+            item: "copper-plate".into(),
+            rate: Rate::new(60, 3600).unwrap(),
+            available: Interval::new(100, 200).unwrap(),
+        });
+        // Claim starts before source, ends inside = partial overlap.
+        let claim = FlowClaim {
+            source: "copper".into(),
+            consumer: 1,
+            item: "copper-plate".into(),
+            rate: Rate::new(30, 3600).unwrap(),
+            interval: Interval::new(50, 199).unwrap(),
+        };
+        assert!(l.reserve_flow(claim).is_err());
+    }
+
+    #[test]
+    fn disjoint_claim_is_rejected() {
+        let mut l = OperatingLedger::default();
+        l.add_source(SourceCapacity {
+            id: "stone".into(),
+            item: "stone".into(),
+            rate: Rate::new(60, 3600).unwrap(),
+            available: Interval::new(100, 200).unwrap(),
+        });
+        // Entirely before source.
+        assert!(l
+            .reserve_flow(FlowClaim {
+                source: "stone".into(),
+                consumer: 1,
+                item: "stone".into(),
+                rate: Rate::new(10, 3600).unwrap(),
+                interval: Interval::new(0, 50).unwrap(),
+            })
+            .is_err());
+        // Entirely after source.
+        assert!(l
+            .reserve_flow(FlowClaim {
+                source: "stone".into(),
+                consumer: 1,
+                item: "stone".into(),
+                rate: Rate::new(10, 3600).unwrap(),
+                interval: Interval::new(300, 400).unwrap(),
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn interval_id_overflow_is_rejected() {
+        let err = Interval::new(5, 5);
+        assert!(err.is_none());
+        let err2 = Interval::new(10, 5);
+        assert!(err2.is_none());
+    }
+
+    #[test]
+    fn empty_claim_interval_is_rejected() {
+        let mut l = OperatingLedger::default();
+        l.add_source(SourceCapacity {
+            id: "coal".into(),
+            item: "coal".into(),
+            rate: Rate::new(60, 3600).unwrap(),
+            available: Interval::new(0, 1000).unwrap(),
+        });
+        // Empty interval should fail validation.
+        let result = l.reserve_flow(FlowClaim {
+            source: "coal".into(),
+            consumer: 1,
+            item: "coal".into(),
+            rate: Rate::new(10, 3600).unwrap(),
+            interval: Interval { start: 500, end: 500 },
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn failed_claim_does_not_commit() {
+        let mut l = OperatingLedger::default();
+        l.add_source(SourceCapacity {
+            id: "iron".into(),
+            item: "iron-plate".into(),
+            rate: Rate::new(30, 3600).unwrap(),
+            available: Interval::new(0, 36000).unwrap(),
+        });
+        // Claim fits.
+        l.reserve_flow(FlowClaim {
+            source: "iron".into(),
+            consumer: 1,
+            item: "iron-plate".into(),
+            rate: Rate::new(20, 3600).unwrap(),
+            interval: Interval::new(0, 18000).unwrap(),
+        })
+        .unwrap();
+        assert_eq!(l.flows.len(), 1);
+        // Second claim over capacity should fail and NOT be committed.
+        assert!(l
+            .reserve_flow(FlowClaim {
+                source: "iron".into(),
+                consumer: 2,
+                item: "iron-plate".into(),
+                rate: Rate::new(20, 3600).unwrap(),
+                interval: Interval::new(0, 18000).unwrap(),
+            })
+            .is_err());
+        assert_eq!(l.flows.len(), 1);
     }
 
     #[test]
@@ -408,7 +633,10 @@ mod tests {
             consumer: 1,
             item: "iron-plate".into(),
             rate: rate_per_min(10),
-            interval: Interval { start: 0, end: 1000 },
+            interval: Interval {
+                start: 0,
+                end: 1000,
+            },
         };
         assert!(ledger.reserve_flow(claim).is_err());
     }
@@ -420,16 +648,26 @@ mod tests {
             id: "iron-out".into(),
             item: "iron-plate".into(),
             rate: rate_per_min(15),
-            available: Interval { start: 5000, end: 10000 },
+            available: Interval {
+                start: 5000,
+                end: 10000,
+            },
         });
 
         // Claim entirely outside the source's available interval.
-        assert!(ledger.reserve_flow(FlowClaim {
-            source: "iron-out".into(),
-            consumer: 1,
-            item: "iron-plate".into(),
-            rate: rate_per_min(10),
-            interval: Interval { start: 0, end: 1000 },
-        }).is_err());
+        assert!(
+            ledger
+                .reserve_flow(FlowClaim {
+                    source: "iron-out".into(),
+                    consumer: 1,
+                    item: "iron-plate".into(),
+                    rate: rate_per_min(10),
+                    interval: Interval {
+                        start: 0,
+                        end: 1000
+                    },
+                })
+                .is_err()
+        );
     }
 }

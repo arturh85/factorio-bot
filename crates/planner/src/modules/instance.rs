@@ -77,20 +77,34 @@ pub struct ModuleInstance {
 ///
 /// Stored inside [`ReplanMemory`] so that interrupted builds resume the
 /// same instances rather than starting new ones.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceMemory {
     /// Next instance ID to assign (monotonically increasing).
+    /// Starts at 1; id 0 is reserved for "unassigned".
     pub next_id: InstanceId,
     /// All known instances, keyed by ID.
     pub instances: BTreeMap<InstanceId, ModuleInstance>,
 }
 
+impl Default for InstanceMemory {
+    fn default() -> Self {
+        Self {
+            next_id: 1,
+            instances: BTreeMap::new(),
+        }
+    }
+}
+
 impl InstanceMemory {
     /// Allocate a new, unique instance ID.
-    pub fn allocate_id(&mut self) -> InstanceId {
+    ///
+    /// Returns `ModuleError::InvalidArtifact` on overflow (max `u64::MAX`).
+    pub fn allocate_id(&mut self) -> Result<InstanceId, ModuleError> {
         let id = self.next_id;
-        self.next_id = self.next_id.checked_add(1).unwrap_or(1);
-        id
+        self.next_id = self.next_id.checked_add(1).ok_or_else(|| {
+            ModuleError::InvalidArtifact("instance ID overflow".into())
+        })?;
+        Ok(id)
     }
 
     /// Store a module instance.
@@ -167,7 +181,7 @@ mod tests {
     #[test]
     fn an_old_record_has_no_invented_module_identity() {
         let empty = InstanceMemory::default();
-        assert_eq!(empty.next_id, 0);
+        assert_eq!(empty.next_id, 1);
         assert!(empty.instances.is_empty());
     }
 
@@ -175,11 +189,11 @@ mod tests {
     fn instance_ids_are_monotonic() {
         #[allow(unused_mut)]
         let mut mem = InstanceMemory::default();
-        let id1 = mem.allocate_id();
-        let id2 = mem.allocate_id();
-        assert_eq!(id1, 0);
-        assert_eq!(id2, 1);
-        assert_eq!(mem.next_id, 2);
+        let id1 = mem.allocate_id().unwrap();
+        let id2 = mem.allocate_id().unwrap();
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert_eq!(mem.next_id, 3);
     }
 
     #[test]
@@ -187,7 +201,7 @@ mod tests {
         #[allow(unused_mut)]
         let mut mem = InstanceMemory::default();
         let instance = ModuleInstance {
-            id: mem.allocate_id(),
+            id: mem.allocate_id().unwrap(),
             design_id: "test-design".into(),
             placement: Placement {
                 surface: "nauvis".into(),
@@ -214,7 +228,7 @@ mod tests {
         #[allow(unused_mut)]
         let mut mem = InstanceMemory::default();
         let mut instance = ModuleInstance {
-            id: mem.allocate_id(),
+            id: mem.allocate_id().unwrap(),
             design_id: "ore-to-plate".into(),
             placement: Placement {
                 surface: "nauvis".into(),

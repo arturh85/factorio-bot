@@ -108,3 +108,5 @@ mod tile_reservation;
 mod unreachable_memory;
 #[path = "world_round_trip.rs"]
 mod world_round_trip;
+#[path = "module_launch_memory.rs"]
+mod module_launch_memory;

@@ -8,6 +8,7 @@
 
 use crate::action::{ActionKind, Effect};
 use crate::ids::{ActionId, ChainId};
+use crate::modules::instance::InstanceMemory;
 use crate::network::ActionNetwork;
 use crate::schedule::Schedule;
 use crate::state::PlanState;
@@ -223,6 +224,11 @@ pub struct ReplanMemory {
     /// The overrides `complete_cell` made: which entities were accepted as
     /// standing even though the layout would not have claimed them.
     pub recovery_overrides: BTreeSet<Pos>,
+    /// Module instance memory, persisted across replan boundaries.
+    /// Module instances carry identity, placement, part state, and port
+    /// bindings. Defaults to empty when deserializing old records.
+    #[serde(default)]
+    pub modules: InstanceMemory,
 }
 
 /// Walk the network and state to capture intent records for every action that
@@ -361,6 +367,7 @@ pub fn capture_intent(
         chains,
         blocks: Vec::new(),
         recovery_overrides: BTreeSet::new(),
+        modules: InstanceMemory::default(),
     }
 }
 
@@ -604,6 +611,7 @@ mod tests {
             chains: vec![],
             blocks: vec![],
             recovery_overrides: BTreeSet::new(),
+            modules: InstanceMemory::default(),
         };
         assert_eq!(memory.plan_round, 1);
         assert_eq!(memory.entities.len(), 1);

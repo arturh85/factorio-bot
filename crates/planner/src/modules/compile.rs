@@ -19,7 +19,7 @@ use crate::method::{ExpansionCtx, MethodRegistry, Step, run_steps};
 use crate::modules::artifact::{ModuleDesign, Rate};
 pub use crate::modules::cache::CacheMode;
 use crate::modules::cache::LibraryCache;
-use crate::modules::instance::ModuleInstance;
+use crate::modules::instance::{InstanceMemory, ModuleInstance};
 use crate::modules::ledger::OperatingLedger;
 use crate::modules::select::{
     ModuleSelection, ProductionRequest, select_candidates, site_candidates,
@@ -70,6 +70,9 @@ impl Default for PlannerOptions {
 pub struct PlannerSession {
     pub library: LibraryCache,
     pub observed_revision: u64,
+    /// Module instance memory, preserved across replan sessions.
+    /// Tracks all known instance identities, part states, and port bindings.
+    pub memory: crate::modules::instance::InstanceMemory,
 }
 
 impl PlannerSession {
@@ -77,6 +80,7 @@ impl PlannerSession {
         Self {
             library: LibraryCache::new(),
             observed_revision: 0,
+            memory: crate::modules::instance::InstanceMemory::default(),
         }
     }
 }
@@ -578,6 +582,7 @@ pub fn plan_with_session(
         chains: vec![],
         blocks: vec![],
         recovery_overrides: BTreeSet::new(),
+        modules: InstanceMemory::default(),
     };
     crate::request::PlanResult {
         status: crate::request::PlanStatus::Complete,
@@ -659,6 +664,7 @@ mod tests {
             cache_mode: CacheMode::On,
             candidate_limit: 1,
             support_ticks: 18000,
+            external_rates: BTreeMap::new(),
         };
         let mut session = PlannerSession::new();
 
@@ -776,6 +782,7 @@ mod tests {
             cache_mode: CacheMode::On,
             candidate_limit: 3,
             support_ticks: 18000,
+            external_rates: BTreeMap::new(),
         };
         let mut session = PlannerSession::new();
         let roster = [BotId(1)];

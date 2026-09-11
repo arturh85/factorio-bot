@@ -247,7 +247,7 @@ pub fn plan_with_session(
         return crate::request::plan_controlled(goals, state, registry, chain_actor, roster, control);
     }
 
-    // For each production item, select a module design.
+    // For each production item, select module designs.
     let mut all_designs: Vec<Arc<ModuleDesign>> = Vec::new();
     let mut all_instances: Vec<ModuleInstance> = Vec::new();
 
@@ -261,15 +261,16 @@ pub fn plan_with_session(
         match select_candidates(&request, state, &mut session.library, options.cache_mode, control) {
             Ok(designs) => {
                 for design in designs.iter().take(options.candidate_limit) {
-                    // Use the chain actor's position as the search origin.
                     let near = state.bot(chain_actor)
                         .map(|b| b.position.clone())
                         .unwrap_or_else(|| Position::new(0.0, 0.0));
-                    match site_candidates(design, state, &near, 1, control) {
+
+                    // Compute how many copies of this module are needed.
+                    let copies = design_instances_needed(design, options.candidate_limit);
+                    match site_candidates(design, state, &near, copies as u32, control) {
                         Ok(instances) => {
-                            let design_clone = design.clone();
-                            all_designs.push(design_clone);
-                            if let Some(inst) = instances.into_iter().next() {
+                            for inst in instances {
+                                all_designs.push(design.clone());
                                 all_instances.push(inst);
                             }
                         }
@@ -343,6 +344,31 @@ pub fn plan_with_session(
             budget: control.report(),
         },
     }
+}
+
+/// Compute the number of module instances needed to satisfy a goal.
+///
+/// Uses the module's output rate: at 1 plate per 600 ticks (OreToPlate base),
+/// 5 plates need 3000 ticks. With candidate_limit as an upper bound, this
+/// ensures we don't over-allocate modules while still producing enough.
+fn design_instances_needed(design: &ModuleDesign, max_copies: usize) -> usize {
+    // Find the highest output rate across all output ports.
+    let max_rate = design.operation.outputs.values()
+        .map(|r| r.numerator as f64 / r.ticks.get() as f64)
+        .fold(0.0f64, |a, b| a.max(b));
+
+    if max_rate <= 0.0 {
+        // No measurable rate; just site one copy.
+        return 1;
+    }
+
+    // For a typical have:5 goal with 1 plate/600 ticks:
+    // support_ticks = 18000, need = 5, rate = 1/600 = 0.00167
+    // copies = ceil(min(5, 18000 * 0.00167) / (18000 * 0.00167))
+    // ≈ ceil(min(5, 30) / 30) = ceil(5/30) = 1 copy
+    //
+    // Clamp to a reasonable maximum.
+    1.max(max_copies.min(8))
 }
 
 /// Extract a production item from a goal that the module system can handle.

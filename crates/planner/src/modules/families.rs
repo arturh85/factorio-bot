@@ -51,8 +51,8 @@ fn extract_ore_to_plate(
             role: "drill".into(),
             entity: "burner-mining-drill".into(),
             // Drill at origin, facing north. Its output emerges on the
-            // tile immediately north of its north face (at y = 1.5 tiles
-            // from origin).
+            // tile immediately north of its north face (at y = 1.0 tiles
+            // from centre, since burner-mining-drill is 2x2).
             offset: Offset { half_x: 0, half_y: 0 },
             direction: Direction::North as u8,
             recipe: None,
@@ -62,8 +62,8 @@ fn extract_ore_to_plate(
             role: "furnace".into(),
             entity: "stone-furnace".into(),
             // Furnace placed so its south input face sits on the drill's
-            // output tile. Furnace centre at (0.5, 2.5) tiles north of
-            // drill centre = offset (1, 5) in half-tiles.
+            // output tile at y = 2. Furnace centre at (0.5, 2.5) tiles =
+            // offset (1, 5) in half-tiles, covering tile (0, 2)-(1, 3).
             //
             // The stone-furnace is ~2x2 so it occupies tiles (0,2)-(1,3)
             // which overlaps the drill's output tile (0,2). Items pass

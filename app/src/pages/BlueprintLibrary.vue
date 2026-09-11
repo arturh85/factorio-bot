@@ -145,17 +145,18 @@ onMounted(async () => {
 /** Compute bounding box of all parts in half-tile units. */
 
 function entityHalfSize(entity: string): {hw: number, hh: number} {
+  // Collision-box half-sizes measured from live Factorio 2.1.17 prototypes.
   const sizes: Record<string, {hw: number, hh: number}> = {
-    'burner-mining-drill': {hw: 3, hh: 3},
-    'stone-furnace': {hw: 2, hh: 2},
-    'burner-inserter': {hw: 1, hh: 1},
-    'inserter': {hw: 1, hh: 1},
+    'burner-mining-drill': {hw: 2, hh: 2},   // 2×2 tiles (not 3×3)
+    'stone-furnace':      {hw: 2, hh: 2},    // 2×2 tiles
+    'burner-inserter':    {hw: 1, hh: 1},    // 1×1 tile
+    'inserter':           {hw: 1, hh: 1},    // 1×1 tile
     'assembling-machine-1': {hw: 2, hh: 2}
   };
   return sizes[entity] ?? {hw: 2, hh: 2};
 }
 
-function arrowPoints(dir: number, entity: string, cx: number, cy: number): string {
+function svgArrowPoints(dir: number, entity: string, cx: number, cy: number): string {
   const half = entityHalfSize(entity);
   // Arrow triangle inside the entity, pointing in the facing direction.
   // Base is at the entity centre, tip at ~60% toward the facing edge.
@@ -267,24 +268,20 @@ function entityLabel(entity: string): string {
                  class="w-full max-w-sm rounded border bg-gray-50"
                  xmlns="http://www.w3.org/2000/svg">
 
-              <!-- Grid background (1 tile = 2 half-tile units) -->
+              <!-- Grid covering the viewBox, 1 tile = 2 half-tile units -->
               <defs>
-                <pattern id="grid" width="2" height="2" patternUnits="userSpaceOnUse">
-                  <path d="M 2 0 L 0 0 0 2" fill="none" stroke="#e5e7eb" stroke-width="0.1"/>
+                <pattern id="grid" width="2" height="2" patternUnits="userSpaceOnUse"
+                         x="0" y="0">
+                  <path d="M 2 0 L 0 0 0 2" fill="none" stroke="#e5e7eb" stroke-width="0.15"/>
                 </pattern>
-                <!-- Direction arrow marker for entity facing -->
-                <marker id="arrow-up" markerWidth="4" markerHeight="4" refX="0" refY="4" orient="auto">
-                  <polygon points="0,0 4,0 2,4" fill="#374151"/>
-                </marker>
               </defs>
-              <rect width="100%" height="100%" fill="url(#grid)"/>
+              <rect x="-999" y="-999" width="1998" height="1998" fill="url(#grid)"/>
 
-              <!-- Tiled entities. Factorio y-positive = north (up).
-                   SVG y-positive = south (down), so entity y positions
-                   and the tile step are negated. -->
+              <!-- Tiled cells. SVG y-positive = down, so north (Factorio -y) is SVG -y.
+                   Entity rects are drawn at -(factorio_y + half_hh) so their centre
+                   aligns with -factorio_y. -->
               <g v-for="i in (tileCount[design.id] || 1)" :key="'tile-' + i"
                  :transform="'translate(0, ' + (-(i-1) * tileStepY(design)) + ')'">
-                <!-- Entity rectangles with direction indicators -->
                 <g v-for="part in design.parts" :key="part.role">
                   <rect :x="part.offset.half_x - entityHalfSize(part.entity).hw"
                         :y="-(part.offset.half_y + entityHalfSize(part.entity).hh)"
@@ -293,30 +290,16 @@ function entityLabel(entity: string): string {
                         rx="0.3"
                         :fill="colorForEntityType(part.entity)"
                         stroke="#374151" stroke-width="0.2"/>
-                  <!-- Direction arrow inside entity facing side -->
-                  <polygon v-if="part.role !== 'furnace'"
-                           :points="arrowPoints(part.direction, part.entity, part.offset.half_x, part.offset.half_y)"
-                           fill="#fbbf24" opacity="0.7"/>
-                </g>
-                <!-- Line labels -->
-                <g v-for="part in design.parts" :key="'lbl-'+part.role">
-                  <text :x="part.offset.half_x" :y="-(part.offset.half_y + 0.2)"
+                  <text :x="part.offset.half_x" :y="-(part.offset.half_y) + 0.3"
                         text-anchor="middle" font-size="0.45" fill="white"
                         font-weight="bold">{{ entityLabel(part.role) }}</text>
-                  <text v-if="part.role === 'furnace'" :x="part.offset.half_x" :y="-(part.offset.half_y + 4.5)"
-                        text-anchor="middle" font-size="0.4" fill="#fbbf24" font-weight="bold">HAND</text>
+                  <text v-if="part.role === 'furnace'" :x="part.offset.half_x" :y="-(part.offset.half_y) + 3.5"
+                        text-anchor="middle" font-size="0.35" fill="#fbbf24" font-weight="bold">hand</text>
+                  <polygon v-if="part.role !== 'furnace'"
+                           :points="svgArrowPoints(part.direction, part.entity, part.offset.half_x, part.offset.half_y)"
+                           fill="#fbbf24" opacity="0.7"/>
                 </g>
-                <!-- Ore flow arrow from drill to furnace (direct feed) -->
-                <line v-if="i > 1 || design.family === 'OreToPlate'"
-                      x1="0" :y1="-3" x2="0" :y2="-(tileStepY(design) - 3)"
-                      stroke="#9ca3af" stroke-width="0.3" stroke-dasharray="1 0.5"
-                      opacity="0.4"/>
               </g>
-
-              <!-- Tile-set label -->
-              <text x="12" y="0.8" text-anchor="middle" font-size="0.5" fill="#9ca3af">
-                {{ tileCount[design.id] || 1 }} cells stacked
-              </text>
             </svg>
           </div>
 

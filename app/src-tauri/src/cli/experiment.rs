@@ -128,7 +128,7 @@ fn run_offline(args: &ArgMatches) -> Result<()> {
     let manifest_json = std::fs::read_to_string(manifest_path)
         .into_diagnostic()
         .map_err(|e| miette!("failed to read manifest: {e}"))?;
-    let _manifest: Manifest = factorio_bot_core::serde_json::from_str(&manifest_json)
+    let manifest: Manifest = factorio_bot_core::serde_json::from_str(&manifest_json)
         .into_diagnostic()
         .map_err(|e| miette!("failed to parse manifest: {e}"))?;
 
@@ -168,6 +168,8 @@ fn run_report(args: &ArgMatches) -> Result<()> {
     let results_csv = results_path.join("trials.csv");
     let results_json = results_path.join("comparison.json");
 
+    let results;
+
     // Try CSV first.
     if results_csv.exists() {
         let csv_content = std::fs::read_to_string(&results_csv)
@@ -175,7 +177,7 @@ fn run_report(args: &ArgMatches) -> Result<()> {
             .map_err(|e| miette!("failed to read {results_csv:?}: {e}"))?;
         results = parse_trials_csv(&csv_content)?;
     } else if results_json.exists() {
-        let json_content = std::fs::read_to_string(&results_json)
+        let _json_content = std::fs::read_to_string(&results_json)
             .into_diagnostic()
             .map_err(|e| miette!("failed to read {results_json:?}: {e}"))?;
         return Err(miette!("JSON results not yet supported; use CSV format"));

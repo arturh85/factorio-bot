@@ -193,6 +193,37 @@ fn compile_module_placement(
                 pinned: None,
                 label: format!("set recipe {} for {}", recipe, part.role),
             })));
+
+            // Insert input materials for non-OreToPlate modules
+            // (OreToPlate gets ore directly from the drill).
+            if design.family != crate::modules::artifact::ModuleFamily::OreToPlate {
+                for port in &design.ports {
+                    if port.mode == crate::modules::artifact::PortMode::BeltInput {
+                        steps.push(Step::Act(Box::new(Action {
+                            id: ids.next(),
+                            kind: ActionKind::Insert {
+                                pos: pos.clone(),
+                                entity: part.entity.clone(),
+                                slot: crate::action::InventorySlot::AssemblerInput,
+                                item: port.item.clone(),
+                                count: 1,
+                            },
+                            pre: vec![
+                                Condition::AtPosition {
+                                    who: crate::action::Actor::Role,
+                                    pos: pos.clone(),
+                                    radius: 3.0,
+                                    min_radius: 0.5,
+                                },
+                            ],
+                            eff: vec![],
+                            duration: 100,
+                            pinned: None,
+                            label: format!("insert 1 {} into {}", port.item, part.role),
+                        })));
+                    }
+                }
+            }
         }
     }
 

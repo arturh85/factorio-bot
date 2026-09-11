@@ -122,15 +122,6 @@ fn pumpjack_design() -> Value {
 
 fn red_science_design() -> Value {
     let hw = |name: &str| -> Value { PROTO_SIZES.half_size(name) };
-    // Two-belt RedScience cell — aligned inserters, power pole between them.
-    //   gear-belt      -9  [-10,-8]
-    //   copper-belt    -7  [ -8,-6]  (touches gear belt)
-    //   gear-inserter  -5  [ -6,-4]  long-handed, picks gear at -9
-    //   copper-inserter -3  [ -4,-2]  long-handed, picks copper at -7
-    //   assembler       0  [ -3, 3]
-    //   out-inserter    4  [  3, 5]
-    //   output-belt     6  [  5, 7]
-    //   power-pole     -4, hy=-4  (covers all machines within 5 tiles)
     serde_json::json!({
         "schema":1,"id":"red-science-cell","family":"RedScience",
         "parameters":{"item":"automation-science-pack","with_pole":false,"labs":0},
@@ -154,30 +145,30 @@ fn red_science_design() -> Value {
              "offset":{"half_x":-7,"half_y":2},"direction":0,"recipe":null,
              "half_size":hw("transport-belt")},
             {"role":"gear-inserter","entity":"long-handed-inserter",
-             "offset":{"half_x":-5,"half_y":0},"direction":12,"recipe":null,
+             "offset":{"half_x":-5,"half_y":-2},"direction":12,"recipe":null,
              "half_size":hw("long-handed-inserter")},
-            {"role":"copper-inserter","entity":"long-handed-inserter",
-             "offset":{"half_x":-3,"half_y":0},"direction":12,"recipe":null,
-             "half_size":hw("long-handed-inserter")},
+            {"role":"power-pole","entity":"small-electric-pole",
+             "offset":{"half_x":-5,"half_y":0},"direction":0,"recipe":null,
+             "half_size":hw("small-electric-pole")},
+            {"role":"copper-inserter","entity":"inserter",
+             "offset":{"half_x":-5,"half_y":2},"direction":12,"recipe":null,
+             "half_size":hw("inserter")},
             {"role":"assembler","entity":"assembling-machine-1",
              "offset":{"half_x":0,"half_y":0},"direction":4,
              "recipe":"automation-science-pack",
              "half_size":hw("assembling-machine-1")},
             {"role":"out-inserter","entity":"inserter",
-             "offset":{"half_x":4,"half_y":0},"direction":12,"recipe":null,
+             "offset":{"half_x":5,"half_y":0},"direction":12,"recipe":null,
              "half_size":hw("inserter")},
             {"role":"output-belt","entity":"transport-belt",
-             "offset":{"half_x":6,"half_y":-2},"direction":0,"recipe":null,
+             "offset":{"half_x":7,"half_y":-2},"direction":0,"recipe":null,
              "half_size":hw("transport-belt")},
             {"role":"output-belt","entity":"transport-belt",
-             "offset":{"half_x":6,"half_y":0},"direction":0,"recipe":null,
+             "offset":{"half_x":7,"half_y":0},"direction":0,"recipe":null,
              "half_size":hw("transport-belt")},
             {"role":"output-belt","entity":"transport-belt",
-             "offset":{"half_x":6,"half_y":2},"direction":0,"recipe":null,
-             "half_size":hw("transport-belt")},
-            {"role":"power-pole","entity":"small-electric-pole",
-             "offset":{"half_x":-4,"half_y":-4},"direction":0,"recipe":null,
-             "half_size":hw("small-electric-pole")}
+             "offset":{"half_x":7,"half_y":2},"direction":0,"recipe":null,
+             "half_size":hw("transport-belt")}
         ],
         "ports":[
             {"id":"input-gears","mode":"BeltInput","item":"iron-gear-wheel",
@@ -185,9 +176,9 @@ fn red_science_design() -> Value {
             {"id":"input-copper","mode":"BeltInput","item":"copper-plate",
              "offset":{"half_x":-8,"half_y":-2},"direction":4},
             {"id":"output","mode":"InventoryOutput","item":"automation-science-pack",
-             "offset":{"half_x":7,"half_y":2},"direction":0}
+             "offset":{"half_x":8,"half_y":2},"direction":0}
         ],
-        "bill":{"assembling-machine-1":1,"long-handed-inserter":2,
+        "bill":{"assembling-machine-1":1,"long-handed-inserter":1,"inserter":1,
                 "transport-belt":9,"small-electric-pole":1},
         "operation":{
             "inputs":{"copper-plate":{"numerator":1,"ticks":180},

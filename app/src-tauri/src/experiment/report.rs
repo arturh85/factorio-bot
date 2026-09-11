@@ -290,6 +290,125 @@ pub fn write_report(
 }
 
 // ---------------------------------------------------------------------------
+// First-rocket report
+// ---------------------------------------------------------------------------
+
+/// Write a first-rocket experiment report.
+#[allow(dead_code)]
+pub fn write_first_rocket_report(
+    results: &[TrialResult],
+    output_dir: &Path,
+) -> Result<(), ReportError> {
+    use std::fs;
+    use std::io::Write;
+
+    fs::create_dir_all(output_dir)
+        .map_err(|e| ReportError::IoError(e.to_string()))?;
+
+    let md_path = output_dir.join("report.md");
+    let mut md = fs::File::create(&md_path)
+        .map_err(|e| ReportError::IoError(e.to_string()))?;
+
+    writeln!(md, "# First Rocket Experiment Report
+").unwrap();
+
+    // Summary
+    let total = results.len();
+    let successes = results.iter().filter(|r| r.outcome == TrialOutcome::Success).count();
+    let failures = results.iter().filter(|r| r.outcome == TrialOutcome::Failure).count();
+    let timeouts = results.iter().filter(|r| r.outcome == TrialOutcome::Timeout).count();
+    let invalid = results.iter().filter(|r| r.outcome == TrialOutcome::Invalid).count();
+
+    writeln!(md, "## Summary
+").unwrap();
+    writeln!(md, "| Metric | Value |").unwrap();
+    writeln!(md, "|---|---|").unwrap();
+    writeln!(md, "| Total trials | {} |", total).unwrap();
+    writeln!(md, "| Successful | {} |", successes).unwrap();
+    writeln!(md, "| Failed | {} |", failures).unwrap();
+    writeln!(md, "| Timeout | {} |", timeouts).unwrap();
+    writeln!(md, "| Invalid | {} |", invalid).unwrap();
+    writeln!(md).unwrap();
+
+    // Per-variant breakdown
+    writeln!(md, "## Per-Variant Results
+").unwrap();
+    writeln!(md, "| Variant | Trials | Success | Failure | Timeout |").unwrap();
+    writeln!(md, "|---|---|---|---|---|").unwrap();
+
+    let mut variants: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for r in results {
+        variants.insert(r.key.variant.clone());
+    }
+    for variant in &variants {
+        let v_trials: Vec<&TrialResult> = results.iter().filter(|r| &r.key.variant == variant).collect();
+        let v_total = v_trials.len();
+        let v_ok = v_trials.iter().filter(|r| r.outcome == TrialOutcome::Success).count();
+        let v_fail = v_trials.iter().filter(|r| r.outcome == TrialOutcome::Failure).count();
+        let v_time = v_trials.iter().filter(|r| r.outcome == TrialOutcome::Timeout).count();
+        writeln!(md, "| {} | {} | {} | {} | {} |", variant, v_total, v_ok, v_fail, v_time).unwrap();
+    }
+    writeln!(md).unwrap();
+
+    // Detailed trial results
+    writeln!(md, "## Detailed Results
+").unwrap();
+    writeln!(md, "| # | Seed | Bots | Variant | Outcome | Ticks | Planning | Wall | Reason |").unwrap();
+    writeln!(md, "|---|---|---|---|---|---|---|---|---|").unwrap();
+
+    for (i, result) in results.iter().enumerate() {
+        let ticks = result.game_ticks.map_or("-".into(), |t| format!("{} ({:.1}m)", t, t as f64 / 3600.0 / 60.0));
+        let planning = result.planning_ms.map_or("-".into(), |t| format!("{} ms", t));
+        let wall = format!("{} s", result.wall_ms / 1000);
+        let reason = result.reason.as_deref().unwrap_or("-");
+        writeln!(
+            md,
+            "| {} | {} | {} | {} | {:?} | {} | {} | {} | {} |",
+            i + 1, result.key.seed, result.key.bots, result.key.variant,
+            result.outcome, ticks, planning, wall, reason
+        ).unwrap();
+    }
+    writeln!(md).unwrap();
+
+    // Terminal evidence
+    let has_evidence: Vec<&TrialResult> = results.iter()
+        .filter(|r| !r.terminal_evidence_paths.is_empty()).collect();
+    if !has_evidence.is_empty() {
+        writeln!(md, "## Terminal Evidence
+").unwrap();
+        for result in &has_evidence {
+            writeln!(md, "- Seed {} variant {}:", result.key.seed, result.key.variant).unwrap();
+            for path in &result.terminal_evidence_paths {
+                writeln!(md, "  - `{}`", path).unwrap();
+            }
+        }
+        writeln!(md).unwrap();
+    }
+
+    // Per-seed timing
+    writeln!(md, "## Timing by Seed
+").unwrap();
+    let mut seeds: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    for r in results {
+        seeds.insert(r.key.seed);
+    }
+    for seed in &seeds {
+        let s_results: Vec<&TrialResult> = results.iter().filter(|r| r.key.seed == *seed).collect();
+        let best_ticks = s_results.iter()
+            .filter(|r| r.outcome == TrialOutcome::Success)
+            .filter_map(|r| r.game_ticks)
+            .min();
+        if let Some(best) = best_ticks {
+            writeln!(md, "- Seed {}: best {} ticks ({:.1}m)", seed, best, best as f64 / 3600.0 / 60.0).unwrap();
+        } else {
+            writeln!(md, "- Seed {}: no successful trials", seed).unwrap();
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -321,6 +440,14 @@ mod tests {
             planning_ms: Some(500),
             wall_ms: 15000,
             reason: None,
+            policy_hash: None,
+            save_hash: None,
+            terminal_evidence_paths: vec![],
+            terminal_tick: None,
+            initial_tick: None,
+            planning_pause_ms: None,
+            phase_times: BTreeMap::new(),
+            active_wall_ms: None,
         }
     }
 

@@ -75,6 +75,14 @@ fn run_single_trial(key: &TrialKey, map_dir: &Path) -> TrialResult {
                 planning_ms: None,
                 wall_ms: 0,
                 reason: Some(format!("missing map: {e}")),
+                policy_hash: None,
+                save_hash: None,
+                terminal_evidence_paths: vec![],
+                terminal_tick: None,
+                initial_tick: None,
+                planning_pause_ms: None,
+                phase_times: BTreeMap::new(),
+                active_wall_ms: None,
             };
         }
     };
@@ -91,6 +99,14 @@ fn run_single_trial(key: &TrialKey, map_dir: &Path) -> TrialResult {
                 planning_ms: None,
                 wall_ms: 0,
                 reason: Some(format!("parse error: {e}")),
+                policy_hash: None,
+                save_hash: None,
+                terminal_evidence_paths: vec![],
+                terminal_tick: None,
+                initial_tick: None,
+                planning_pause_ms: None,
+                phase_times: BTreeMap::new(),
+                active_wall_ms: None,
             };
         }
     };
@@ -115,6 +131,14 @@ fn run_single_trial(key: &TrialKey, map_dir: &Path) -> TrialResult {
                 planning_ms: None,
                 wall_ms: 0,
                 reason: Some("no chain actor available".into()),
+                policy_hash: None,
+                save_hash: None,
+                terminal_evidence_paths: vec![],
+                terminal_tick: None,
+                initial_tick: None,
+                planning_pause_ms: None,
+                phase_times: BTreeMap::new(),
+                active_wall_ms: None,
             };
         }
     };
@@ -157,6 +181,14 @@ fn run_single_trial(key: &TrialKey, map_dir: &Path) -> TrialResult {
                 planning_ms: Some(elapsed_ms),
                 wall_ms: elapsed_ms,
                 reason: None,
+                policy_hash: None,
+                save_hash: None,
+                terminal_evidence_paths: vec![],
+                terminal_tick: Some(makespan),
+                initial_tick: Some(0),
+                planning_pause_ms: None,
+                phase_times: BTreeMap::new(),
+                active_wall_ms: None,
             }
         }
         Err(e) => TrialResult {
@@ -167,6 +199,14 @@ fn run_single_trial(key: &TrialKey, map_dir: &Path) -> TrialResult {
             planning_ms: Some(elapsed_ms),
             wall_ms: elapsed_ms,
             reason: Some(e.to_string()),
+            policy_hash: None,
+            save_hash: None,
+            terminal_evidence_paths: vec![],
+            terminal_tick: None,
+            initial_tick: None,
+            planning_pause_ms: None,
+            phase_times: BTreeMap::new(),
+            active_wall_ms: None,
         },
     }
 }

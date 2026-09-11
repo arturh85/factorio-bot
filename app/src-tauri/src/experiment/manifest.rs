@@ -1,15 +1,20 @@
 #![allow(dead_code)]
 //! Experiment manifest: source declaration and resolved matrix.
 //!
-//! The source manifest (`experiments/starter-modules.json`) declares
-//! seeds, rosters, tasks, and variants. [`Manifest`] deserializes it;
-//! [`expand_matrix`] produces the full list of [`TrialKey`]s.
+//! Two formats:
+//! - Starter Modules format (`experiments/starter-modules.json`): seeds × bots ×
+//!   tasks × variants × repetitions for planner comparison.
+//! - First Rocket format (`experiments/first-rocket.json`): stages-based rocket
+//!   launch milestone with policy hash, recipe preferences, and deadlines.
+//!
+//! [`expand_matrix`] produces the full list of [`TrialKey`]s from either format.
+//! [`expand_first_rocket_trials`] produces trials from the first-rocket format.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
-// Source manifest (matches JSON schema)
+// Source manifest (matches JSON schema) — Starter modules format
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +41,87 @@ pub struct Manifest {
     pub library_initial_state: String,
     pub reset_policy: String,
     pub sink_policy: String,
+}
+
+// ---------------------------------------------------------------------------
+// Policy stage — a single milestone stage (first-rocket format)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub struct PolicyStage {
+    pub id: u32,
+    pub name: String,
+    #[serde(default)]
+    pub deadline_ticks: Option<u64>,
+    #[serde(default)]
+    pub iron_target: Option<u32>,
+    #[serde(default)]
+    pub copper_target: Option<u32>,
+    #[serde(default)]
+    pub prerequisites: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// First rocket manifest (matches experiments/first-rocket.json)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub struct FirstRocketManifest {
+    pub schema: u32,
+    pub name: String,
+    pub description: String,
+    pub seeds: Vec<u32>,
+    pub bots: Vec<u32>,
+    pub stages: u32,
+    pub rocket_parts_required: u32,
+    pub policy_hash: FirstRocketPolicy,
+    pub recipe_preferences: BTreeMap<String, Vec<String>>,
+    pub row_variants: BTreeMap<String, Vec<String>>,
+    pub copy_budgets: BTreeMap<String, u32>,
+    pub deadlines: BTreeMap<String, u64>,
+    pub support_horizon: BTreeMap<String, u64>,
+    pub research_priorities: Vec<ResearchBranch>,
+    pub materials: BTreeMap<String, factorio_bot_core::serde_json::Value>,
+    pub rate_export_distinction: BTreeMap<String, String>,
+    pub surface: String,
+    pub peaceful: bool,
+    pub visibility: String,
+    pub game_speed: u32,
+    pub pause_during_planning: bool,
+    pub game_tick_limit: u64,
+    pub trial_wall_seconds: u64,
+    pub planning_deadline_ms: u64,
+    pub candidate_limit: usize,
+    pub support_ticks: u32,
+    pub reset_policy: String,
+    pub sink_policy: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub struct FirstRocketPolicy {
+    pub stages: Vec<PolicyStage>,
+    pub rocket_parts_required: u32,
+    pub starter_pack: BTreeMap<String, u32>,
+    pub foundation_cost: BTreeMap<String, u32>,
+    pub total_payload_steel: u32,
+    pub total_payload_cable: u32,
+    pub rocket_part_ingredients: BTreeMap<String, u32>,
+    pub default_bots: Vec<u32>,
+    pub preferred_roles: BTreeMap<String, Vec<u32>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub struct ResearchBranch {
+    pub branch: u32,
+    pub techs: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -80,13 +166,12 @@ impl std::fmt::Display for ManifestError {
 impl std::error::Error for ManifestError {}
 
 // ---------------------------------------------------------------------------
-// Matrix expansion
+// Matrix expansion — starter modules format
 // ---------------------------------------------------------------------------
 
 /// Expand a manifest into the full list of trial keys.
 #[allow(dead_code)]
 pub fn expand_matrix(manifest: &Manifest) -> Result<Vec<TrialKey>, ManifestError> {
-    // Validate limits.
     if manifest.seeds.is_empty() {
         return Err(ManifestError::InvalidField("seeds must not be empty".into()));
     }
@@ -128,6 +213,58 @@ pub fn expand_matrix(manifest: &Manifest) -> Result<Vec<TrialKey>, ManifestError
 }
 
 // ---------------------------------------------------------------------------
+// Matrix expansion — first rocket format
+// ---------------------------------------------------------------------------
+
+/// Expand a first-rocket manifest into trial keys.
+/// Each trial is a (seed × 1-bot-config × task=rocket × variant=base) for the
+/// diagnostic peaceful trial, plus default-enemy variants for the primary cohort.
+#[allow(dead_code)]
+pub fn expand_first_rocket_trials(
+    manifest: &FirstRocketManifest,
+    with_peaceful_diagnostic: bool,
+) -> Result<Vec<TrialKey>, ManifestError> {
+    if manifest.seeds.is_empty() {
+        return Err(ManifestError::InvalidField("seeds must not be empty".into()));
+    }
+    if manifest.bots.is_empty() {
+        return Err(ManifestError::InvalidField("bots must not be empty".into()));
+    }
+
+    let mut trials = Vec::new();
+
+    // Peaceful diagnostic (single trial)
+    if with_peaceful_diagnostic {
+        for seed in &manifest.seeds {
+            for bots in &manifest.bots {
+                trials.push(TrialKey {
+                    seed: *seed,
+                    bots: *bots,
+                    task: "rocket".into(),
+                    variant: "peaceful-diagnostic".into(),
+                    repetition: 0,
+                });
+            }
+        }
+    }
+
+    // Primary default-enemy cohort: one repetition per seed × bots
+    for seed in &manifest.seeds {
+        for bots in &manifest.bots {
+            trials.push(TrialKey {
+                seed: *seed,
+                bots: *bots,
+                task: "rocket".into(),
+                variant: "default-enemy".into(),
+                repetition: 0,
+            });
+        }
+    }
+
+    Ok(trials)
+}
+
+// ---------------------------------------------------------------------------
 // Resolved manifest
 // ---------------------------------------------------------------------------
 
@@ -145,6 +282,32 @@ pub struct ResolvedManifest {
     pub module_library_hash: String,
 }
 
+/// A resolved first-rocket manifest with fingerprints and save paths.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct ResolvedFirstRocketManifest {
+    pub schema: u32,
+    pub name: String,
+    pub description: String,
+    pub seeds: Vec<u32>,
+    pub bots: Vec<u32>,
+    pub stages: u32,
+    pub rocket_parts_required: u32,
+    pub policy_hash: FirstRocketPolicy,
+    pub deadlines: BTreeMap<String, u64>,
+    pub game_tick_limit: u64,
+    pub trial_wall_seconds: u64,
+    pub planning_deadline_ms: u64,
+    pub peaceful: bool,
+    pub game_speed: u32,
+    pub git_commit: String,
+    pub mod_versions: BTreeMap<String, String>,
+    pub prototype_hash: String,
+    pub save_paths: BTreeMap<String, String>,
+    pub binary_hash: String,
+    pub script_hash: String,
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -158,7 +321,6 @@ mod tests {
         let raw = include_str!("../../../../experiments/starter-modules.json");
         let manifest: Manifest = serde_json::from_str(raw).unwrap();
         let trials = expand_matrix(&manifest).unwrap();
-        // Expected: 10 seeds * 2 bot counts * 2 tasks * 3 variants * 3 reps = 360
         assert_eq!(trials.len(), 360);
     }
 
@@ -214,7 +376,30 @@ mod tests {
             sink_policy: "available-red-only-research-by-name".into(),
         };
         let trials = expand_matrix(&manifest).unwrap();
-        // 2 seeds * 2 bot counts * 2 tasks * 2 variants * 2 reps = 32
         assert_eq!(trials.len(), 32);
+    }
+
+    #[test]
+    fn first_rocket_expansion_produces_peaceful_and_default_enemy() {
+        let raw = include_str!("../../../../experiments/first-rocket.json");
+        let manifest: FirstRocketManifest = serde_json::from_str(raw).unwrap();
+        let trials = expand_first_rocket_trials(&manifest, true).unwrap();
+        // 3 seeds × 1 bot count × 2 variants (peaceful-diagnostic + default-enemy)
+        assert_eq!(trials.len(), 6);
+        let peaceful_count = trials.iter().filter(|t| t.variant == "peaceful-diagnostic").count();
+        let enemy_count = trials.iter().filter(|t| t.variant == "default-enemy").count();
+        assert_eq!(peaceful_count, 3);
+        assert_eq!(enemy_count, 3);
+    }
+
+    #[test]
+    fn first_rocket_no_peaceful_produces_only_default_enemy() {
+        let raw = include_str!("../../../../experiments/first-rocket.json");
+        let manifest: FirstRocketManifest = serde_json::from_str(raw).unwrap();
+        let trials = expand_first_rocket_trials(&manifest, false).unwrap();
+        assert_eq!(trials.len(), 3);
+        for trial in &trials {
+            assert_eq!(trial.variant, "default-enemy");
+        }
     }
 }

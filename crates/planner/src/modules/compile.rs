@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use factorio_bot_core::types::{FactorioEntity, Position};
 
-use crate::action::{Action, ActionKind, Condition, Effect};
+use crate::action::{Action, ActionKind, Condition, Effect, InventorySlot};
 use crate::control::PlanControl;
 use crate::goal::Goal;
 
@@ -99,7 +99,6 @@ fn compile_module_placement(
     instance: &ModuleInstance,
     ids: &mut ActionIdGen,
 ) -> Vec<Step> {
-    use crate::action::InventorySlot;
     use crate::goal::{Goal, Holder};
 
     let mut steps: Vec<Step> = Vec::new();
@@ -204,10 +203,69 @@ fn compile_module_placement(
                 pinned: None,
                 label: format!("set recipe {} for {}", recipe, part.role),
             })));
+
+            // --- 5. Input material Insert steps ---
+            // For parts with a recipe, look up the required inputs from the
+            // design's operating contract and create Insert steps to supply them.
+            let input_slot = input_slot_for_entity(&part.entity);
+            for (input_item, rate) in &design.operation.inputs {
+                steps.push(Step::Subgoal(Goal::Have {
+                    item: input_item.clone(),
+                    count: rate.numerator as u32 * 5, // buffer 5 cycles worth
+                    whose: Holder::Anyone,
+                    via: None,
+                }));
+
+                steps.push(Step::Act(Box::new(Action {
+                    id: ids.next(),
+                    kind: ActionKind::Insert {
+                        pos: pos.clone(),
+                        entity: part.entity.clone(),
+                        slot: input_slot,
+                        item: input_item.clone(),
+                        count: rate.numerator as u32,
+                    },
+                    pre: vec![
+                        Condition::AtPosition {
+                            who: crate::action::Actor::Role,
+                            pos: pos.clone(),
+                            radius: 3.0,
+                            min_radius: 0.5,
+                        },
+                        Condition::BufferHas {
+                            pos: pos.clone(),
+                            item: input_item.clone(),
+                            count: rate.numerator as u32,
+                        },
+                    ],
+                    eff: vec![
+                        Effect::ConsumeResource {
+                            pos: pos.clone(),
+                            item: input_item.clone(),
+                            count: rate.numerator as u32,
+                        },
+                    ],
+                    duration: rate.ticks.get() as u32,
+                    pinned: None,
+                    label: format!("insert {} {} for {}", rate.numerator, input_item, part.role),
+                })));
+            }
         }
     }
 
     steps
+}
+
+/// Determine the input inventory slot for a given entity type.
+fn input_slot_for_entity(name: &str) -> InventorySlot {
+    if name.contains("furnace") || name.contains("smelter") {
+        InventorySlot::FurnaceSource
+    } else if name.contains("assembling") || name.contains("assembler") || name.contains("crafting") {
+        InventorySlot::AssemblerInput
+    } else {
+        // For mining drills, use the fuel slot since their input is ore from the ground
+        InventorySlot::Fuel
+    }
 }
 
 /// Returns true for entity names known to burn fuel.

@@ -91,20 +91,19 @@ function entityHalfSize(part: Part): {hw: number, hh: number} {
 
 
 
-function svgArrowPoints(dir: number, entity: string, cx: number, cy: number): string {
-  const half = entityHalfSize({ entity: entity } as Part);
+function svgArrowPoints(dir: number, hw: number, hh: number, cx: number, cy: number): string {
   // Arrow triangle inside the entity, pointing in the facing direction.
   // Base is at the entity centre, tip at ~60% toward the facing edge.
   const tip = 0.6;
   const base = 0.3;
   const spread = 0.5;
   const dirs: Record<number, [number, number, number, number, number, number]> = {
-    0: [0, -tip * half.hh * 2, spread * half.hw, -base * half.hh * 2, -spread * half.hw, -base * half.hh * 2],
-    2: [tip * half.hw * 2, 0, base * half.hw * 2, -spread * half.hh, base * half.hw * 2, spread * half.hh],
-    4: [0, tip * half.hh * 2, spread * half.hw, base * half.hh * 2, -spread * half.hw, base * half.hh * 2],
-    6: [-tip * half.hw * 2, 0, -base * half.hw * 2, -spread * half.hh, -base * half.hw * 2, spread * half.hh]
+    0: [0, -tip * hh * 2, spread * hw, -base * hh * 2, -spread * hw, -base * hh * 2],
+    2: [tip * hw * 2, 0, base * hw * 2, -spread * hh, base * hw * 2, spread * hh],
+    4: [0, tip * hh * 2, spread * hw, base * hh * 2, -spread * hw, base * hh * 2],
+    6: [-tip * hw * 2, 0, -base * hw * 2, -spread * hh, -base * hw * 2, spread * hh]
   };
-  const pts = dirs[dir] ?? [0, -half.hh];
+  const pts = dirs[dir] ?? [0, -hh];
   return `${cx + pts[0]},${cy + pts[1]} ${cx + pts[2]},${cy + pts[3]} ${cx + pts[4]},${cy + pts[5]}`;
 }
 
@@ -233,7 +232,7 @@ function entityLabel(entity: string): string {
                   <text v-if="part.role === 'furnace'" :x="part.offset.half_x" :y="-(part.offset.half_y) + 3.5"
                         text-anchor="middle" font-size="0.35" fill="#fbbf24" font-weight="bold">hand</text>
                   <polygon v-if="part.role !== 'furnace'"
-                           :points="svgArrowPoints(part.direction, part.entity, part.offset.half_x, part.offset.half_y)"
+                           :points="svgArrowPoints(part.direction, entityHalfSize(part).hw, entityHalfSize(part).hh, part.offset.half_x, part.offset.half_y)"
                            fill="#fbbf24" opacity="0.7"/>
                 </g>
               </g>

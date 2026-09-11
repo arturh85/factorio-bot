@@ -155,28 +155,21 @@ function entityHalfSize(entity: string): {hw: number, hh: number} {
   return sizes[entity] ?? {hw: 2, hh: 2};
 }
 
-function entityDx(dir: number, entity: string): number {
+function arrowPoints(dir: number, entity: string, cx: number, cy: number): string {
   const half = entityHalfSize(entity);
-  const dirs: Record<number, number> = {0: 0, 2: half.hw, 4: 0, 6: -half.hw};
-  return dirs[dir] ?? 0;
-}
-
-function entityDy(dir: number, entity: string): number {
-  const half = entityHalfSize(entity);
-  const dirs: Record<number, number> = {0: -half.hh, 2: 0, 4: half.hh, 6: 0};
-  return dirs[dir] ?? 0;
-}
-
-function entityArrowEndX(dir: number, entity: string): number {
-  const half = entityHalfSize(entity);
-  const dirs: Record<number, number> = {0: 0, 2: half.hw + 1.5, 4: 0, 6: -(half.hw + 1.5)};
-  return dirs[dir] ?? 0;
-}
-
-function entityArrowEndY(dir: number, entity: string): number {
-  const half = entityHalfSize(entity);
-  const dirs: Record<number, number> = {0: -(half.hh + 1.5), 2: 0, 4: half.hh + 1.5, 6: 0};
-  return dirs[dir] ?? 0;
+  // Arrow triangle inside the entity, pointing in the facing direction.
+  // Base is at the entity centre, tip at ~60% toward the facing edge.
+  const tip = 0.6;
+  const base = 0.3;
+  const spread = 0.5;
+  const dirs: Record<number, [number, number, number, number, number, number]> = {
+    0: [0, -tip * half.hh * 2, spread * half.hw, -base * half.hh * 2, -spread * half.hw, -base * half.hh * 2],
+    2: [tip * half.hw * 2, 0, base * half.hw * 2, -spread * half.hh, base * half.hw * 2, spread * half.hh],
+    4: [0, tip * half.hh * 2, spread * half.hw, base * half.hh * 2, -spread * half.hw, base * half.hh * 2],
+    6: [-tip * half.hw * 2, 0, -base * half.hw * 2, -spread * half.hh, -base * half.hw * 2, spread * half.hh]
+  };
+  const pts = dirs[dir] ?? [0, -half.hh];
+  return `${cx + pts[0]},${cy + pts[1]} ${cx + pts[2]},${cy + pts[3]} ${cx + pts[4]},${cy + pts[5]}`;
 }
 
 function tiledViewBox(design: ModuleDesign, tiles: number): string {
@@ -204,9 +197,9 @@ function tileStepY(design: ModuleDesign): number {
     minY = Math.min(minY, p.offset.half_y - half.hh);
     maxY = Math.max(maxY, p.offset.half_y + half.hh);
   }
-  // Full cell height + 4 half-tile gap (2 tile spacing between copies)
-  // This prevents direction arrows from overlapping the next tile.
-  return (maxY - minY) + 4;
+  // Cell height, no gap — these are hand-fed starter cells with no
+  // belt connections between tiles.
+  return (maxY - minY);
 }
 
 function scaledBill(bill: Record<string, number>, tiles: number): Record<string, number> {
@@ -286,33 +279,38 @@ function entityLabel(entity: string): string {
               </defs>
               <rect width="100%" height="100%" fill="url(#grid)"/>
 
-              <!-- Tiled entities -->
-              <g v-for="i in (tileCount[design.id] || 1)" :key="'tile-' + i">
-                <g :transform="'translate(0, ' + ((i-1) * tileStepY(design)) + ')'">
-                  <!-- Entity rectangles with direction indicators -->
-                  <g v-for="part in design.parts" :key="part.role">
-                    <rect :x="part.offset.half_x - entityHalfSize(part.entity).hw"
-                          :y="part.offset.half_y - entityHalfSize(part.entity).hh"
-                          :width="entityHalfSize(part.entity).hw * 2"
-                          :height="entityHalfSize(part.entity).hh * 2"
-                          rx="0.3"
-                          :fill="colorForEntityType(part.entity)"
-                          stroke="#374151" stroke-width="0.2"/>
-                    <line :x1="part.offset.half_x + entityDx(part.direction, part.entity)"
-                          :y1="part.offset.half_y + entityDy(part.direction, part.entity)"
-                          :x2="part.offset.half_x + entityArrowEndX(part.direction, part.entity)"
-                          :y2="part.offset.half_y + entityArrowEndY(part.direction, part.entity)"
-                          stroke="#fbbf24" stroke-width="0.5" stroke-linecap="round"/>
-                    <text :x="part.offset.half_x" :y="part.offset.half_y + 0.2"
-                          text-anchor="middle" font-size="0.45" fill="white"
-                          font-weight="bold">{{ entityLabel(part.role) }}</text>
-                  </g>
-                  <!-- Ore flow arrow from drill to furnace (direct feed) -->
-                  <line v-if="i > 1 || design.family === 'OreToPlate'"
-                        x1="0" :y1="3" x2="0" :y2="tileStepY(design) - 3"
-                        stroke="#9ca3af" stroke-width="0.3" stroke-dasharray="1 0.5"
-                        opacity="0.4"/>
+              <!-- Tiled entities. Factorio y-positive = north (up).
+                   SVG y-positive = south (down), so entity y positions
+                   and the tile step are negated. -->
+              <g v-for="i in (tileCount[design.id] || 1)" :key="'tile-' + i"
+                 :transform="'translate(0, ' + (-(i-1) * tileStepY(design)) + ')'">
+                <!-- Entity rectangles with direction indicators -->
+                <g v-for="part in design.parts" :key="part.role">
+                  <rect :x="part.offset.half_x - entityHalfSize(part.entity).hw"
+                        :y="-(part.offset.half_y + entityHalfSize(part.entity).hh)"
+                        :width="entityHalfSize(part.entity).hw * 2"
+                        :height="entityHalfSize(part.entity).hh * 2"
+                        rx="0.3"
+                        :fill="colorForEntityType(part.entity)"
+                        stroke="#374151" stroke-width="0.2"/>
+                  <!-- Direction arrow inside entity facing side -->
+                  <polygon v-if="part.role !== 'furnace'"
+                           :points="arrowPoints(part.direction, part.entity, part.offset.half_x, part.offset.half_y)"
+                           fill="#fbbf24" opacity="0.7"/>
                 </g>
+                <!-- Line labels -->
+                <g v-for="part in design.parts" :key="'lbl-'+part.role">
+                  <text :x="part.offset.half_x" :y="-(part.offset.half_y + 0.2)"
+                        text-anchor="middle" font-size="0.45" fill="white"
+                        font-weight="bold">{{ entityLabel(part.role) }}</text>
+                  <text v-if="part.role === 'furnace'" :x="part.offset.half_x" :y="-(part.offset.half_y + 4.5)"
+                        text-anchor="middle" font-size="0.4" fill="#fbbf24" font-weight="bold">HAND</text>
+                </g>
+                <!-- Ore flow arrow from drill to furnace (direct feed) -->
+                <line v-if="i > 1 || design.family === 'OreToPlate'"
+                      x1="0" :y1="-3" x2="0" :y2="-(tileStepY(design) - 3)"
+                      stroke="#9ca3af" stroke-width="0.3" stroke-dasharray="1 0.5"
+                      opacity="0.4"/>
               </g>
 
               <!-- Tile-set label -->

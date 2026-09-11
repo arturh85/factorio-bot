@@ -273,3 +273,189 @@ function rocket_speedrun.run(opts)
     print(sup:report())
     return ok
 end
+
+-- ============================================================================
+-- Task 10: Oil access and static defense helpers
+-- ============================================================================
+
+--- Declare a defended construction node for oil corridor safety.
+--
+-- Emits goals for gun turrets, ammunition boxes, and repair supplies
+-- at the named node position. Returns a milestone (or nil if already
+-- satisfied) that the supervisor can run as a regular plan.
+--
+-- @param node_id  string identifying this node (e.g. "oil-corridor-1")
+-- @param position { x, y } where the node is anchored
+-- @param snapshot the game snapshot
+-- @return goal milestone or nil
+function rocket_speedrun.declare_defense_node(node_id, position, snapshot)
+    if type(node_id) ~= "string" or type(position) ~= "table" then
+        return nil
+    end
+    local sn = snapshot or {}
+
+    -- Check if this node already has turrets
+    local turret_count = (sn.instances or {})["gun-turret"] or 0
+
+    -- Need at least 4 turrets per node for basic coverage
+    if turret_count < 4 then
+        return goal.have("gun-turret", 4)
+    end
+
+    -- Need ammunition (at least one full magazine stack per turret)
+    local ammo = sn.accessible_stock and sn.accessible_stock["firearm-magazine"] or 0
+    if ammo < 80 then
+        return goal.have("firearm-magazine", 80)
+    end
+
+    -- Need repair packs for maintenance
+    local repair = sn.accessible_stock and sn.accessible_stock["repair-pack"] or 0
+    if repair < 10 then
+        return goal.have("repair-pack", 10)
+    end
+
+    return nil  -- All defense requirements satisfied
+end
+
+--- Build the oil access survey snapshot from live game state.
+--
+-- Called before policy.oil_access to populate the snapshot fields
+-- the pure helper expects.
+function rocket_speedrun.build_oil_access_snapshot(base_snapshot)
+    local sn = base_snapshot or rocket_speedrun.build_snapshot()
+
+    -- Check whether oil is charted via the world model
+    if type(world) == "table" and type(world.charted) == "function" then
+        sn.oil_charted = world.charted("crude-oil")
+    else
+        sn.oil_charted = nil  -- unknown
+    end
+
+    -- Check route safety: query threat standoff around the nearest oil
+    if type(world) == "table" and type(world.threats_from) == "function" then
+        local oil_pos = world.nearest_resource("crude-oil")
+        if oil_pos then
+            local threats = world.threats_from(oil_pos, 50)
+            sn.safe_route = (threats == nil or #threats == 0)
+        else
+            sn.safe_route = nil  -- unknown
+        end
+    else
+        sn.safe_route = nil  -- unknown
+    end
+
+    -- Check defense stock readiness
+    local turrets = (sn.instances or {})["gun-turret"] or 0
+    local ammo = sn.accessible_stock and sn.accessible_stock["firearm-magazine"] or 0
+    local repair = sn.accessible_stock and sn.accessible_stock["repair-pack"] or 0
+    sn.defense_stock_ready = (turrets >= 4 and ammo >= 80 and repair >= 10)
+
+    -- Check if defense is supported (turrets placed and loaded)
+    local ammo_flow = sn.flow_evidence and sn.flow_evidence["firearm-magazine"]
+    local turret_flow = sn.flow_evidence and sn.flow_evidence["gun-turret"]
+    sn.defense_supported = (turret_flow == true and sn.defense_stock_ready)
+
+    -- Survey budget remaining (default 3 rings, decrement as used)
+    if sn.survey_budget_remaining == nil then
+        sn.survey_budget_remaining = 3
+    end
+
+    -- Threats
+    if type(world) == "table" and type(world.threats) == "function" then
+        local threats = world.threats()
+        if type(threats) == "table" then
+            sn.threats = {
+                nests_nearby = threats.nests_nearby or 0,
+                worms_nearby = threats.worms_nearby or 0,
+            }
+        end
+    end
+
+    return sn
+end
+
+--- Place turrets at an oil corridor node using the planner.
+--
+-- This emits a build plan for gun turrets at the declared node position.
+-- The actual placement is handled by goal.have() / goal.built() through
+-- the normal plan execution.
+--
+-- Call from supervisor source when policy.oil_access returns BUILD
+-- with prototype = "gun-turret".
+function rocket_speedrun.oil_corridor_defense_plan()
+    -- Return a milestone source that builds:
+    -- 1. Gun turrets (4-6 for corridor coverage)
+    -- 2. Ammunition stock (80+ firearm-magazine)
+    -- 3. Repair supplies (10+ repair-pack)
+    -- 4. Fuel for turret power (coal stack)
+    -- All under the finite construction ledger.
+    return supervisor.list {
+        goal.have("gun-turret", 6),
+        goal.have("firearm-magazine", 80),
+        goal.have("repair-pack", 10),
+    }
+end
+
+--- The full oil access preparation source for the supervisor.
+--
+-- Extends the policy pipeline: calls policy.oil_access until safe route
+-- is established, then hands control back to the main policy source.
+function rocket_speedrun.oil_access_source(config, initial_memory)
+    local memory = initial_memory or {}
+    local prev_state = "preparing"
+
+    return function(_history)
+        local snapshot = rocket_speedrun.build_oil_access_snapshot()
+        local decision = policy.oil_access(config, snapshot)
+
+        if decision == nil then
+            print("POLICY: oil access established -- returning to main policy")
+            return nil  -- Hand control back to main pipeline
+        end
+
+        -- Log the decision
+        local goal_info = ""
+        if decision.goal then
+            local g = decision.goal
+            goal_info = string.format(" [%s %s=%s]", g.type or "?", g.name or g.item or "?", tostring(g.count or ""))
+        end
+        print(string.format("POLICY oil_access: %s%s -- %s", decision.kind, goal_info, decision.reason or ""))
+
+        -- Convert to milestone
+        if decision.kind == policy.KINDS.BUILD and decision.goal then
+            local gtype = decision.goal.type
+            if gtype == "built" then
+                return goal.have(decision.goal.prototype, decision.goal.count or 1)
+            end
+        end
+
+        if decision.kind == policy.KINDS.SUPPORT then
+            return supervisor.sustain {
+                item = decision.goal and decision.goal.item or "firearm-magazine",
+                per_minute = 5,
+                window_ticks = 7200,
+                lead_in_ticks = 3600,
+            }
+        end
+
+        if decision.kind == policy.KINDS.BUILD or decision.kind == policy.KINDS.OBSERVE then
+            -- Default observe
+            return supervisor.sustain {
+                item = "iron-plate",
+                per_minute = 1,
+                window_ticks = 3600,
+                lead_in_ticks = 1800,
+            }
+        end
+
+        if decision.kind == policy.KINDS.BLOCKED then
+            print("POLICY BLOCKED (oil_access): " .. (decision.reason or "unsafe_oil_corridor"))
+            if type(record) == "table" and type(record.milestone_stuck) == "function" then
+                record.milestone_stuck(0, "blocked", "unsafe_oil_corridor", nil)
+            end
+            return nil
+        end
+
+        return nil
+    end
+end

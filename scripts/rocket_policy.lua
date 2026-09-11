@@ -952,6 +952,12 @@ function stage7_oil_processing(cfg, memory, snapshot, stage_def)
                  reason = "need oil-processing research for stage 7" }
     end
 
+    -- Check oil access: safe route and static defenses
+    local oil_decision = policy.oil_access(cfg, snapshot)
+    if oil_decision ~= nil then
+        return oil_decision
+    end
+
     if refineries < 1 then
         return { kind = policy.KINDS.BUILD, stage = 7,
                  goal = { type = "built", prototype = "oil-refinery", count = 1 },
@@ -1156,6 +1162,179 @@ function stage10_launch(cfg, memory, snapshot, stage_def)
              goal = { type = "launch", payload = "space-platform-starter-pack" },
              reason = "all prerequisites met; initiate launch" }
 end
+
+-- ============================================================================
+-- Task 10: policy.oil_access() — Fund safe oil access and static defenses
+-- ============================================================================
+--
+-- Pure policy helper: evaluates whether safe oil access is feasible given
+-- the current snapshot. Unknown values are explicit `nil` (not inferred).
+--
+-- Called as a subroutine inside policy.next() for stage 7, or independently
+-- by the speedrun driver. Returns a decision table.
+--
+-- Snapshot fields consulted:
+--   oil_charted               — true | false | nil (unknown)
+--   safe_route                — true | false | nil (unknown)
+--   defense_stock_ready       — true | false | nil (unknown)
+--   defense_supported         — true | false | nil (unknown)
+--   survey_budget_remaining   — integer remaining rings, or nil
+--   threats                   — { nests_nearby, worms_nearby } or nil
+--   accessible_stock          — { [item] = count }
+--
+-- Decision kinds (reused from Task 9):
+--   policy.KINDS.OBSERVE   — unknown terrain; needs a survey first
+--   policy.KINDS.BUILD     — build turrets/ammo/supplies or place pumpjack
+--   policy.KINDS.SUPPORT   — restock ammo or fuel for a defended node
+--   policy.KINDS.BLOCKED   — unsafe corridor, no budget remaining
+--
+
+--- Evaluate oil access and return a decision.
+--
+-- @param config   config table (may carry defense node positions)
+-- @param snapshot game snapshot with oil_access fields
+-- @return { kind, stage, goal=nil, limits=nil, reason } or nil if OK
+function policy.oil_access(config, snapshot)
+    local cfg = config or {}
+    local sn = snapshot or {}
+
+    local oil_charted = sn.oil_charted
+    local safe_route = sn.safe_route
+    local defense_stock_ready = sn.defense_stock_ready
+    local defense_supported = sn.defense_supported
+    local budget = sn.survey_budget_remaining
+    local threats = sn.threats
+
+    -- 1. Unknown terrain: need a survey
+    if oil_charted == nil then
+        return {
+            kind = policy.KINDS.OBSERVE,
+            stage = 7,
+            goal = { type = "observe", target = "oil-charting" },
+            reason = "oil terrain not yet charted; survey needed",
+        }
+    end
+
+    -- 2. Oil not found / not charted --- may still be being surveyed
+    if oil_charted == false then
+        return {
+            kind = policy.KINDS.OBSERVE,
+            stage = 7,
+            goal = { type = "charted", radius = 896 },
+            reason = "oil not yet charted; continuing ring survey",
+        }
+    end
+
+    -- 3. Oil IS charted --- check the route safety
+    if safe_route == nil then
+        return {
+            kind = policy.KINDS.OBSERVE,
+            stage = 7,
+            goal = { type = "observe", target = "route-safety" },
+            reason = "oil charted but route safety unknown; observing",
+        }
+    end
+
+    if safe_route == false then
+        -- Route is not safe. Check if we can make it safe.
+        if defense_stock_ready == nil or defense_stock_ready == false then
+            -- Need to build defense stocks first
+            return {
+                kind = policy.KINDS.BUILD,
+                stage = 7,
+                goal = { type = "built", prototype = "gun-turret", count = 4 },
+                limits = { max_new_copies = 4 },
+                reason = "unsafe route needs gun turrets for corridor defense",
+            }
+        end
+
+        if defense_supported == nil or defense_supported == false then
+            -- Stocks are built but need to check ammo supply
+            local ammo = sn.accessible_stock and sn.accessible_stock["firearm-magazine"] or 0
+            if ammo < 80 then
+                return {
+                    kind = policy.KINDS.SUPPORT,
+                    stage = 7,
+                    goal = { type = "sustain", item = "firearm-magazine" },
+                    reason = string.format("defense stocks need ammo; have %d, need 80", ammo),
+                }
+            end
+
+            -- Also ensure we have repair packs and fuel for turret generators
+            local repair_packs = sn.accessible_stock and sn.accessible_stock["repair-pack"] or 0
+            if repair_packs < 10 then
+                return {
+                    kind = policy.KINDS.SUPPORT,
+                    stage = 7,
+                    goal = { type = "sustain", item = "repair-pack" },
+                    reason = string.format("need repair packs for turret maintenance; have %d", repair_packs),
+                }
+            end
+
+            -- Defense stocks ready but not yet supported at position
+            -- Ask to deploy them
+            return {
+                kind = policy.KINDS.BUILD,
+                stage = 7,
+                goal = { type = "built", prototype = "gun-turret", count = 6 },
+                reason = "deploy turrets to secure oil corridor",
+            }
+        end
+
+        -- If we've tried both defense stock and support, check budget
+        if budget ~= nil and budget <= 0 then
+            return {
+                kind = policy.KINDS.BLOCKED,
+                stage = 7,
+                reason = "unsafe_oil_corridor",
+            }
+        end
+
+        -- Budget remaining but still unsafe; keep trying
+        return {
+            kind = policy.KINDS.OBSERVE,
+            stage = 7,
+            reason = "oil corridor still unsafe; survey budget remaining: " .. tostring(budget),
+        }
+    end
+
+    -- 4. Route IS safe. Verify we have the pumpjack and connecting pipe.
+    local pumpjacks = (sn.instances or {})["pumpjack"] or 0
+    if pumpjacks < 1 then
+        return {
+            kind = policy.KINDS.BUILD,
+            stage = 7,
+            goal = { type = "built", prototype = "pumpjack", count = 1 },
+            limits = { max_new_copies = 1 },
+            reason = "safe route confirmed; place pumpjack at oil field",
+        }
+    end
+
+    -- 5. Access is established --- need pipe to transport
+    local refineries = (sn.instances or {})["oil-refinery"] or 0
+    if refineries < 1 then
+        return {
+            kind = policy.KINDS.BUILD,
+            stage = 7,
+            goal = { type = "built", prototype = "oil-refinery", count = 1 },
+            limits = { max_new_copies = 1 },
+            reason = "need oil refinery connected to pumpjack",
+        }
+    end
+
+    -- Verification: check we have pumpjack flow / oil flow evidence
+    if not policy.has_flow(sn, "crude-oil") then
+        return {
+            kind = policy.KINDS.OBSERVE,
+            stage = 7,
+            reason = "pumpjack placed but crude oil flow not yet observed",
+        }
+    end
+
+    -- All clear
+    return nil
+end
+
 
 -- Export internal helpers for testing
 policy.accessible = accessible

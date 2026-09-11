@@ -3548,6 +3548,21 @@ mod tests {
             function set_produced(item, count)
                 __snapshot.total_produced[item] = (__snapshot.total_produced[item] or 0) + count
             end
+            function set_oil_charted(v)
+                __snapshot.oil_charted = v
+            end
+            function set_safe_route(v)
+                __snapshot.safe_route = v
+            end
+            function set_defense_stock_ready(v)
+                __snapshot.defense_stock_ready = v
+            end
+            function set_defense_supported(v)
+                __snapshot.defense_supported = v
+            end
+            function set_survey_budget(v)
+                __snapshot.survey_budget_remaining = v
+            end
         "#;
         lua.load(stub).exec().expect("stub installs");
         lua.load(ROCKET_POLICY_LUA).exec().expect("rocket_policy loads");
@@ -3615,6 +3630,8 @@ mod tests {
             __memory = { stage = 7 }
             set_researched("oil-processing")
             set_researched("automation")
+            set_oil_charted(true)
+            set_safe_route(true)
             set_instance("oil-refinery", 0)
             set_instance("chemical-plant", 0)
             set_stock("plastic-bar", 0)
@@ -3642,8 +3659,14 @@ mod tests {
             __memory = { stage = 7 }
             set_researched("oil-processing")
             set_researched("automation")
+            set_oil_charted(true)
+            set_safe_route(true)
+            set_defense_stock_ready(true)
+            set_defense_supported(true)
             set_instance("oil-refinery", 1)
             set_instance("chemical-plant", 1)
+            set_instance("pumpjack", 1)
+            set_flow("crude-oil")
             set_stock("advanced-circuit", 0)
             set_stock("processing-unit", 0)
             "#,
@@ -3948,6 +3971,139 @@ mod tests {
         assert_eq!(g.get::<i64>("__first_id").unwrap(), 1);
         assert_eq!(g.get::<i64>("__last_id").unwrap(), 10);
     }
+
+
+    // ---- Task 10: policy.oil_access() — Fund safe oil access ------------
+    //
+    // The pure policy helper decides whether oil drilling is feasible under
+    // default enemy settings. Tests follow the same pattern as the
+    // policy.* stage tests above: a sandboxed Lua, the real rocket_policy.lua,
+    // and a stub snapshot.
+
+    /// A small helper that runs `policy.oil_access(cfg, snapshot)` through
+    /// the sandboxed Lua and returns the decision table from Lua globals.
+    fn oil_access_harness(snapshot_fields: &str) -> String {
+        let lua = sandboxed();
+        lua.load(ROCKET_POLICY_LUA).exec().expect("rocket_policy loads");
+        let src = format!(
+            r#"
+            local snapshot = {snapshot_fields}
+            local d = policy.oil_access({{}}, snapshot)
+            if d == nil then
+                __kind = "nil"
+                __reason = "nil"
+            else
+                __kind = d.kind
+                __reason = d.reason or ""
+            end
+            __result_type = type(d)
+            "#,
+            snapshot_fields = snapshot_fields,
+        );
+        lua.load(&src).exec().expect("oil_access stub runs");
+        let g = lua.globals();
+        let kind = g.get::<String>("__kind").unwrap_or_else(|_| "missing".into());
+        let reason = g.get::<String>("__reason").unwrap_or_else(|_| "missing".into());
+        format!("kind={kind}/reason={reason}")
+    }
+
+    /// Untried terrain: oil_charted is unknown -> OBSERVE
+    #[test]
+    fn oil_access_unknown_terrain_requests_observation() {
+        let result = oil_access_harness(r#"{oil_charted=nil}"#);
+        assert!(result.contains("kind=observe"),
+            "unknown terrain should request observation, got {result}");
+    }
+
+    /// Pure Lua test from task spec: unsafe corridor with no budget
+    #[test]
+    fn oil_access_unsafe_corridor_blocks_with_exact_reason() {
+        let result = oil_access_harness(r#"{
+            oil_charted=true,
+            safe_route=false,
+            defense_stock_ready=true,
+            defense_supported=true,
+            survey_budget_remaining=0
+        }"#);
+        assert_eq!(result, "kind=blocked/reason=unsafe_oil_corridor",
+            "exhausted budget with unsafe route must report unsafe_oil_corridor, got {result}");
+    }
+
+    /// Oil charted + safe route: BUILD pumpjack
+    #[test]
+    fn oil_access_safe_route_builds_pumpjack() {
+        let result = oil_access_harness(r#"{
+            oil_charted=true,
+            safe_route=true,
+            instances={}
+        }"#);
+        assert!(result.contains("kind=build"),
+            "safe route should request pumpjack build, got {result}");
+    }
+
+    /// Oil not charted yet: OBSERVE for charting
+    #[test]
+    fn oil_access_not_charted_requests_continue_survey() {
+        let result = oil_access_harness(r#"{oil_charted=false}"#);
+        assert!(result.contains("kind=observe"),
+            "uncharted oil should request survey observation, got {result}");
+    }
+
+    /// Unsafe route, no defense stock: BUILD turrets
+    #[test]
+    fn oil_access_unsafe_route_needs_turrets() {
+        let result = oil_access_harness(r#"{
+            oil_charted=true,
+            safe_route=false,
+            defense_stock_ready=false
+        }"#);
+        assert!(result.contains("kind=build"),
+            "unsafe route with no turrets should request build, got {result}");
+        assert!(result.contains("gun turret"),
+            "should mention gun turret, got {result}");
+    }
+
+    /// Unsafe route, stock ready but not supported: BUILD deploy
+    #[test]
+    fn oil_access_needs_deployment() {
+        let result = oil_access_harness(r#"{
+            oil_charted=true,
+            safe_route=false,
+            defense_stock_ready=true,
+            defense_supported=false,
+            accessible_stock={["firearm-magazine"]=100, ["repair-pack"]=20}
+        }"#);
+        assert!(result.contains("kind=build"),
+            "stock ready should request deploy, got {result}");
+    }
+
+    /// All good -> nil (no objection)
+    #[test]
+    fn oil_access_clear_returns_nil() {
+        let result = oil_access_harness(r#"{
+            oil_charted=true,
+            safe_route=true,
+            instances={pumpjack=1, ["oil-refinery"]=1},
+            flow_evidence={["crude-oil"]=true}
+        }"#);
+        assert_eq!(result, "kind=nil/reason=nil",
+            "clear route with pumpjack and flow should return nil, got {result}");
+    }
+
+    /// Need ammo: SUPPORT
+    #[test]
+    fn oil_access_needs_ammo_requests_support() {
+        let result = oil_access_harness(r#"{
+            oil_charted=true,
+            safe_route=false,
+            defense_stock_ready=true,
+            defense_supported=false,
+            accessible_stock={["firearm-magazine"]=10}
+        }"#);
+        assert!(result.contains("kind=support"),
+            "low ammo should request sustain support, got {result}");
+    }
+
 
 
 }

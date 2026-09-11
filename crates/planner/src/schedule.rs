@@ -1197,7 +1197,7 @@ mod tests {
     use crate::ids::ActionIdGen;
     use crate::network::ActionNetwork;
     use factorio_bot_core::test_utils::fixture_world;
-    use factorio_bot_core::types::{Pos, Position};
+    use factorio_bot_core::types::Position;
     use std::sync::Arc;
 
     fn state(bots: &[BotId]) -> PlanState {

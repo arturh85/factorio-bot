@@ -14,7 +14,7 @@ use factorio_bot_planner::registry_for;
 use factorio_bot_planner::plan_controlled;
 use factorio_bot_planner::state::PlanState;
 use factorio_bot_core::test_utils::fixture_world;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[test]
 fn zero_goal_budget_cannot_become_a_no_method_refusal() {

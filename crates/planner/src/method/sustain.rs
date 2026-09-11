@@ -2531,7 +2531,7 @@ mod tests {
     /// with either.
     #[test]
     fn every_arm_is_a_burner_inserter() {
-        let roster = [BotId(1)];
+        let _roster = [BotId(1)];
         let state = near_state();
         // The premise, stated so the test says which leg of `offtake_arm` it
         // proves: the shared fixture enables EVERY recipe, `inserter`
@@ -2588,7 +2588,7 @@ mod tests {
     /// carries is one per burner.
     #[test]
     fn no_burner_is_hand_charged_for_longer_than_it_takes_to_start() {
-        let roster = [BotId(1)];
+        let _roster = [BotId(1)];
         let net = expand(&[goal()], &near_state(), &registry_for(&roster), BotId(1))
             .expect("iron and coal are within one belt window of each other");
         // Only the burners this arrangement BELTS are in scope. The plan also
@@ -2675,7 +2675,7 @@ mod tests {
     /// `supervisor.lua` turns into a satisfied milestone.
     #[test]
     fn a_replan_over_the_arrangement_it_just_built_adds_nothing() {
-        let roster = [BotId(1)];
+        let _roster = [BotId(1)];
         let state = near_state();
         let net = expand(&[goal()], &state, &registry_for(&roster), BotId(1))
             .expect("iron and coal are within one belt window of each other");
@@ -2717,7 +2717,7 @@ mod tests {
     /// the state `a_replan_over_the_arrangement_it_just_built_adds_nothing`
     /// builds, as a fixture, so the next test can ask about a bundle.
     fn state_with_the_arrangement_standing() -> PlanState {
-        let roster = [BotId(1)];
+        let _roster = [BotId(1)];
         let state = near_state();
         let net = expand(&[goal()], &state, &registry_for(&roster), BotId(1))
             .expect("iron and coal are within one belt window of each other");
@@ -2755,7 +2755,7 @@ mod tests {
     /// not the standing refusal, and not a second arrangement either.
     #[test]
     fn a_standing_sustain_does_not_satisfy_the_rest_of_its_bundle() {
-        let roster = [BotId(1)];
+        let _roster = [BotId(1)];
         let built = state_with_the_arrangement_standing();
         let unmet = Goal::Have {
             item: "coal".into(),
@@ -2802,7 +2802,7 @@ mod tests {
     /// true of the bundle.
     #[test]
     fn a_bundle_with_nothing_left_to_build_still_refuses_by_the_standing_name() {
-        let roster = [BotId(1)];
+        let _roster = [BotId(1)];
         let built = state_with_the_arrangement_standing();
         let met = Goal::Have {
             item: "coal".into(),
@@ -2836,7 +2836,7 @@ mod tests {
         // tight window that forces the belt-run error through another
         // mechanism. Since the fixture itself no longer shows the error,
         // we just verify the error type pattern still exists.
-        let roster = [BotId(1)];
+        let _roster = [BotId(1)];
         // The belt router still refuses routes that are genuinely too far;
         // on this fixture the coal buffer and iron buffer are close enough,
         // so the plan succeeds rather than refusing. We verify that the
@@ -2925,7 +2925,7 @@ mod tests {
     /// with that exact refusal.
     #[test]
     fn a_standing_cell_no_haul_can_reach_is_not_adopted() {
-        let roster = [BotId(1)];
+        let _roster = [BotId(1)];
         let far = Position::new(-40., 90.);
         let world = world_with_a_second_iron_patch(&far);
         let stranded = stand_a_hand_fed_cell(&world, &far);
@@ -2984,7 +2984,7 @@ mod tests {
     /// was too strict would pass the far case and fail this one.
     #[test]
     fn a_standing_cell_a_haul_can_reach_is_adopted() {
-        let roster = [BotId(1)];
+        let _roster = [BotId(1)];
         let world = world_with_coal_beside_the_iron();
         let adopted = stand_a_hand_fed_cell(&world, &Position::new(-40., 40.));
         let state = PlanState::from_world(Arc::new(world), &roster);
@@ -3036,7 +3036,7 @@ mod tests {
     /// directions rather than a restatement of the offsets that sited it.
     #[test]
     fn the_furnaces_output_is_taken_into_a_chest() {
-        let roster = [BotId(1)];
+        let _roster = [BotId(1)];
         let state = near_state();
         let net = expand(&[goal()], &state, &registry_for(&roster), BotId(1))
             .expect("iron and coal are within one belt window of each other");
@@ -3130,7 +3130,7 @@ mod tests {
     #[test]
     fn a_furnace_with_an_offtake_is_not_a_hands_source() {
         use crate::action::{ActionKind, InventorySlot};
-        let roster = [BotId(1)];
+        let _roster = [BotId(1)];
         let state = near_state();
         let net = expand(&[goal()], &state, &registry_for(&roster), BotId(1))
             .expect("iron and coal are within one belt window of each other");
@@ -3211,7 +3211,7 @@ mod tests {
     /// side: the reservation is what is under test, not the fixture's luck.
     #[test]
     fn the_plate_chest_keeps_a_side_for_the_product_to_leave_by() {
-        let roster = [BotId(1)];
+        let _roster = [BotId(1)];
         let state = near_state();
         let net = expand(&[goal()], &state, &registry_for(&roster), BotId(1))
             .expect("iron and coal are within one belt window of each other");
@@ -3314,7 +3314,7 @@ mod tests {
     /// the_link_of_run_1788936524_99544_leaves_by_the_kept_exit`.
     #[test]
     fn a_replan_keeps_the_same_single_exit_for_a_standing_plate_chest() {
-        let roster = [BotId(1)];
+        let _roster = [BotId(1)];
         let state = near_state();
         let net = expand(&[goal()], &state, &registry_for(&roster), BotId(1))
             .expect("iron and coal are within one belt window of each other");
@@ -3403,7 +3403,7 @@ mod tests {
 
     #[test]
     fn the_offtake_arm_is_belted_its_own_coal() {
-        let roster = [BotId(1)];
+        let _roster = [BotId(1)];
         let state = near_state();
         let net = expand(&[goal()], &state, &registry_for(&roster), BotId(1))
             .expect("iron and coal are within one belt window of each other");
@@ -3571,7 +3571,7 @@ mod tests {
     /// ```
     #[test]
     fn a_second_cell_refuses_about_ground_and_not_about_a_belt_that_stands() {
-        let roster = [BotId(1)];
+        let _roster = [BotId(1)];
         let state = near_state();
         let two_cells = Goal::Sustain {
             item: "iron-plate".into(),
@@ -3693,7 +3693,7 @@ mod tests {
     /// while every arm on a coal run stays the burner it was.
     #[test]
     fn the_offtake_is_electric_when_a_network_stands_and_the_recipe_is_open() {
-        let roster = [BotId(1)];
+        let _roster = [BotId(1)];
         let state = powered_near_state();
         let net = expand(&[goal()], &state, &registry_for(&roster), BotId(1))
             .expect("the plan passes the power audit, or the claim is missing");
@@ -3782,7 +3782,7 @@ mod tests {
     /// `electronics` to take plates out of a furnace.
     #[test]
     fn a_standing_network_does_not_make_the_offtake_electric_at_t0() {
-        let roster = [BotId(1)];
+        let _roster = [BotId(1)];
         let mut state =
             PlanState::from_world(Arc::new(world_with_the_electric_arm_locked()), &[BotId(1)]);
         state.gain(BotId(1), "wood", 20);

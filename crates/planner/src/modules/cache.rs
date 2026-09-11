@@ -299,7 +299,6 @@ pub fn validate_design(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::{Deserialize, Serialize};
 
 use crate::modules::artifact::{
         KnowledgeOrigin, ModuleFamily, ModuleParameters, Offset, OperatingContract, Part, Rate,

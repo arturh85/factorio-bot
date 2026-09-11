@@ -118,6 +118,8 @@ fn matching_families(_item: &str) -> Vec<ModuleFamily> {
         ModuleFamily::ChemicalPlant,
         ModuleFamily::RocketSilo,
         ModuleFamily::SpacePlatform,
+        ModuleFamily::SmelterArray,
+        ModuleFamily::DrillArray,
     ]
 }
 

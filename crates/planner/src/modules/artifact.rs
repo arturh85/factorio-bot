@@ -75,6 +75,8 @@ pub enum ModuleFamily {
     ChemicalPlant,
     RocketSilo,
     SpacePlatform,
+    SmelterArray,
+    DrillArray,
 }
 
 /// How the design was obtained.

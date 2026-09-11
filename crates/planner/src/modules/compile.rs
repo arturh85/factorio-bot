@@ -132,7 +132,7 @@ fn compile_module_placement(
             || item == "rocket-silo"
             // Skip items with complex/alternative recipe chains that confuse the legacy fallback.
             || item == "plastic-bar" || item == "sulfur" || item == "solid-fuel"
-            || item == "sulfuric-acid" || item == "engine-unit"
+            || item == "sulfuric-acid" || item == "engine-unit" || item == "steel-furnace" || item == "electric-furnace"
         {
             continue;
         }

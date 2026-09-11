@@ -195,15 +195,18 @@ function tiledViewBox(design: ModuleDesign, tiles: number): string {
   return `${minX - pad} ${minY - pad} ${maxX - minX + pad * 2} ${maxY - minY + pad * 2}`;
 }
 
-/** Vertical spacing (in half-tile units) between tiled copies. */
+/** Vertical spacing (in half-tile units) between tiled copies.
+ *  Cell extent from lowest bottom edge to highest top edge, plus a 1-tile gap. */
 function tileStepY(design: ModuleDesign): number {
-  let maxY = 0;
+  let minY = Infinity, maxY = -Infinity;
   for (const p of design.parts) {
     const half = entityHalfSize(p.entity);
+    minY = Math.min(minY, p.offset.half_y - half.hh);
     maxY = Math.max(maxY, p.offset.half_y + half.hh);
   }
-  // Cell height + 2 half-tile gap (1 tile spacing between copies)
-  return maxY + 2;
+  // Full cell height + 4 half-tile gap (2 tile spacing between copies)
+  // This prevents direction arrows from overlapping the next tile.
+  return (maxY - minY) + 4;
 }
 
 function scaledBill(bill: Record<string, number>, tiles: number): Record<string, number> {

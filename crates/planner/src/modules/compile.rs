@@ -103,18 +103,7 @@ fn compile_module_placement(
     let mut steps: Vec<Step> = Vec::new();
 
     // Add acquisition subgoals for input materials (non-OreToPlate modules).
-    for port in &design.ports {
-        if port.mode == crate::modules::artifact::PortMode::BeltInput
-            && design.family != crate::modules::artifact::ModuleFamily::OreToPlate
-        {
-            steps.push(Step::Subgoal(Goal::Have {
-                item: port.item.clone(),
-                count: 10,
-                whose: crate::Holder::Anyone,
-                via: None,
-            }));
-        }
-    }
+    // BeltInput ports are provided externally - no material subgoals needed.
 
     // If the design needs electric power, acquire power plant materials.
     if design.operation.power_watts > 0 {
@@ -141,6 +130,9 @@ fn compile_module_placement(
         if item == "oil-refinery" || item == "chemical-plant" || item == "pumpjack"
             || item == "assembling-machine-1" || item == "assembling-machine-2" || item == "assembling-machine-3"
             || item == "rocket-silo"
+            // Skip items with complex/alternative recipe chains that confuse the legacy fallback.
+            || item == "plastic-bar" || item == "sulfur" || item == "solid-fuel"
+            || item == "sulfuric-acid" || item == "engine-unit"
         {
             continue;
         }

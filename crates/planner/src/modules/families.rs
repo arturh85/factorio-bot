@@ -359,8 +359,7 @@ fn extract_assembler_cell(
         ))),
     }
     let input_count = ingredients.len();
-    if input_count > 2 {
-        // 3-input cell not yet implemented in the planner.
+    if input_count > 3 {
         return Err(ModuleError::Unsupported(format!(
             "assembler-cell: {input_count}-input recipes not yet supported"
         )));
@@ -422,7 +421,7 @@ fn extract_assembler_cell(
             Offset { half_x: 7, half_y: -2 },
             Offset { half_x: 7, half_y: 2 },
         ];
-    } else {
+    } else if input_count == 2 {
         // 2-input: two belts at -8, -6; two inserters at (-4,-2) and (-4,2).
         for (i, ing) in ingredients.iter().enumerate() {
             let belt_x = -8 + i as i32 * 2;
@@ -480,6 +479,68 @@ fn extract_assembler_cell(
             Offset { half_x: -9, half_y: 2 },
             Offset { half_x: 7, half_y: -2 },
             Offset { half_x: 7, half_y: 2 },
+        ];
+    } else {
+        // 3-input: three belts at -8, -6, +6; two west inserters, one east inserter
+        // Input 0 (left/far) uses long-handed inserter
+        for (i, ing) in ingredients.iter().enumerate() {
+            let (belt_x, ins_x, ins_hy, is_long, dir): (i32, i32, i32, bool, u8) = match i {
+                0 => (-8, -6, -2, true, Direction::West as u8),
+                1 => (-6, -4, 2, false, Direction::West as u8),
+                2 => (6, 4, 0, false, Direction::East as u8),
+                _ => continue,
+            };
+            for hy in [-2i32, 0, 2] {
+                parts.push(Part {
+                    role: format!("belt-{}", i),
+                    entity: "transport-belt".into(),
+                    half_size: Some(state.entity_half_size("transport-belt")),
+                    offset: Offset { half_x: belt_x, half_y: hy },
+                    direction: Direction::North as u8,
+                    recipe: None,
+                    underground_half: None,
+                });
+            }
+            parts.push(Part {
+                role: format!("inserter-{}", i),
+                entity: if is_long { "long-handed-inserter" } else { "inserter" }.into(),
+                half_size: Some(state.entity_half_size(
+                    if is_long { "long-handed-inserter" } else { "inserter" }
+                )),
+                offset: Offset { half_x: ins_x, half_y: ins_hy },
+                direction: dir,
+                recipe: None,
+                underground_half: None,
+            });
+            ports.push(Port {
+                id: format!("input-{}", i),
+                mode: PortMode::BeltInput,
+                item: ing.name.clone(),
+                offset: Offset { half_x: belt_x - 1, half_y: -2 },
+                direction: Direction::West as u8,
+                lane: None,
+                maximum: Rate::new(1, 60).unwrap(),
+            });
+            bill.entry(
+                if is_long { "long-handed-inserter" } else { "inserter" }.to_string()
+            ).and_modify(|c| *c += 1).or_insert(1);
+        }
+        parts.push(Part {
+            role: "power-pole".into(),
+            entity: "small-electric-pole".into(),
+            half_size: Some(state.entity_half_size("small-electric-pole")),
+            offset: Offset { half_x: 0, half_y: -2 },
+            direction: Direction::North as u8,
+            recipe: None,
+            underground_half: None,
+        });
+        bill.entry("transport-belt".to_string()).or_insert(12);
+        bill.entry("small-electric-pole".to_string()).or_insert(1);
+        required_clearance = vec![
+            Offset { half_x: -9, half_y: -2 },
+            Offset { half_x: -9, half_y: 2 },
+            Offset { half_x: 9, half_y: -2 },
+            Offset { half_x: 9, half_y: 2 },
         ];
     }
 
@@ -813,7 +874,7 @@ fn extract_fluid_manufacturing(
     let category = recipe.category.as_str();
     let entity = match category {
         "oil-processing" => "oil-refinery",
-        "chemistry" => "chemical-plant",
+        "chemistry" | "crafting-with-fluid" => "chemical-plant",
         _ => return Err(ModuleError::Unsupported(format!(
             "fluid-mfg: unsupported category '{category}' for '{item}'"
         ))),

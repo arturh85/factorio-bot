@@ -138,6 +138,18 @@ function viewBoxOriginX(design: ModuleDesign): number {
   return minX - 2;  // same padding as tiledViewBox
 }
 
+function viewBoxOriginY(design: ModuleDesign): number {
+  let factMinY = Infinity, factMaxY = -Infinity;
+  for (const p of design.parts) {
+    const half = entityHalfSize(p);
+    const southEdge = p.offset.half_y - half.hh;
+    const northEdge = p.offset.half_y + half.hh;
+    factMinY = Math.min(factMinY, southEdge);
+    factMaxY = Math.max(factMaxY, northEdge);
+  }
+  return -(factMaxY) - 2;
+}
+
 function tileStepY(design: ModuleDesign): number {
   let minY = Infinity, maxY = -Infinity;
   for (const p of design.parts) {
@@ -217,7 +229,7 @@ function entityLabel(entity: string): string {
               <defs>
                 <pattern :id="'grid-'+design.id" width="2" height="2" patternUnits="userSpaceOnUse"
                          :x="viewBoxOriginX(design)"
-                         y="0">
+                         :y="viewBoxOriginY(design)">
                   <path d="M 2 0 L 0 0 0 2" fill="none" stroke="#e5e7eb" stroke-width="0.15"/>
                 </pattern>
               </defs>

@@ -135,7 +135,7 @@ pub fn reconcile(
     let anchor_y = instance.placement.half_y as f64 * 0.5;
 
     let mut part_states: BTreeMap<String, PartState> = BTreeMap::new();
-    let mut construction_actions: BTreeMap<String, Vec<crate::ids::ActionId>> = BTreeMap::new();
+    let construction_actions: BTreeMap<String, Vec<crate::ids::ActionId>> = BTreeMap::new();
 
     for part in &design.parts {
         let px = anchor_x + part.offset.half_x as f64 * 0.5;

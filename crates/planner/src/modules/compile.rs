@@ -234,6 +234,11 @@ pub fn plan_with_session(
     options: &PlannerOptions,
     session: &mut PlannerSession,
 ) -> crate::request::PlanResult {
+    // Check mode: Legacy skips the module path entirely.
+    if options.mode == PlannerMode::Legacy {
+        return crate::request::plan_controlled(goals, state, registry, chain_actor, roster, control);
+    }
+
     // Check for module-supported production goals.
     let prod_items: Vec<String> = goals.iter().filter_map(production_item_from_goal).collect();
 

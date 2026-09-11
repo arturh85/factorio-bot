@@ -140,15 +140,6 @@ pub fn site_candidates(
 
     let mut instances = Vec::new();
 
-    // Pre-compute clearance: bounding box of all parts in half-tile units.
-    let (min_hx, max_hx, min_hy, max_hy) = design.parts.iter().fold(
-        (i32::MAX, i32::MIN, i32::MAX, i32::MIN),
-        |(mnx, mxx, mny, mxy), p| {
-            (mnx.min(p.offset.half_x - 2), mxx.max(p.offset.half_x + 2),
-             mny.min(p.offset.half_y - 2), mxy.max(p.offset.half_y + 2))
-        },
-    );
-
     // Search outward from `near` in a spiral pattern.
     let anchor_hx = (near.x * 2.0).round() as i32;
     let anchor_hy = (near.y * 2.0).round() as i32;

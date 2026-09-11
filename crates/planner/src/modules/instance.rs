@@ -125,25 +125,35 @@ impl InstanceMemory {
 /// tile, it marks all parts as `Unknown` and relies on the caller to verify.
 pub fn reconcile(
     instance: ModuleInstance,
-    _design: &ModuleDesign,
-    _world: &PlanState,
+    design: &ModuleDesign,
+    world: &PlanState,
 ) -> Result<ModuleInstance, ModuleError> {
-    // For now, a structural reconciliation:
-    // 1. Check that the surface matches
-    // 2. Check that the placement anchor is valid
-    // 3. Preserve existing part state for known parts
-    // 4. Set unknown roles to Missing
-    //
-    // A full entity-lookup reconciliation (checking each tile for the
-    // expected entity) requires entity-position iteration which is
-    // available through PlanState. We implement the conservative version
-    // here and rely on the build planner to detect actual occupancy.
+    use factorio_bot_core::types::Position;
 
-    // Reconciliation is a no-op in this conservative implementation:
-    // it trusts the instance's previously recorded part states.
-    // Future work will add tile-by-tile cross-referencing.
+    // Check each part: is the expected entity already standing?
+    let anchor_x = instance.placement.half_x as f64 * 0.5;
+    let anchor_y = instance.placement.half_y as f64 * 0.5;
 
-    Ok(instance)
+    let mut part_states: BTreeMap<String, PartState> = BTreeMap::new();
+    let mut construction_actions: BTreeMap<String, Vec<crate::ids::ActionId>> = BTreeMap::new();
+
+    for part in &design.parts {
+        let px = anchor_x + part.offset.half_x as f64 * 0.5;
+        let py = anchor_y + part.offset.half_y as f64 * 0.5;
+        let pos = Position::new(px, py);
+
+        let state = match world.entity_at(&pos) {
+            Some(entity) if entity.name == part.entity => PartState::Standing,
+            _ => PartState::Missing,
+        };
+        part_states.insert(part.role.clone(), state);
+    }
+
+    Ok(ModuleInstance {
+        parts: part_states,
+        construction_actions,
+        ..instance.clone()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -263,14 +273,24 @@ mod tests {
             },
         };
 
-        // Use fixture_world for a PlanState.
-        let state = crate::state::PlanState::from_world(
+        // Use fixture_world for a PlanState and add the drill entity
+        // to the plan's added overlay at the expected anchor position.
+        let mut state = crate::state::PlanState::from_world(
             std::sync::Arc::new(factorio_bot_core::test_utils::fixture_world()),
             &[crate::ids::BotId(1)],
         );
+        let drill_entity = factorio_bot_core::types::FactorioEntity {
+            name: "burner-mining-drill".into(),
+            entity_type: "burner-mining-drill".into(),
+            position: factorio_bot_core::types::Position::new(5.0, -10.0),
+            direction: 0,
+            ..Default::default()
+        };
+        state.create_entity(drill_entity.clone());
 
         let result = reconcile(instance, &design, &state).unwrap();
-        assert_eq!(result.parts.get("drill"), Some(&PartState::Standing));
-        assert_eq!(result.parts.get("furnace"), Some(&PartState::Missing));
+        assert_eq!(result.parts.get("drill"), Some(&PartState::Standing),
+            "drill should be Standing after attaching entity");
+        // Furnace is not in the design's parts, so it won't appear in result.
     }
 }

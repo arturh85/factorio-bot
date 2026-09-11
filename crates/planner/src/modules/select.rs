@@ -126,10 +126,12 @@ fn matching_families(item: &str) -> Vec<ModuleFamily> {
 /// Attempts to find `count` distinct placements near `near` that pass
 /// cheap occupancy, power, escape, and routing checks. Each orientation is
 /// tried before moving to the next candidate anchor.
+use factorio_bot_core::types::Direction;
+
 pub fn site_candidates(
     design: &ModuleDesign,
-    _state: &PlanState,
-    _near: &Position,
+    state: &PlanState,
+    near: &Position,
     count: u32,
     control: &PlanControl,
 ) -> Result<Vec<ModuleInstance>, ModuleError> {
@@ -138,40 +140,80 @@ pub fn site_candidates(
 
     let mut instances = Vec::new();
 
-    // For each requested count, generate a candidate placement.
-    // In this initial implementation, we use the design's native offset
-    // scheme and create placements at increasing offsets.
-    for i in 0..count {
-        control.checkpoint().map_err(|_| ModuleError::Cancelled)?;
-        // Charge site work per candidate.
-        control.charge(crate::control::WorkKind::Site)
-            .map_err(|_| ModuleError::Cancelled)?;
+    // Pre-compute clearance: bounding box of all parts in half-tile units.
+    let (min_hx, max_hx, min_hy, max_hy) = design.parts.iter().fold(
+        (i32::MAX, i32::MIN, i32::MAX, i32::MIN),
+        |(mnx, mxx, mny, mxy), p| {
+            (mnx.min(p.offset.half_x - 2), mxx.max(p.offset.half_x + 2),
+             mny.min(p.offset.half_y - 2), mxy.max(p.offset.half_y + 2))
+        },
+    );
 
-        let offset = (i as i32) * 8; // Space instances 4 tiles apart.
+    // Search outward from `near` in a spiral pattern.
+    let anchor_hx = (near.x * 2.0).round() as i32;
+    let anchor_hy = (near.y * 2.0).round() as i32;
+    let mut ring = 0;
 
-        // A real implementation would use PlanState::is_area_clear to check
-        // each orientation against the actual world. For now, create a
-        // generic placement candidate.
-        let instance = ModuleInstance {
-            id: 0, // assigned by InstanceMemory after selection
-            design_id: design.id.clone(),
-            placement: Placement {
-                surface: "nauvis".into(),
-                half_x: offset,
-                half_y: 0,
-                direction: 0,
-            },
-            bindings: vec![],
-            parts: design
-                .parts
-                .iter()
-                .map(|p| (p.role.clone(), PartState::Missing))
-                .collect(),
-            construction_actions: BTreeMap::new(),
-            commissioned_tick: None,
-        };
+    while instances.len() < count as usize && ring < 12 {
+        for dx in -(ring as i32)..=(ring as i32) {
+            for dy in -(ring as i32)..=(ring as i32) {
+                if dx.abs() != ring && dy.abs() != ring {
+                    continue; // only perimeter of the ring
+                }
 
-        instances.push(instance);
+                control.checkpoint().map_err(|_| ModuleError::Cancelled)?;
+                control.charge(crate::control::WorkKind::Site)
+                    .map_err(|_| ModuleError::Cancelled)?;
+
+                let half_x = anchor_hx + dx * 12; // 6-tile spacing
+                let half_y = anchor_hy + dy * 12;
+
+                // Check all parts fit in charted area.
+                let mut all_clear = true;
+                let mut direction = 0u8;
+                for part in &design.parts {
+                    let px = half_x + part.offset.half_x;
+                    let py = half_y + part.offset.half_y;
+                    let pos = Position::new(px as f64 * 0.5, py as f64 * 0.5);
+                    let dir = <Direction as factorio_bot_core::num_traits::FromPrimitive>::from_u8(part.direction).unwrap_or(Direction::North);
+                    direction = part.direction;
+
+                    if !state.is_area_free_facing(&part.entity, &pos, dir) {
+                        all_clear = false;
+                        break;
+                    }
+                }
+
+                if all_clear {
+                    let instance = ModuleInstance {
+                        id: 0,
+                        design_id: design.id.clone(),
+                        placement: Placement {
+                            surface: "nauvis".into(),
+                            half_x,
+                            half_y,
+                            direction,
+                        },
+                        bindings: vec![],
+                        parts: design
+                            .parts
+                            .iter()
+                            .map(|p| (p.role.clone(), PartState::Missing))
+                            .collect(),
+                        construction_actions: BTreeMap::new(),
+                        commissioned_tick: None,
+                    };
+                    instances.push(instance);
+                    if instances.len() >= count as usize {
+                        break;
+                    }
+                }
+            }
+            if instances.len() >= count as usize {
+                break;
+            }
+        }
+        ring += 1;
     }
 
     Ok(instances)

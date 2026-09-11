@@ -122,23 +122,38 @@ fn pumpjack_design() -> Value {
 
 fn red_science_design() -> Value {
     let hw = |name: &str| -> Value { PROTO_SIZES.half_size(name) };
+    // Two input belts (gear + copper) on the left, each with its own inserter.
+    // Inserters are stacked vertically (gear at hy=-2, copper at hy=2) so
+    // their collision boxes don't overlap — they share hx=-4.
     serde_json::json!({
         "schema": 1,
         "id": "red-science-cell",
         "family": "RedScience",
         "parameters": { "item": "automation-science-pack", "with_pole": false, "labs": 0 },
         "parts": [
-            { "role": "belt", "entity": "transport-belt",
-              "offset": { "half_x": -6, "half_y": -2 }, "direction": 0, "recipe": null,
+            { "role": "gear-belt", "entity": "transport-belt",
+              "offset": { "half_x": -9, "half_y": -2 }, "direction": 0, "recipe": null,
               "half_size": hw("transport-belt") },
-            { "role": "belt", "entity": "transport-belt",
-              "offset": { "half_x": -6, "half_y": 0 }, "direction": 0, "recipe": null,
+            { "role": "gear-belt", "entity": "transport-belt",
+              "offset": { "half_x": -9, "half_y": 0 }, "direction": 0, "recipe": null,
               "half_size": hw("transport-belt") },
-            { "role": "belt", "entity": "transport-belt",
-              "offset": { "half_x": -6, "half_y": 2 }, "direction": 0, "recipe": null,
+            { "role": "gear-belt", "entity": "transport-belt",
+              "offset": { "half_x": -9, "half_y": 2 }, "direction": 0, "recipe": null,
               "half_size": hw("transport-belt") },
-            { "role": "inserter", "entity": "inserter",
-              "offset": { "half_x": -4, "half_y": 0 }, "direction": 12, "recipe": null,
+            { "role": "copper-belt", "entity": "transport-belt",
+              "offset": { "half_x": -6, "half_y": -1 }, "direction": 0, "recipe": null,
+              "half_size": hw("transport-belt") },
+            { "role": "copper-belt", "entity": "transport-belt",
+              "offset": { "half_x": -6, "half_y": 1 }, "direction": 0, "recipe": null,
+              "half_size": hw("transport-belt") },
+            { "role": "copper-belt", "entity": "transport-belt",
+              "offset": { "half_x": -6, "half_y": 3 }, "direction": 0, "recipe": null,
+              "half_size": hw("transport-belt") },
+            { "role": "gear-inserter", "entity": "long-handed-inserter",
+              "offset": { "half_x": -4, "half_y": -2 }, "direction": 12, "recipe": null,
+              "half_size": hw("long-handed-inserter") },
+            { "role": "copper-inserter", "entity": "inserter",
+              "offset": { "half_x": -4, "half_y": 2 }, "direction": 12, "recipe": null,
               "half_size": hw("inserter") },
             { "role": "assembler", "entity": "assembling-machine-1",
               "offset": { "half_x": 0, "half_y": 0 }, "direction": 4,
@@ -155,16 +170,21 @@ fn red_science_design() -> Value {
               "half_size": hw("transport-belt") },
             { "role": "output-belt", "entity": "transport-belt",
               "offset": { "half_x": 6, "half_y": 2 }, "direction": 0, "recipe": null,
-              "half_size": hw("transport-belt") }
+              "half_size": hw("transport-belt") },
+            { "role": "power-pole", "entity": "small-electric-pole",
+              "offset": { "half_x": -2, "half_y": -5 }, "direction": 0, "recipe": null,
+              "half_size": hw("small-electric-pole") }
         ],
         "ports": [
-            { "id": "input", "mode": "BeltInput", "item": "mixed",
-              "offset": { "half_x": -7, "half_y": -2 }, "direction": 4 },
+            { "id": "input-gears", "mode": "BeltInput", "item": "iron-gear-wheel",
+              "offset": { "half_x": -10, "half_y": -2 }, "direction": 4 },
+            { "id": "input-copper", "mode": "BeltInput", "item": "copper-plate",
+              "offset": { "half_x": -7, "half_y": -1 }, "direction": 4 },
             { "id": "output", "mode": "InventoryOutput", "item": "automation-science-pack",
               "offset": { "half_x": 7, "half_y": 2 }, "direction": 0 }
         ],
-        "bill": { "assembling-machine-1": 1, "inserter": 2,
-                  "transport-belt": 6, "small-electric-pole": 1 },
+        "bill": { "assembling-machine-1": 1, "inserter": 1, "long-handed-inserter": 1,
+                  "transport-belt": 9, "small-electric-pole": 1 },
         "operation": {
             "inputs": { "copper-plate": { "numerator": 1, "ticks": 180 },
                         "iron-gear-wheel": { "numerator": 1, "ticks": 180 } },

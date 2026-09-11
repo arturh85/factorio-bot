@@ -342,16 +342,16 @@ fn one_input_assembler_design() -> Value {
              "half_size":hw("transport-belt")}
         ],
         "ports":[
-            {"id":"input","mode":"BeltInput","item":"any",
+            {"id":"input","mode":"BeltInput","item":"item1",
              "offset":{"half_x":-8,"half_y":-2},"direction":4},
-            {"id":"output","mode":"InventoryOutput","item":"any",
+            {"id":"output","mode":"InventoryOutput","item":"output",
              "offset":{"half_x":6,"half_y":2},"direction":0}
         ],
         "bill":{"assembling-machine-1":1,"inserter":2,
                 "transport-belt":6,"small-electric-pole":1},
         "operation":{
-            "inputs":{"input-item":{"numerator":1,"ticks":60}},
-            "outputs":{"output-item":{"numerator":1,"ticks":60}},
+            "inputs":{"item1":{"numerator":1,"ticks":60}},
+            "outputs":{"output":{"numerator":1,"ticks":60}},
             "power_watts":90000,"fuel_per_tick":{},
             "startup_latency_ticks":60,"startup_items":{},
             "required_research":["automation"],"required_surface":"nauvis"

@@ -376,7 +376,13 @@ pub fn plan_best_compat(
     roster: &[BotId],
 ) -> Result<(ActionNetwork, Schedule, ReplanMemory), PlannerError> {
     let control = PlanControl::new(BudgetLimits {
-        maxima: std::collections::BTreeMap::from([(WorkKind::Retry, 1)]),
+        maxima: std::collections::BTreeMap::from([
+            (WorkKind::Retry, 16),
+            (WorkKind::Goal, 1024),
+            (WorkKind::Site, 256),
+            (WorkKind::Assignment, 4096),
+            (WorkKind::LookaheadPair, 65536),
+        ]),
     });
     let state = state.clone().with_control(control.clone());
     let result = plan_controlled(goals, &state, registry, chain_actor, roster, &control);
@@ -403,7 +409,13 @@ pub fn plan_best_modules(
     roster: &[BotId],
 ) -> Result<(ActionNetwork, Schedule, ReplanMemory), PlannerError> {
     let control = PlanControl::new(BudgetLimits {
-        maxima: std::collections::BTreeMap::from([(WorkKind::Retry, 1)]),
+        maxima: std::collections::BTreeMap::from([
+            (WorkKind::Retry, 16),
+            (WorkKind::Goal, 1024),
+            (WorkKind::Site, 256),
+            (WorkKind::Assignment, 4096),
+            (WorkKind::LookaheadPair, 65536),
+        ]),
     });
     let state = state.clone().with_control(control.clone());
     let mut session = crate::modules::compile::PlannerSession::new();

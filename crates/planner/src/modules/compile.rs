@@ -117,6 +117,16 @@ fn compile_module_placement(
     }
 
     // Add acquisition subgoals for the bill of materials.
+    for (item, count) in &design.bill {
+        steps.push(Step::Subgoal(Goal::Have {
+            item: item.clone(),
+            count: *count as u32,
+            whose: crate::Holder::Anyone,
+            via: None,
+        }));
+    }
+
+
     // Each entity to place needs to be crafted/mined first.
     for (item, count) in &design.bill {
         steps.push(Step::Subgoal(Goal::Have {

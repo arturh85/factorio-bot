@@ -332,7 +332,7 @@ pub fn plan_with_session(
     }
 
     // Check for module-supported production goals.
-    let prod_items: Vec<String> = goals.iter().filter_map(production_item_from_goal).collect();
+    let prod_items: Vec<(String, u32)> = goals.iter().filter_map(production_item_from_goal).collect();
 
     if prod_items.is_empty() {
         // No module-supported goals; fall back to legacy.
@@ -352,10 +352,10 @@ pub fn plan_with_session(
     let mut all_designs: Vec<Arc<ModuleDesign>> = Vec::new();
     let mut all_instances: Vec<ModuleInstance> = Vec::new();
 
-    for item in &prod_items {
+    for (item, per_minute) in &prod_items {
         let request = ProductionRequest {
             item: item.clone(),
-            per_minute: 1,
+            per_minute: *per_minute,
             support_ticks: options.support_ticks,
         };
 
@@ -367,7 +367,7 @@ pub fn plan_with_session(
                         .unwrap_or_else(|| Position::new(0.0, 0.0));
 
                     // Compute how many copies of this module are needed.
-                    let copies = design_instances_needed(design, options.candidate_limit);
+                    let copies = design_instances_needed(design, *per_minute, options.support_ticks.into());
                     match site_candidates(design, state, &near, copies as u32, control) {
                         Ok(instances) => {
                             for inst in instances {
@@ -391,9 +391,9 @@ pub fn plan_with_session(
     let selection = ModuleSelection {
         designs: all_designs,
         instances: all_instances,
-        requests: prod_items.iter().map(|item| ProductionRequest {
+        requests: prod_items.iter().map(|(item, per_minute)| ProductionRequest {
             item: item.clone(),
-            per_minute: 1,
+            per_minute: *per_minute,
             support_ticks: options.support_ticks,
         }).collect(),
     };
@@ -459,32 +459,33 @@ pub fn plan_with_session(
 /// Uses the module's output rate: at 1 plate per 600 ticks (OreToPlate base),
 /// 5 plates need 3000 ticks. With candidate_limit as an upper bound, this
 /// ensures we don't over-allocate modules while still producing enough.
-fn design_instances_needed(design: &ModuleDesign, max_copies: usize) -> usize {
+fn design_instances_needed(design: &ModuleDesign, per_minute: u32, support_ticks: u64) -> usize {
     // Find the highest output rate across all output ports.
     let max_rate = design.operation.outputs.values()
         .map(|r| r.numerator as f64 / r.ticks.get() as f64)
         .fold(0.0f64, |a, b| a.max(b));
 
-    if max_rate <= 0.0 {
-        // No measurable rate; just site one copy.
+    if max_rate <= 0.0 || per_minute == 0 {
         return 1;
     }
 
-    // For a typical have:5 goal with 1 plate/600 ticks:
-    // support_ticks = 18000, need = 5, rate = 1/600 = 0.00167
-    // copies = ceil(min(5, 18000 * 0.00167) / (18000 * 0.00167))
-    // ≈ ceil(min(5, 30) / 30) = ceil(5/30) = 1 copy
-    //
-    // Clamp to a reasonable maximum.
-    1.max(max_copies.min(8))
+    // Per-minute output of one cell: rate * 3600 ticks/min
+    let cell_per_minute = max_rate * 3600.0;
+    if cell_per_minute <= 0.0 {
+        return 1;
+    }
+
+    // How many cells to meet the target per-minute rate.
+    let needed = (per_minute as f64 / cell_per_minute).ceil() as usize;
+    needed.max(1)
 }
 
 /// Extract a production item from a goal that the module system can handle.
-fn production_item_from_goal(goal: &Goal) -> Option<String> {
+fn production_item_from_goal(goal: &Goal) -> Option<(String, u32)> {
     match goal {
-        Goal::Have { item, .. } | Goal::Produced { item, .. } | Goal::Producing { item, .. } => {
-            Some(item.clone())
-        }
+        Goal::Have { item, .. } => Some((item.clone(), 1)),
+        Goal::Produced { item, count, .. } => Some((item.clone(), *count)),
+        Goal::Producing { item, per_minute } => Some((item.clone(), *per_minute)),
         _ => None,
     }
 }

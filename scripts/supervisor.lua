@@ -1489,7 +1489,7 @@ function Sup:step()
         -- same question of the same world -- nothing ran, so nothing changed --
         -- and gets the same answer, until the iteration cap turns a stated
         -- reason into `exhausted`.
-        local ok, planned = pcall(goal.plan, self.milestone, { bots = self.bots })
+        local ok, planned = pcall(goal.plan, self.milestone, { bots = self.bots, planner_mode = "modules" })
         if not ok then
             local refusal = refusal_of(planned)
             -- `error(err, 0)`: re-raised as the value it was, with no position

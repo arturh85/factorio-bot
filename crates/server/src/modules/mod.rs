@@ -183,7 +183,7 @@ fn red_science_design() -> Value {
             {"id":"output","mode":"InventoryOutput","item":"automation-science-pack",
              "offset":{"half_x":6,"half_y":2},"direction":0}
         ],
-        "bill":{"assembling-machine-1":1,"long-handed-inserter":1,"inserter":1,
+        "bill":{"assembling-machine-1":1,"inserter":2,
                 "transport-belt":9,"small-electric-pole":1},
         "operation":{
             "inputs":{"copper-plate":{"numerator":1,"ticks":180},
@@ -311,19 +311,19 @@ fn one_input_assembler_design() -> Value {
         "parameters":{"item":"any","with_pole":true,"labs":0},
         "parts":[
             {"role":"belt","entity":"transport-belt",
-             "offset":{"half_x":-5,"half_y":-2},"direction":0,"recipe":null,
+             "offset":{"half_x":-7,"half_y":-2},"direction":0,"recipe":null,
              "half_size":hw("transport-belt")},
             {"role":"belt","entity":"transport-belt",
-             "offset":{"half_x":-5,"half_y":0},"direction":0,"recipe":null,
+             "offset":{"half_x":-7,"half_y":0},"direction":0,"recipe":null,
              "half_size":hw("transport-belt")},
             {"role":"belt","entity":"transport-belt",
-             "offset":{"half_x":-5,"half_y":2},"direction":0,"recipe":null,
+             "offset":{"half_x":-7,"half_y":2},"direction":0,"recipe":null,
              "half_size":hw("transport-belt")},
             {"role":"inserter","entity":"inserter",
-             "offset":{"half_x":-3,"half_y":0},"direction":12,"recipe":null,
+             "offset":{"half_x":-5,"half_y":0},"direction":12,"recipe":null,
              "half_size":hw("inserter")},
             {"role":"power-pole","entity":"small-electric-pole",
-             "offset":{"half_x":-3,"half_y":-4},"direction":0,"recipe":null,
+             "offset":{"half_x":-5,"half_y":-2},"direction":0,"recipe":null,
              "half_size":hw("small-electric-pole")},
             {"role":"assembler","entity":"assembling-machine-1",
              "offset":{"half_x":-1,"half_y":0},"direction":4,"recipe":null,
@@ -343,7 +343,7 @@ fn one_input_assembler_design() -> Value {
         ],
         "ports":[
             {"id":"input","mode":"BeltInput","item":"any",
-             "offset":{"half_x":-6,"half_y":-2},"direction":4},
+             "offset":{"half_x":-8,"half_y":-2},"direction":4},
             {"id":"output","mode":"InventoryOutput","item":"any",
              "offset":{"half_x":6,"half_y":2},"direction":0}
         ],

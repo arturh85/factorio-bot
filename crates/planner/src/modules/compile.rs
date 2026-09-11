@@ -291,6 +291,15 @@ pub fn plan_with_session(
         return crate::request::plan_controlled(goals, state, registry, chain_actor, roster, control);
     }
 
+    // Check if any goal is already satisfied by the current world state.
+    // If ALL production goals are satisfied, skip module compilation.
+    let all_satisfied = goals.iter().all(|g| {
+        crate::method::have::holds(g, state).unwrap_or(false)
+    });
+    if all_satisfied {
+        return crate::request::plan_controlled(goals, state, registry, chain_actor, roster, control);
+    }
+
     // For each production item, select module designs.
     let mut all_designs: Vec<Arc<ModuleDesign>> = Vec::new();
     let mut all_instances: Vec<ModuleInstance> = Vec::new();

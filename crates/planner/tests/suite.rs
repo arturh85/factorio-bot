@@ -102,3 +102,5 @@ mod tile_reservation;
 mod unreachable_memory;
 #[path = "world_round_trip.rs"]
 mod world_round_trip;
+#[path = "module_offline.rs"]
+mod module_offline;

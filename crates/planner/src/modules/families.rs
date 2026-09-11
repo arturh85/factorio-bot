@@ -28,6 +28,7 @@ pub fn extract_design(
         ModuleFamily::OreToPlate => extract_ore_to_plate(state, parameters),
         ModuleFamily::RedScience => extract_red_science(state, parameters),
         ModuleFamily::AssemblerCell => extract_assembler_cell(state, parameters),
+        ModuleFamily::OilRefinery | ModuleFamily::ChemicalPlant => extract_fluid_manufacturing(state, family, parameters),
     }
 }
 
@@ -36,12 +37,12 @@ fn extract_ore_to_plate(
     parameters: &ModuleParameters,
 ) -> Result<ModuleDesign, ModuleError> {
     let item = &parameters.item;
-    if item != "iron-plate" && item != "copper-plate" {
+    if item != "iron-plate" && item != "copper-plate" && item != "crude-oil" {
         return Err(ModuleError::Unsupported(format!(
             "ore-to-plate: unsupported item '{item}', expected iron-plate or copper-plate"
         )));
     }
-    let ore = if item == "iron-plate" { "iron-ore" } else { "copper-ore" };
+    let ore = if item == "iron-plate" { "iron-ore" } else if item == "copper-plate" { "copper-ore" } else { "crude-oil" };
 
     // Build the static geometry of one ore-to-plate cell.
     // The native layout places a burner-mining-drill facing east, with a
@@ -79,40 +80,70 @@ fn extract_ore_to_plate(
     ];
 
     // Bill of materials: 1 drill + 1 furnace.
-    let bill = BTreeMap::from([
-        ("burner-mining-drill".to_string(), 1u64),
-        ("stone-furnace".to_string(), 1u64),
-    ]);
+    let bill: BTreeMap<String, u64> = if item == "crude-oil" {
+        BTreeMap::from([
+            ("pumpjack".to_string(), 1u64),
+            ("pipe".to_string(), 2u64),
+        ])
+    } else {
+        BTreeMap::from([
+            ("burner-mining-drill".to_string(), 1u64),
+            ("stone-furnace".to_string(), 1u64),
+        ])
+    };
 
     // Ports: ore belt input on the drill's west face, plate output on furnace's north face.
-    let ports = vec![
-        Port {
-            id: "belt-input".into(),
-            mode: PortMode::BeltInput,
-            item: ore.into(),
-            offset: Offset { half_x: -3, half_y: 0 },
-            direction: Direction::West as u8,
-            lane: None,
-            maximum: Rate::new(1, 600).unwrap(),
-        },
-        Port {
-            id: "inventory-output".into(),
-            mode: PortMode::InventoryOutput,
-            item: item.clone(),
-            offset: Offset { half_x: 1, half_y: 8 },
-            direction: Direction::North as u8,
-            lane: None,
-            maximum: Rate::new(1, 600).unwrap(),
-        },
-    ];
+    let ports: Vec<Port> = if item == "crude-oil" {
+        vec![
+            Port {
+                id: "output".into(),
+                mode: PortMode::InventoryOutput,
+                item: "crude-oil".into(),
+                offset: Offset { half_x: -1, half_y: 3 },
+                direction: Direction::North as u8,
+                lane: None,
+                maximum: Rate::new(1, 120).unwrap(),
+            },
+        ]
+    } else {
+        vec![
+            Port {
+                id: "belt-input".into(),
+                mode: PortMode::BeltInput,
+                item: ore.into(),
+                offset: Offset { half_x: -3, half_y: 0 },
+                direction: Direction::West as u8,
+                lane: None,
+                maximum: Rate::new(1, 600).unwrap(),
+            },
+            Port {
+                id: "inventory-output".into(),
+                mode: PortMode::InventoryOutput,
+                item: item.clone(),
+                offset: Offset { half_x: 1, half_y: 8 },
+                direction: Direction::North as u8,
+                lane: None,
+                maximum: Rate::new(1, 600).unwrap(),
+            },
+        ]
+    };
 
     // Required clearance: a corridor around the cell.
-    let required_clearance = vec![
-        Offset { half_x: -3, half_y: -1 },
-        Offset { half_x: 3, half_y: -1 },
-        Offset { half_x: -3, half_y: 9 },
-        Offset { half_x: 3, half_y: 9 },
-    ];
+    let required_clearance: Vec<Offset> = if item == "crude-oil" {
+        vec![
+            Offset { half_x: -4, half_y: -4 },
+            Offset { half_x: 4, half_y: -4 },
+            Offset { half_x: -4, half_y: 4 },
+            Offset { half_x: 4, half_y: 4 },
+        ]
+    } else {
+        vec![
+            Offset { half_x: -3, half_y: -1 },
+            Offset { half_x: 3, half_y: -1 },
+            Offset { half_x: -3, half_y: 9 },
+            Offset { half_x: 3, half_y: 9 },
+        ]
+    };
 
     // Precedence: drill must be placed before furnace (furnace may go
     // on the drill's output).
@@ -120,25 +151,40 @@ fn extract_ore_to_plate(
         ("drill".into(), "furnace".into()),
     ];
 
-    let operation = OperatingContract {
-        inputs: BTreeMap::from([(ore.into(), Rate::new(1, 600).unwrap())]),
-        outputs: BTreeMap::from([(item.clone(), Rate::new(1, 600).unwrap())]),
-        power_watts: 0, // burner cell, no electric draw
-        fuel_per_tick: BTreeMap::from([
-            ("coal".into(), Rate::new(1, 4800).unwrap()),
-        ]),
-        startup_latency_ticks: 4800, // ~80 seconds at 60 UPS
-        startup_items: BTreeMap::from([
-            ("coal".to_string(), 10u64),
-            (ore.to_string(), 5u64),
-        ]),
-        local_buffer_capacity: BTreeMap::from([
-            (ore.into(), 50u64),
-            (item.clone(), 10u64),
-        ]),
-        required_research: vec![],
-        required_surface: "nauvis".into(),
-        unsupported_mechanisms: vec![],
+    let operation: OperatingContract = if item == "crude-oil" {
+        OperatingContract {
+            inputs: BTreeMap::new(),
+            outputs: BTreeMap::from([("crude-oil".into(), Rate::new(1, 120).unwrap())]),
+            power_watts: 90000,
+            fuel_per_tick: BTreeMap::new(),
+            startup_latency_ticks: 120,
+            startup_items: BTreeMap::from([("pipe".to_string(), 2u64)]),
+            local_buffer_capacity: BTreeMap::new(),
+            required_research: vec!["oil-processing".into()],
+            required_surface: "nauvis".into(),
+            unsupported_mechanisms: vec![],
+        }
+    } else {
+        OperatingContract {
+            inputs: BTreeMap::from([(ore.into(), Rate::new(1, 600).unwrap())]),
+            outputs: BTreeMap::from([(item.clone(), Rate::new(1, 600).unwrap())]),
+            power_watts: 0, // burner cell, no electric draw
+            fuel_per_tick: BTreeMap::from([
+                ("coal".into(), Rate::new(1, 4800).unwrap()),
+            ]),
+            startup_latency_ticks: 4800,
+            startup_items: BTreeMap::from([
+                ("coal".to_string(), 10u64),
+                (ore.to_string(), 5u64),
+            ]),
+            local_buffer_capacity: BTreeMap::from([
+                (ore.into(), 50u64),
+                (item.clone(), 10u64),
+            ]),
+            required_research: vec![],
+            required_surface: "nauvis".into(),
+            unsupported_mechanisms: vec![],
+        }
     };
 
     let mut design = ModuleDesign {
@@ -595,4 +641,135 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ModuleError::Unsupported(_)));
     }
+}
+
+
+
+fn extract_fluid_manufacturing(
+    state: &PlanState,
+    family: ModuleFamily,
+    parameters: &ModuleParameters,
+) -> Result<ModuleDesign, ModuleError> {
+    let item = &parameters.item;
+    let recipes = state.base().entity_graph.recipes();
+    let recipe = recipes.get(item).ok_or_else(|| ModuleError::Unsupported(format!(
+        "fluid-mfg: no recipe for '{item}'"
+    )))?;
+    let category = recipe.category.as_str();
+    let entity = match category {
+        "oil-processing" => "oil-refinery",
+        "chemistry" => "chemical-plant",
+        _ => return Err(ModuleError::Unsupported(format!(
+            "fluid-mfg: unsupported category '{category}' for '{item}'"
+        ))),
+    };
+
+    let mut bill = BTreeMap::new();
+    bill.insert(entity.to_string(), 1u64);
+    bill.insert("pipe".to_string(), 4u64);
+    bill.insert("small-electric-pole".to_string(), 1u64);
+    if let Some(ref ing) = recipe.ingredients {
+        for ingr in ing.iter() {
+            if ingr.ingredient_type == "item" {
+                *bill.entry(ingr.name.clone()).or_insert(0u64) += ingr.amount as u64;
+            }
+        }
+    }
+
+    let output = if let Some(p) = recipe.products.first() {
+        p.name.clone()
+    } else {
+        item.clone()
+    };
+
+    let is_3x3 = entity == "oil-refinery";
+    let half = if is_3x3 { 3 } else { 2 };
+
+    let parts = vec![
+        Part {
+            role: entity.into(),
+            entity: entity.into(),
+            half_size: Some(Offset { half_x: half, half_y: half }),
+            offset: Offset { half_x: 0, half_y: 0 },
+            direction: Direction::North as u8,
+            recipe: Some(item.clone()),
+            underground_half: None,
+        },
+    ];
+
+    let ports = vec![
+        Port {
+            id: "fluid-input".into(),
+            mode: PortMode::BeltInput,
+            item: "pipe".into(),
+            offset: Offset { half_x: -2, half_y: -3 },
+            direction: Direction::West as u8,
+            lane: None,
+            maximum: Rate::new(1, 60).unwrap(),
+        },
+        Port {
+            id: "fluid-output".into(),
+            mode: PortMode::InventoryOutput,
+            item: output.clone(),
+            offset: Offset { half_x: 2, half_y: 3 },
+            direction: Direction::North as u8,
+            lane: None,
+            maximum: Rate::new(1, 60).unwrap(),
+        },
+    ];
+
+    let required_clearance = vec![
+        Offset { half_x: -3, half_y: -3 },
+        Offset { half_x: 3, half_y: -3 },
+        Offset { half_x: -3, half_y: 3 },
+        Offset { half_x: 3, half_y: 3 },
+    ];
+
+    let power = if is_3x3 { 420000u64 } else { 210000u64 };
+    let energy_ticks = (recipe.energy.raw() * 60.0) as u64;
+
+    let mut inps = BTreeMap::new();
+    if let Some(ref ing) = recipe.ingredients {
+        for ingr in ing.iter() {
+            inps.insert(ingr.name.clone(), Rate::new(ingr.amount as u64, energy_ticks).unwrap());
+        }
+    }
+    let mut outs = BTreeMap::new();
+    outs.insert(output.clone(), Rate::new(1, energy_ticks).unwrap());
+
+    let mut buffer = BTreeMap::new();
+    buffer.insert(output, 10u64);
+
+    let operation = OperatingContract {
+        inputs: inps,
+        outputs: outs,
+        power_watts: power,
+        fuel_per_tick: BTreeMap::new(),
+        startup_latency_ticks: energy_ticks,
+        startup_items: BTreeMap::new(),
+        local_buffer_capacity: buffer,
+        required_research: vec![],
+        required_surface: "nauvis".into(),
+        unsupported_mechanisms: vec![],
+    };
+
+    Ok(ModuleDesign {
+        schema: 1,
+        id: String::new(),
+        family,
+        generator_version: 1,
+        origin: KnowledgeOrigin::Extracted,
+        parameters: parameters.clone(),
+        prototype_hash: "extracted-v1".into(),
+        mod_versions: BTreeMap::new(),
+        parents: vec![],
+        training_manifest: None,
+        parts,
+        ports,
+        required_clearance,
+        expansion_space: vec![],
+        bill,
+        precedence: vec![],
+        operation,
+    })
 }

@@ -71,6 +71,8 @@ pub enum ModuleFamily {
     OreToPlate,
     RedScience,
     AssemblerCell,
+    OilRefinery,
+    ChemicalPlant,
 }
 
 /// How the design was obtained.

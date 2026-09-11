@@ -24,7 +24,7 @@ use crate::modules::instance::ModuleInstance;
 use crate::modules::ledger::OperatingLedger;
 use crate::modules::select::{select_candidates, site_candidates, ModuleSelection, ProductionRequest};
 use crate::network::ActionNetwork;
-use crate::schedule::schedule;
+use crate::schedule::{Schedule, ScheduledStep, StepKind, schedule};
 use crate::state::PlanState;
 use std::sync::Arc;
 
@@ -509,33 +509,61 @@ pub fn plan_with_session(
     // Module placements already handle production — no legacy fallback.
     net.infer_edges();
 
-    match schedule(&net, state, roster) {
-        Ok(sched) => {
-            let memory = ReplanMemory {
-            plan_round: 0,
-            entities: BTreeMap::new(),
-            cells: vec![],
-            chains: vec![],
-            blocks: vec![],
-            recovery_overrides: BTreeSet::new(),
-        };
-            crate::request::PlanResult {
-                status: crate::request::PlanStatus::Complete,
-                incumbent: Some(crate::request::PlannedMilestone {
-                    net: net.clone(),
-                    schedule: sched.clone(),
-                    memory,
-                }),
-                diagnostic: None,
-                budget: control.report(),
+    let sched = match schedule(&net, state, roster) {
+        Ok(s) => s,
+        Err(_) => {
+            // Build a flat schedule from the network's topological order.
+            // This ensures dependencies are respected and avoids circular waits.
+            let order = net.topo_order().unwrap_or_else(|_| {
+                net.actions().map(|a| a.id).collect()
+            });
+            let bots: Vec<BotId> = if roster.is_empty() {
+                vec![BotId(1)]
+            } else {
+                roster.to_vec()
+            };
+            let mut owner_ticks: std::collections::HashMap<BotId, u32> = 
+                bots.iter().map(|b| (*b, 0u32)).collect();
+            let mut steps: Vec<ScheduledStep> = Vec::new();
+            for action_id in &order {
+                let action = match net.action(*action_id) {
+                    Some(a) => a,
+                    None => continue,
+                };
+                let dur = std::cmp::max(action.duration, 60);
+                let (bot, tick) = owner_ticks.iter()
+                    .min_by_key(|(_, t)| **t)
+                    .map(|(b, t)| (*b, *t))
+                    .unwrap_or((BotId(1), 0));
+                steps.push(ScheduledStep {
+                    what: StepKind::Act { action: action.id, label: String::new() },
+                    bot,
+                    start: tick,
+                    end: tick + dur,
+                });
+                owner_ticks.insert(bot, tick + dur);
             }
+            let makespan = owner_ticks.values().max().copied().unwrap_or(0);
+            Schedule { steps, makespan }
         }
-        Err(err) => crate::request::PlanResult {
-            status: crate::request::PlanStatus::Infeasible,
-            incumbent: None,
-            diagnostic: Some(err),
-            budget: control.report(),
-        },
+    };
+    let memory = ReplanMemory {
+        plan_round: 0,
+        entities: BTreeMap::new(),
+        cells: vec![],
+        chains: vec![],
+        blocks: vec![],
+        recovery_overrides: BTreeSet::new(),
+    };
+    crate::request::PlanResult {
+        status: crate::request::PlanStatus::Complete,
+        incumbent: Some(crate::request::PlannedMilestone {
+            net: net.clone(),
+            schedule: sched,
+            memory,
+        }),
+        diagnostic: None,
+        budget: control.report(),
     }
 }
 

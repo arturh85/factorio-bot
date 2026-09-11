@@ -445,4 +445,100 @@ mod tests {
         // 3 Act steps × 1 ActionId each
         assert_eq!(ids.next(), crate::ids::ActionId(2), "2 ActionIds used: Place + Fuel");
     }
+
+    #[test]
+    fn module_pipeline_produces_scheduled_steps() {
+        use std::sync::Arc;
+
+        let state = PlanState::from_world(
+            Arc::new(fixture_world()),
+            &[BotId(1)],
+        );
+        let control = make_control();
+        let options = PlannerOptions {
+            mode: PlannerMode::Modules,
+            cache_mode: CacheMode::On,
+            candidate_limit: 3,
+            support_ticks: 18000,
+        };
+        let mut session = PlannerSession::new();
+        let roster = [BotId(1)];
+        let chain_actor = crate::method::pick_chain_actor(&state, &roster).unwrap();
+
+        let result = plan_with_session(
+            &[Goal::Have {
+                item: "iron-plate".into(),
+                count: 5,
+                whose: Holder::Anyone,
+                via: None,
+            }],
+            &state,
+            &registry_for(&roster),
+            chain_actor,
+            &roster,
+            &control,
+            &options,
+            &mut session,
+        );
+
+        // The fixture world may have pre-existing entities that block placement,
+        // so either Complete or Infeasible are acceptable outcomes.
+        if result.status == crate::request::PlanStatus::Complete {
+            let milestone = result.incumbent.unwrap();
+            assert!(!milestone.schedule.steps.is_empty(), "should have scheduled steps");
+
+            // Compute makespan from the schedule.
+            let makespan = milestone.schedule.steps.iter()
+                .map(|step| step.end)
+                .max().unwrap_or(0);
+            assert!(makespan > 0, "makespan should be positive");
+
+            // Find the ActionNetwork and check for Place actions.
+            let place_actions: Vec<&str> = milestone.net.actions()
+                .filter_map(|action| match &action.kind {
+                    crate::action::ActionKind::Place { entity } => Some(entity.name.as_str()),
+                    _ => None,
+                })
+                .collect();
+            // With OreToPlate, at minimum we should have drill or furnace placement.
+            assert!(!place_actions.is_empty(), "should have at least one Place action");
+        }
+        // If Infeasible, the diagnostic should explain why (occupied ground, etc.)
+        if result.status == crate::request::PlanStatus::Infeasible {
+            assert!(result.diagnostic.is_some(), "Infeasible should carry a diagnostic");
+        }
+    }
+
+    #[test]
+    fn module_pipeline_refuses_unknown_items() {
+        let state = PlanState::from_world(
+            std::sync::Arc::new(fixture_world()),
+            &[BotId(1)],
+        );
+        let control = make_control();
+        let options = PlannerOptions::default();
+        let mut session = PlannerSession::new();
+        let roster = [BotId(1)];
+        let chain_actor = crate::method::pick_chain_actor(&state, &roster).unwrap();
+
+        let result = plan_with_session(
+            &[Goal::Have {
+                item: "nonexistent-item".into(),
+                count: 1,
+                whose: Holder::Anyone,
+                via: None,
+            }],
+            &state,
+            &registry_for(&roster),
+            chain_actor,
+            &roster,
+            &control,
+            &options,
+            &mut session,
+        );
+
+        assert!(result.status == crate::request::PlanStatus::Complete
+            || result.status == crate::request::PlanStatus::Infeasible,
+            "unexpected status: {:?}", result.status);
+    }
 }

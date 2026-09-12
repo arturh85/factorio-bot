@@ -13,7 +13,7 @@ use factorio_bot_planner::ids::{ActionId, ActionIdGen, BotId, ChainId, ChainIdGe
 use factorio_bot_planner::modules::fallback::{earliest_start, schedule_fallback};
 // ModuleError is used via its error variant in tests
 use factorio_bot_planner::{
-    ActionNetwork, PlannerError, PlanState, Schedule, ScheduledStep, StepKind, schedule,
+    ActionNetwork, PlanState, PlannerError, Schedule, ScheduledStep, StepKind, schedule,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -91,10 +91,7 @@ fn successor_waits_for_other_bot_and_edge_lag() {
     // Predecessor C finishes at 80, lag 0.
     // Bot is free at 20.
     // max(20, 100+30=130, 80+0=80) = 130
-    assert_eq!(
-        earliest_start(20, &[(100, 30), (80, 0)]).unwrap(),
-        130
-    );
+    assert_eq!(earliest_start(20, &[(100, 30), (80, 0)]).unwrap(), 130);
     // Overflow: u32::MAX + 1 = 0, but checked_add catches it.
     assert!(earliest_start(0, &[(u32::MAX, 1)]).is_err());
 }
@@ -114,7 +111,10 @@ fn earliest_start_deps_dominate_bot_free() {
 #[test]
 fn earliest_start_multiple_deps() {
     // max(0, 50+10=60, 30+40=70, 20+5=25) = 70
-    assert_eq!(earliest_start(0, &[(50, 10), (30, 40), (20, 5)]).unwrap(), 70);
+    assert_eq!(
+        earliest_start(0, &[(50, 10), (30, 40), (20, 5)]).unwrap(),
+        70
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -156,7 +156,11 @@ fn single_bot_linear_chain() {
     let state = test_state(&[BotId(1)]);
     let control = make_control();
     let result = schedule_fallback(&net, &state, &[BotId(1)], &control);
-    assert!(result.is_ok(), "linear chain should schedule: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "linear chain should schedule: {:?}",
+        result.err()
+    );
     let sched = result.unwrap();
     assert_eq!(sched.steps.len(), 2, "should have 2 steps");
 
@@ -204,7 +208,11 @@ fn chain_owner_is_hard_constraint() {
     let control = make_control();
 
     let result = schedule_fallback(&net, &state, &[BotId(1)], &control);
-    assert!(result.is_ok(), "owner bot in roster should schedule: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "owner bot in roster should schedule: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -300,12 +308,13 @@ fn cross_bot_acquisition_and_placement() {
 
     // Both actions should be assigned to different bots if possible.
     let assignments: std::collections::BTreeSet<_> = sched.steps.iter().map(|s| s.bot).collect();
-    assert!(
-        assignments.len() >= 1,
-        "at least one bot assigned"
-    );
+    assert!(assignments.len() >= 1, "at least one bot assigned");
     // Both actions scheduled.
-    let act_steps: Vec<_> = sched.steps.iter().filter(|s| matches!(s.what, StepKind::Act { .. })).collect();
+    let act_steps: Vec<_> = sched
+        .steps
+        .iter()
+        .filter(|s| matches!(s.what, StepKind::Act { .. }))
+        .collect();
     assert_eq!(act_steps.len(), 2, "should have exactly 2 action steps");
 }
 
@@ -342,7 +351,11 @@ fn actor_pinned_insertion() {
     assert!(result.is_ok(), "pinned action should schedule");
     let sched = result.unwrap();
     // Should have walk + act, or just act if no walk.
-    let act_steps: Vec<_> = sched.steps.iter().filter(|s| matches!(s.what, StepKind::Act { .. })).collect();
+    let act_steps: Vec<_> = sched
+        .steps
+        .iter()
+        .filter(|s| matches!(s.what, StepKind::Act { .. }))
+        .collect();
     assert_eq!(act_steps.len(), 1, "one action step");
     assert_eq!(act_steps[0].bot, BotId(1), "pinned action runs on bot 1");
 }
@@ -389,9 +402,17 @@ fn unsatisfied_inventory_fails() {
     assert!(result.is_ok(), "walking far should still schedule");
     let sched = result.unwrap();
     // Should have a walk step + an Act step.
-    let act_steps: Vec<_> = sched.steps.iter().filter(|s| matches!(s.what, StepKind::Act { .. })).collect();
+    let act_steps: Vec<_> = sched
+        .steps
+        .iter()
+        .filter(|s| matches!(s.what, StepKind::Act { .. }))
+        .collect();
     assert_eq!(act_steps.len(), 1, "one action step");
-    let walk_steps: Vec<_> = sched.steps.iter().filter(|s| matches!(s.what, StepKind::Walk { .. })).collect();
+    let walk_steps: Vec<_> = sched
+        .steps
+        .iter()
+        .filter(|s| matches!(s.what, StepKind::Walk { .. }))
+        .collect();
     assert_eq!(walk_steps.len(), 1, "one walk step");
 
     // Check that there's also a walk step (since travel > 0).
@@ -432,7 +453,10 @@ fn travel_adds_walk_step() {
     let sched = result.unwrap();
 
     // Should have both a walk step and an action step.
-    assert!(sched.steps.len() >= 1, "should have at least the action step");
+    assert!(
+        sched.steps.len() >= 1,
+        "should have at least the action step"
+    );
 }
 
 #[test]
@@ -616,8 +640,15 @@ fn multi_bot_independent_actions() {
 
     // With 2 actions and 2 bots, we should see different bots.
     let bots_used: std::collections::BTreeSet<_> = sched.steps.iter().map(|s| s.bot).collect();
-    assert_eq!(bots_used.len(), 2, "both bots used for 2 independent actions");
-    assert_eq!(sched.makespan, 200, "makespan = 200 (max of two parallel 200-tick actions)");
+    assert_eq!(
+        bots_used.len(),
+        2,
+        "both bots used for 2 independent actions"
+    );
+    assert_eq!(
+        sched.makespan, 200,
+        "makespan = 200 (max of two parallel 200-tick actions)"
+    );
 }
 
 #[test]
@@ -691,9 +722,7 @@ fn multi_bot_with_dependency() {
                 radius: 3.0,
                 min_radius: 0.0,
             },
-            Condition::PositionFree {
-                pos: b_pos.clone(),
-            },
+            Condition::PositionFree { pos: b_pos.clone() },
         ],
         eff: vec![],
         duration: 30,
@@ -711,15 +740,24 @@ fn multi_bot_with_dependency() {
     let sched = result.unwrap();
 
     // Both actions should have Act steps.
-    let act_steps: Vec<_> = sched.steps.iter().filter(|s| matches!(s.what, StepKind::Act { .. })).collect();
+    let act_steps: Vec<_> = sched
+        .steps
+        .iter()
+        .filter(|s| matches!(s.what, StepKind::Act { .. }))
+        .collect();
     assert_eq!(act_steps.len(), 2, "should have 2 act steps");
 
     // Action B (pinned to bot 1) must start >= A.finish + lag.
     // Find the place action (B) specifically by its kind.
-    let step_b = act_steps.iter()
+    let step_b = act_steps
+        .iter()
         .filter(|s| s.bot == BotId(1))
         .max_by_key(|s| s.start)
         .expect("bot 1 should have an act step for B");
     assert_eq!(step_b.bot, BotId(1), "pinned action runs on bot 1");
-    assert!(step_b.start >= 100 + 10, "B (start={}) starts after A finishes + lag (110)", step_b.start);
+    assert!(
+        step_b.start >= 100 + 10,
+        "B (start={}) starts after A finishes + lag (110)",
+        step_b.start
+    );
 }

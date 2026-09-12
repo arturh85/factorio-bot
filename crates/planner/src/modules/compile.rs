@@ -656,12 +656,7 @@ pub fn plan_with_session(
         Err(_) => {
             // Fallback: use schedule_fallback which respects chain ownership,
             // travel, and precondition validation.
-            match crate::modules::fallback::schedule_fallback(
-                &net,
-                state,
-                roster,
-                control,
-            ) {
+            match crate::modules::fallback::schedule_fallback(&net, state, roster, control) {
                 Ok(sched) => sched,
                 Err(fallback_err) => {
                     factorio_bot_core::tracing::warn!(

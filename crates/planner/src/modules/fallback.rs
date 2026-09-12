@@ -56,13 +56,8 @@ pub fn earliest_start(
 ) -> Result<Ticks, ModuleError> {
     let dep_ready: Ticks = predecessor_ends
         .iter()
-        .map(|&(end, lag)| {
-            end.checked_add(lag)
-                .ok_or(ModuleError::ArithmeticOverflow)
-        })
-        .try_fold(0u32, |acc, candidate| {
-            candidate.map(|c| acc.max(c))
-        })?;
+        .map(|&(end, lag)| end.checked_add(lag).ok_or(ModuleError::ArithmeticOverflow))
+        .try_fold(0u32, |acc, candidate| candidate.map(|c| acc.max(c)))?;
     bot_free
         .max(dep_ready)
         .checked_add(0)
@@ -124,19 +119,18 @@ pub fn schedule_fallback(
     // Predecessor lists, read once.
     let preds: BTreeMap<ActionId, Vec<(ActionId, Ticks)>> =
         net.actions().map(|a| (a.id, net.preds(a.id))).collect();
-    let preds_of = |id: ActionId| -> &[(ActionId, Ticks)] {
-        preds.get(&id).map_or(&[][..], Vec::as_slice)
-    };
+    let preds_of =
+        |id: ActionId| -> &[(ActionId, Ticks)] { preds.get(&id).map_or(&[][..], Vec::as_slice) };
 
     // Simulated bot state.
     let mut sim = state.fork();
 
     // Per-bot free-at tick and position.
     let mut free_at: BTreeMap<BotId, Ticks> = roster.iter().map(|b| (*b, 0)).collect();
-    let mut positions: BTreeMap<BotId, crate::state::BotState> =
-        roster.iter().filter_map(|b| {
-            sim.bot(*b).map(|bs| (*b, bs.clone()))
-        }).collect();
+    let mut positions: BTreeMap<BotId, crate::state::BotState> = roster
+        .iter()
+        .filter_map(|b| sim.bot(*b).map(|bs| (*b, bs.clone())))
+        .collect();
 
     // When an action finishes (for dependency readiness).
     let mut finished: BTreeMap<ActionId, Ticks> = BTreeMap::new();
@@ -166,15 +160,18 @@ pub fn schedule_fallback(
     for &action_id in &order {
         control.checkpoint()?;
 
-        let action = net.action(action_id).ok_or_else(|| {
-            PlannerError::Deadlock { action: action_id }
-        })?;
+        let action = net
+            .action(action_id)
+            .ok_or_else(|| PlannerError::Deadlock { action: action_id })?;
 
         // Compute predecessor readiness.
         let deps_ready: Ticks = preds_of(action_id)
             .iter()
             .map(|(p, lag)| {
-                finished.get(p).copied().unwrap_or(0)
+                finished
+                    .get(p)
+                    .copied()
+                    .unwrap_or(0)
                     .checked_add(*lag)
                     .unwrap_or(Ticks::MAX)
             })
@@ -185,14 +182,20 @@ pub fn schedule_fallback(
         let chain = net.chain_of(action_id);
         let owner = chain.and_then(|c| net.owner_of(c));
 
-        let bot: BotId = match (action.pinned, owner, chain.and_then(|c| chain_binding.get(&c).copied())) {
+        let bot: BotId = match (
+            action.pinned,
+            owner,
+            chain.and_then(|c| chain_binding.get(&c).copied()),
+        ) {
             // Explicit pin.
             (Some(pinned), _, _) => {
                 if !roster.contains(&pinned) {
                     return Err(PlannerError::UnknownBot(pinned));
                 }
                 // Check for conflicts with chain binding.
-                if let (Some(c), Some(bound)) = (chain, chain.and_then(|c| chain_binding.get(&c).copied())) {
+                if let (Some(c), Some(bound)) =
+                    (chain, chain.and_then(|c| chain_binding.get(&c).copied()))
+                {
                     if bound != pinned {
                         return Err(PlannerError::ChainConflict {
                             chain: c,
@@ -222,7 +225,11 @@ pub fn schedule_fallback(
             // Free action: pick the bot that finishes earliest.
             (None, None, None) => {
                 // For free actions, we need to spread work.
-                *free_at.iter().min_by_key(|&(_, &t)| t).map(|(b, _)| b).unwrap_or(&roster[0])
+                *free_at
+                    .iter()
+                    .min_by_key(|&(_, &t)| t)
+                    .map(|(b, _)| b)
+                    .unwrap_or(&roster[0])
             }
         };
 
@@ -257,11 +264,9 @@ pub fn schedule_fallback(
 
         // Walk starts when bot is free (walking during dependency lag).
         let walk_start = bot_free;
-        let walk_end = walk_start.checked_add(travel).ok_or_else(|| {
-            PlannerError::Deadlock {
-                action: action_id,
-            }
-        })?;
+        let walk_end = walk_start
+            .checked_add(travel)
+            .ok_or_else(|| PlannerError::Deadlock { action: action_id })?;
 
         // Feasibility check: simulate the bot at the arrival position.
         if let Some(ref arrival) = arrival_pos {
@@ -269,7 +274,9 @@ pub fn schedule_fallback(
             trial.set_position(bot, arrival.clone());
             if let Some(cond) = action.pre.iter().find(|c| !c.holds(&trial, bot)) {
                 // Check whether this is a chain-owner failure.
-                if owner.is_some() || chain_binding.contains_key(&chain.unwrap_or(ChainId(u32::MAX))) {
+                if owner.is_some()
+                    || chain_binding.contains_key(&chain.unwrap_or(ChainId(u32::MAX)))
+                {
                     return Err(PlannerError::ChainOwnerInfeasible {
                         chain: chain.unwrap_or(ChainId(u32::MAX)),
                         action: action_id,
@@ -305,9 +312,9 @@ pub fn schedule_fallback(
 
         // Duration.
         let duration = action.duration;
-        let end = act_start.checked_add(duration).ok_or_else(|| {
-            PlannerError::Deadlock { action: action_id }
-        })?;
+        let end = act_start
+            .checked_add(duration)
+            .ok_or_else(|| PlannerError::Deadlock { action: action_id })?;
 
         // Update research serialisation.
         if matches!(action.kind, ActionKind::Research { .. }) {
@@ -373,9 +380,9 @@ pub fn schedule_fallback(
 mod tests {
     use super::*;
     use crate::action::{Action, ActionKind};
+    use crate::control::{BudgetLimits, PlanControl};
     use crate::ids::ActionIdGen;
     use crate::network::ActionNetwork;
-    use crate::control::{BudgetLimits, PlanControl};
 
     #[test]
     fn successor_waits_for_other_bot_and_edge_lag() {
@@ -383,10 +390,7 @@ mod tests {
         // Action B's other predecessor finishes at 80 with lag 0.
         // Bot is free at 20.
         // max(20, 100+30=130, 80+0=80) = 130
-        assert_eq!(
-            earliest_start(20, &[(100, 30), (80, 0)]).unwrap(),
-            130
-        );
+        assert_eq!(earliest_start(20, &[(100, 30), (80, 0)]).unwrap(), 130);
         // Overflow case.
         assert!(earliest_start(0, &[(u32::MAX, 1)]).is_err());
     }
@@ -408,7 +412,10 @@ mod tests {
 
         let a1 = net.add(Action {
             id: id_gen.next(),
-            kind: ActionKind::Craft { item: "iron-plate".into(), count: 1 },
+            kind: ActionKind::Craft {
+                item: "iron-plate".into(),
+                count: 1,
+            },
             pre: vec![],
             eff: vec![],
             duration: 60,
@@ -427,13 +434,12 @@ mod tests {
 
         let control = PlanControl::new(BudgetLimits::default());
 
-        let result = schedule_fallback(
-            &net,
-            &state,
-            &[BotId(1)],
-            &control,
+        let result = schedule_fallback(&net, &state, &[BotId(1)], &control);
+        assert!(
+            result.is_ok(),
+            "owner-bot in roster should work: {:?}",
+            result.err()
         );
-        assert!(result.is_ok(), "owner-bot in roster should work: {:?}", result.err());
     }
 
     #[test]
@@ -443,7 +449,10 @@ mod tests {
 
         let a1 = net.add(Action {
             id: id_gen.next(),
-            kind: ActionKind::Craft { item: "iron-plate".into(), count: 1 },
+            kind: ActionKind::Craft {
+                item: "iron-plate".into(),
+                count: 1,
+            },
             pre: vec![],
             eff: vec![],
             duration: 60,
@@ -462,12 +471,7 @@ mod tests {
 
         let control = PlanControl::new(BudgetLimits::default());
 
-        let result = schedule_fallback(
-            &net,
-            &state,
-            &[BotId(1), BotId(2)],
-            &control,
-        );
+        let result = schedule_fallback(&net, &state, &[BotId(1), BotId(2)], &control);
         assert!(result.is_err(), "chain owner not in roster must fail");
     }
 
@@ -489,7 +493,10 @@ mod tests {
         let mut net = ActionNetwork::new();
         let a1 = net.add(Action {
             id: ActionId(1),
-            kind: ActionKind::Craft { item: "a".into(), count: 1 },
+            kind: ActionKind::Craft {
+                item: "a".into(),
+                count: 1,
+            },
             pre: vec![],
             eff: vec![],
             duration: 60,
@@ -498,7 +505,10 @@ mod tests {
         });
         let a2 = net.add(Action {
             id: ActionId(2),
-            kind: ActionKind::Craft { item: "b".into(), count: 1 },
+            kind: ActionKind::Craft {
+                item: "b".into(),
+                count: 1,
+            },
             pre: vec![],
             eff: vec![],
             duration: 60,

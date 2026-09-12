@@ -5,7 +5,6 @@
 /// the world before being acted on (Phase 2+).
 ///
 /// See `docs/superpowers/specs/2026-09-09-replan-memory-design.md`.
-
 use crate::action::{ActionKind, Effect};
 use crate::ids::{ActionId, ChainId};
 use crate::modules::instance::InstanceMemory;
@@ -90,7 +89,6 @@ mod pos_key {
     }
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityIntent {
     /// The goal kind that caused this placement.
@@ -115,19 +113,11 @@ pub enum IntentGoalKind {
     /// `Goal::Built` — a blueprint block.
     Built(String),
     /// `Goal::Producing` / `Goal::Sustain` — a cell.
-    Cell {
-        item: String,
-        per_minute: u32,
-    },
+    Cell { item: String, per_minute: u32 },
     /// `Goal::Produced` — a machine and its infrastructure.
-    Produce {
-        item: String,
-        count: u32,
-    },
+    Produce { item: String, count: u32 },
     /// `Goal::Have` — infrastructure for hand-smelting or gathering.
-    Have {
-        item: String,
-    },
+    Have { item: String },
     /// `Goal::Extracted` / `Goal::Gathered` — pumpjack and tank.
     Extract,
     /// Power plant.
@@ -296,7 +286,9 @@ pub fn capture_intent(
                 belt_positions_by_chain
                     .entry(chain_id)
                     .or_default()
-                    .push(Pos::from(&action.kind.target_position().unwrap_or_default()));
+                    .push(Pos::from(
+                        &action.kind.target_position().unwrap_or_default(),
+                    ));
                 *chain_belt_count.entry(chain_id).or_insert(0) += 1;
                 if let Some(have_eff) = action.eff.iter().find_map(|e| match e {
                     Effect::GainItem { item, .. } => Some(item.clone()),
@@ -308,7 +300,8 @@ pub fn capture_intent(
         }
 
         // Track arms for each chain
-        if matches!(&action.kind, ActionKind::Place { entity } if entity.name.contains("inserter")) {
+        if matches!(&action.kind, ActionKind::Place { entity } if entity.name.contains("inserter"))
+        {
             if let Some(chain_id) = net.chain_of(action.id) {
                 *chain_arm_count.entry(chain_id).or_insert(0) += 1;
             }
@@ -376,7 +369,11 @@ pub fn capture_intent(
 /// This is a best-effort inference from the action label string. Future phases
 /// will thread the actual goal through so this classification is exact.
 fn classify_goal(label: &str) -> IntentGoalKind {
-    if label.contains("block") || label.contains("blueprint") || label.contains("furnace block") || label.contains("mining array") {
+    if label.contains("block")
+        || label.contains("blueprint")
+        || label.contains("furnace block")
+        || label.contains("mining array")
+    {
         IntentGoalKind::Built(label.to_string())
     } else if label.contains("sustain") {
         // e.g. "sustain:iron-plate:30:36000"
@@ -413,7 +410,8 @@ fn classify_goal(label: &str) -> IntentGoalKind {
                 item: label.to_string(),
             }
         }
-    } else if label.contains("power") || label.contains("boiler") || label.contains("steam-engine") {
+    } else if label.contains("power") || label.contains("boiler") || label.contains("steam-engine")
+    {
         IntentGoalKind::Power
     } else if label.contains("chart") || label.contains("survey") || label.contains("radar") {
         IntentGoalKind::Chart
@@ -430,8 +428,8 @@ fn classify_goal(label: &str) -> IntentGoalKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::action::{Action, ActionKind, Actor, Effect};
     use crate::ids::ActionIdGen;
-    use crate::action::{Action, ActionKind, Effect, Actor};
     use crate::ids::BotId;
     use crate::network::ActionNetwork;
     use crate::schedule::Schedule;
@@ -486,7 +484,10 @@ mod tests {
         let memory = capture_intent(&state, &net, &schedule, 1);
         assert_eq!(memory.entities.len(), 1);
         let key = Pos::from(&pos);
-        let intent = memory.entities.get(&key).expect("entity recorded at its tile");
+        let intent = memory
+            .entities
+            .get(&key)
+            .expect("entity recorded at its tile");
         assert_eq!(intent.goal_params, "place stone-furnace");
         assert_eq!(intent.plan_round, 1);
         assert_eq!(intent.action_id, Some(aid));

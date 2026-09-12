@@ -36,10 +36,7 @@ fn escape_lua_string(s: &str) -> String {
         .replace('\t', "\\t")
 }
 
-pub fn create_lua_rocket(
-    lua: &Lua,
-    rcon: Arc<FactorioRcon>,
-) -> LuaResult<LuaTable> {
+pub fn create_lua_rocket(lua: &Lua, rcon: Arc<FactorioRcon>) -> LuaResult<LuaTable> {
     let map_table = lua.create_table()?;
 
     map_table.set(
@@ -84,19 +81,12 @@ end
                 let payload: Option<String> = opts.get("payload").ok();
                 let planet: Option<String> = opts.get("planet").ok();
 
-                let mut lua_args =
-                    format!("{{[\"key\"]=\"{}\"", escape_lua_string(&key));
+                let mut lua_args = format!("{{[\"key\"]=\"{}\"", escape_lua_string(&key));
                 if let Some(ref p) = payload {
-                    lua_args.push_str(&format!(
-                        ",[\"payload\"]=\"{}\"",
-                        escape_lua_string(p)
-                    ));
+                    lua_args.push_str(&format!(",[\"payload\"]=\"{}\"", escape_lua_string(p)));
                 }
                 if let Some(ref p) = planet {
-                    lua_args.push_str(&format!(
-                        ",[\"planet\"]=\"{}\"",
-                        escape_lua_string(p)
-                    ));
+                    lua_args.push_str(&format!(",[\"planet\"]=\"{}\"", escape_lua_string(p)));
                 }
                 lua_args.push('}');
 
@@ -108,12 +98,9 @@ end
                 let body = reply
                     .ok_or_else(|| LuaError::RuntimeError("rocket.request: no reply".into()))?
                     .join("");
-                let decoded: serde_json::Value = serde_json::from_str(&body)
-                    .map_err(|e| {
-                        LuaError::RuntimeError(
-                            format!("rocket.request: parse error: {e}: {body}")
-                        )
-                    })?;
+                let decoded: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+                    LuaError::RuntimeError(format!("rocket.request: parse error: {e}: {body}"))
+                })?;
                 lua.to_value(&decoded)
             }
         })?,
@@ -148,12 +135,9 @@ end
                 let body = reply
                     .ok_or_else(|| LuaError::RuntimeError("rocket.status: no reply".into()))?
                     .join("");
-                let decoded: serde_json::Value = serde_json::from_str(&body)
-                    .map_err(|e| {
-                        LuaError::RuntimeError(
-                            format!("rocket.status: parse error: {e}: {body}")
-                        )
-                    })?;
+                let decoded: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+                    LuaError::RuntimeError(format!("rocket.status: parse error: {e}: {body}"))
+                })?;
                 lua.to_value(&decoded)
             }
         })?,
@@ -180,30 +164,25 @@ end
         lua.create_async_function(move |lua, opts: LuaTable| {
             let rc = rc.clone();
             async move {
-                let key: String = opts.get("key").map_err(|_| {
-                    LuaError::RuntimeError("rocket.launch: key is required".into())
+                let key: String = opts
+                    .get("key")
+                    .map_err(|_| LuaError::RuntimeError("rocket.launch: key is required".into()))?;
+                let silo_unit_number: u32 = opts.get("silo_unit_number").map_err(|_| {
+                    LuaError::RuntimeError("rocket.launch: silo_unit_number is required".into())
                 })?;
-                let silo_unit_number: u32 = opts.get("silo_unit_number")
-                    .map_err(|_| {
-                        LuaError::RuntimeError(
-                            "rocket.launch: silo_unit_number is required".into()
-                        )
-                    })?;
                 let cmd = format!(
                     "/silent-command remote.call('botbridge','rocket_launch',\
                      {{[\"key\"]=\"{}\",[\"silo_unit_number\"]={}}})",
-                    escape_lua_string(&key), silo_unit_number
+                    escape_lua_string(&key),
+                    silo_unit_number
                 );
                 let reply = rc.as_ref().send(&cmd).await.map_err(rcon_error)?;
                 let body = reply
                     .ok_or_else(|| LuaError::RuntimeError("rocket.launch: no reply".into()))?
                     .join("");
-                let decoded: serde_json::Value = serde_json::from_str(&body)
-                    .map_err(|e| {
-                        LuaError::RuntimeError(
-                            format!("rocket.launch: parse error: {e}: {body}")
-                        )
-                    })?;
+                let decoded: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+                    LuaError::RuntimeError(format!("rocket.launch: parse error: {e}: {body}"))
+                })?;
                 lua.to_value(&decoded)
             }
         })?,
@@ -236,12 +215,9 @@ end
                 let body = reply
                     .ok_or_else(|| LuaError::RuntimeError("rocket.evidence: no reply".into()))?
                     .join("");
-                let decoded: serde_json::Value = serde_json::from_str(&body)
-                    .map_err(|e| {
-                        LuaError::RuntimeError(
-                            format!("rocket.evidence: parse error: {e}: {body}")
-                        )
-                    })?;
+                let decoded: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+                    LuaError::RuntimeError(format!("rocket.evidence: parse error: {e}: {body}"))
+                })?;
                 lua.to_value(&decoded)
             }
         })?,
@@ -268,18 +244,13 @@ end
                 let cmd = "/silent-command remote.call('botbridge','rocket_list_requests')";
                 let reply = rc.as_ref().send(cmd).await.map_err(rcon_error)?;
                 let body = reply
-                    .ok_or_else(|| {
-                        LuaError::RuntimeError(
-                            "rocket.list_requests: no reply".into()
-                        )
-                    })?
+                    .ok_or_else(|| LuaError::RuntimeError("rocket.list_requests: no reply".into()))?
                     .join("");
-                let decoded: serde_json::Value = serde_json::from_str(&body)
-                    .map_err(|e| {
-                        LuaError::RuntimeError(
-                            format!("rocket.list_requests: parse error: {e}: {body}")
-                        )
-                    })?;
+                let decoded: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+                    LuaError::RuntimeError(format!(
+                        "rocket.list_requests: parse error: {e}: {body}"
+                    ))
+                })?;
                 lua.to_value(&decoded)
             }
         })?,

@@ -60,7 +60,10 @@ mod tests {
             launched_tick: None,
             platform_established_tick: None,
         };
-        assert!(!evidence.achieved(), "launch_ordered alone should not be achieved");
+        assert!(
+            !evidence.achieved(),
+            "launch_ordered alone should not be achieved"
+        );
     }
 
     #[test]
@@ -74,7 +77,10 @@ mod tests {
             launched_tick: None,
             platform_established_tick: Some(5000),
         };
-        assert!(!evidence.achieved(), "missing launched_tick should not be achieved");
+        assert!(
+            !evidence.achieved(),
+            "missing launched_tick should not be achieved"
+        );
     }
 
     #[test]
@@ -88,7 +94,10 @@ mod tests {
             launched_tick: Some(3000),
             platform_established_tick: None,
         };
-        assert!(!evidence.achieved(), "missing platform_established_tick should not be achieved");
+        assert!(
+            !evidence.achieved(),
+            "missing platform_established_tick should not be achieved"
+        );
     }
 
     #[test]
@@ -131,6 +140,9 @@ mod tests {
             launched_tick: Some(3000),
             platform_established_tick: Some(5000),
         };
-        assert!(evidence.achieved(), "null launch_ordered_tick should still allow achieved");
+        assert!(
+            evidence.achieved(),
+            "null launch_ordered_tick should still allow achieved"
+        );
     }
 }

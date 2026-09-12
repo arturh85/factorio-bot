@@ -114,8 +114,7 @@ fn rocket_launch_evidence_round_trip() {
         platform_established_tick: Some(1200),
     };
     let json = serde_json::to_string(&evidence).expect("serialize");
-    let decoded: RocketLaunchEvidence =
-        serde_json::from_str(&json).expect("deserialize");
+    let decoded: RocketLaunchEvidence = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(evidence, decoded);
 }
 
@@ -132,7 +131,6 @@ fn partial_evidence_round_trip() {
         platform_established_tick: None,
     };
     let json = serde_json::to_string(&evidence).expect("serialize partial");
-    let decoded: RocketLaunchEvidence =
-        serde_json::from_str(&json).expect("deserialize partial");
+    let decoded: RocketLaunchEvidence = serde_json::from_str(&json).expect("deserialize partial");
     assert_eq!(evidence, decoded);
 }

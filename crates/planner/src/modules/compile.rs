@@ -13,7 +13,7 @@ use crate::action::{Action, ActionKind, Condition, Effect, InventorySlot};
 use crate::control::PlanControl;
 use crate::goal::Goal;
 
-use crate::ids::{ActionIdGen, BotId};
+use crate::ids::{ActionId, ActionIdGen, BotId};
 use crate::memory::ReplanMemory;
 use crate::method::{ExpansionCtx, MethodRegistry, Step, run_steps};
 use crate::modules::artifact::{ModuleDesign, Rate};
@@ -146,7 +146,7 @@ fn compile_module_placement(
     for (item, count) in &design.bill {
         // Skip items that are themselves complex machines - they'll be placed as parts.
         if item == "oil-refinery" || item == "chemical-plant" || item == "pumpjack"
-            || item == "assembling-machine-1" || item == "assembling-machine-2" || item == "assembling-machine-3"
+            || item == "assembling-machine-2" || item == "assembling-machine-3"
             || item == "rocket-silo"
             // Skip items with complex/alternative recipe chains that confuse the legacy fallback.
             || item == "plastic-bar" || item == "sulfur" || item == "solid-fuel"
@@ -165,6 +165,7 @@ fn compile_module_placement(
     let anchor_x = instance.placement.half_x as f64 * 0.5;
     let anchor_y = instance.placement.half_y as f64 * 0.5;
 
+    let mut recipe_ids: Vec<(String, ActionId)> = Vec::new();
     for part in &design.parts {
         let px = anchor_x + part.offset.half_x as f64 * 0.5;
         let py = anchor_y + part.offset.half_y as f64 * 0.5;
@@ -267,6 +268,7 @@ fn compile_module_placement(
                 to: recipe_id,
                 lag: 0,
             });
+            recipe_ids.push((part.entity.clone(), recipe_id));
 
             // Insert input materials for non-OreToPlate modules
             // (OreToPlate gets ore directly from the drill).
@@ -274,6 +276,7 @@ fn compile_module_placement(
                 for port in &design.ports {
                     if port.mode == crate::modules::artifact::PortMode::BeltInput {
                         let insert_id = ids.next();
+                        recipe_ids.push((format!("{}_last_insert", part.entity), insert_id));
                         steps.push(Step::Act(Box::new(Action {
                             id: insert_id,
                             kind: ActionKind::Insert {

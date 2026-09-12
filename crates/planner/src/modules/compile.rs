@@ -180,8 +180,9 @@ fn compile_module_placement(
             ..Default::default()
         };
 
+        let place_id = ids.next();
         steps.push(Step::Act(Box::new(Action {
-            id: ids.next(),
+            id: place_id,
             kind: ActionKind::Place {
                 entity: Box::new(entity.clone()),
             },
@@ -235,32 +236,46 @@ fn compile_module_placement(
 
         // --- 3. Recipe configuration ---
         if let Some(ref recipe) = part.recipe {
+            let recipe_id = ids.next();
             steps.push(Step::Act(Box::new(Action {
-                id: ids.next(),
+                id: recipe_id,
                 kind: ActionKind::SetRecipe {
                     pos: pos.clone(),
                     entity: part.entity.clone(),
                     recipe: recipe.clone(),
                 },
-                pre: vec![Condition::AtPosition {
-                    who: crate::action::Actor::Role,
-                    pos: pos.clone(),
-                    radius: 3.0,
-                    min_radius: 0.5,
-                }],
+                pre: vec![
+                    Condition::AtPosition {
+                        who: crate::action::Actor::Role,
+                        pos: pos.clone(),
+                        radius: 3.0,
+                        min_radius: 0.5,
+                    },
+                    Condition::EntityAt {
+                        pos: pos.clone(),
+                        name: part.entity.clone(),
+                    },
+                ],
                 eff: vec![],
                 duration: 60,
                 pinned: None,
                 label: format!("set recipe {} for {}", recipe, part.role),
             })));
+            // Explicit dependency: Place must complete before SetRecipe
+            steps.push(Step::Link {
+                from: place_id,
+                to: recipe_id,
+                lag: 0,
+            });
 
             // Insert input materials for non-OreToPlate modules
             // (OreToPlate gets ore directly from the drill).
             if design.family != crate::modules::artifact::ModuleFamily::OreToPlate {
                 for port in &design.ports {
                     if port.mode == crate::modules::artifact::PortMode::BeltInput {
+                        let insert_id = ids.next();
                         steps.push(Step::Act(Box::new(Action {
-                            id: ids.next(),
+                            id: insert_id,
                             kind: ActionKind::Insert {
                                 pos: pos.clone(),
                                 entity: part.entity.clone(),
@@ -268,17 +283,34 @@ fn compile_module_placement(
                                 item: port.item.clone(),
                                 count: 1,
                             },
-                            pre: vec![Condition::AtPosition {
-                                who: crate::action::Actor::Role,
-                                pos: pos.clone(),
-                                radius: 3.0,
-                                min_radius: 0.5,
-                            }],
+                            pre: vec![
+                                Condition::AtPosition {
+                                    who: crate::action::Actor::Role,
+                                    pos: pos.clone(),
+                                    radius: 3.0,
+                                    min_radius: 0.5,
+                                },
+                                Condition::EntityAt {
+                                    pos: pos.clone(),
+                                    name: part.entity.clone(),
+                                },
+                                Condition::HasItem {
+                                    who: crate::action::Actor::Role,
+                                    item: port.item.clone(),
+                                    count: 1,
+                                },
+                            ],
                             eff: vec![],
                             duration: 100,
                             pinned: None,
                             label: format!("insert 1 {} into {}", port.item, part.role),
                         })));
+                        // Insert must wait for recipe configuration
+                        steps.push(Step::Link {
+                            from: recipe_id,
+                            to: insert_id,
+                            lag: 0,
+                        });
                     }
                 }
             }
@@ -296,8 +328,9 @@ fn compile_module_placement(
             let output_slot = output_slot_for_entity(&part.entity);
             for (output_item, rate) in &design.operation.outputs {
                 // Take one cycle's worth from the machine's output slot.
+                let take_id = ids.next();
                 steps.push(Step::Act(Box::new(Action {
-                    id: ids.next(),
+                    id: take_id,
                     kind: ActionKind::Remove {
                         pos: pos.clone(),
                         entity: part.entity.clone(),
@@ -305,12 +338,18 @@ fn compile_module_placement(
                         item: output_item.clone(),
                         count: rate.numerator as u32,
                     },
-                    pre: vec![Condition::AtPosition {
-                        who: crate::action::Actor::Role,
-                        pos: pos.clone(),
-                        radius: 3.0,
-                        min_radius: 0.5,
-                    }],
+                    pre: vec![
+                        Condition::AtPosition {
+                            who: crate::action::Actor::Role,
+                            pos: pos.clone(),
+                            radius: 3.0,
+                            min_radius: 0.5,
+                        },
+                        Condition::EntityAt {
+                            pos: pos.clone(),
+                            name: part.entity.clone(),
+                        },
+                    ],
                     eff: vec![Effect::GainItem {
                         who: crate::action::Actor::Role,
                         item: output_item.clone(),

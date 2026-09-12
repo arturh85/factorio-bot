@@ -1962,9 +1962,42 @@ impl Method for BuildBlock {
                 let world = anchor.add(&e.offset);
                 let entity = entity_for(&ctx.state, e, &world);
                 let note = format!("block band {band}");
-                let step = place_step(ctx, entity, build, &note);
+                let step = place_step(ctx, entity.clone(), build, &note);
                 if let Step::Act(action) = &step {
                     place_ids.push(action.id);
+                    // If the entity has a recipe, emit SetRecipe after Place.
+                    if let Some(ref recipe) = e.recipe {
+                        let recipe_id = ctx.ids.next();
+                        block.push(Step::Act(Box::new(Action {
+                            id: recipe_id,
+                            kind: ActionKind::SetRecipe {
+                                pos: world.clone(),
+                                entity: entity.name.clone(),
+                                recipe: recipe.clone(),
+                            },
+                            pre: vec![
+                                Condition::AtPosition {
+                                    who: Actor::Role,
+                                    pos: world.clone(),
+                                    radius: 3.0,
+                                    min_radius: 0.5,
+                                },
+                                Condition::EntityAt {
+                                    pos: world.clone(),
+                                    name: entity.name.clone(),
+                                },
+                            ],
+                            eff: vec![],
+                            duration: 60,
+                            pinned: None,
+                            label: format!("set recipe {} for {}", recipe, entity.name),
+                        })));
+                        block.push(Step::Link {
+                            from: action.id,
+                            to: recipe_id,
+                            lag: 0,
+                        });
+                    }
                 }
                 block.push(step);
             }
@@ -4916,6 +4949,7 @@ mod block_demand_tests {
             offset: Position::new(x, y),
             direction: 0,
             underground_half: None,
+            recipe: None,
         }
     }
 

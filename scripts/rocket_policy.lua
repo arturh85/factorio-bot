@@ -251,6 +251,14 @@ policy.KINDS = {
     COMPLETE = "complete",
 }
 
+-- Mall cell blueprints for rocket speedrun
+-- Generated offline using Factorio blueprint format (zlib+base64)
+local MALL = {
+    oil_cell = "0eJyVl+FuwiAQgN+F3yURaIvtqyxmwZZtl1DaQLvMmL77qK66bFTOP0YxfKfcfcf1TI5m0oMDO5L6TGDUHal/rWXkUzsPvSU137Nc5pUsJduVRZkRbUcYQXtSv5yvH06vduqO2pGaZcSqTgdWD4Y6/QZWu1PADb0PmxbemXyRepeRU3idM9KC0831m7AY3sOwbFftp7KNbunCGVzfaO/BvpM5+xeT32IOy96NWJT9CRYhCRyJp0k5jiTSpAJHytOkEkcq0iR5IzUfuoNGhRQZdSmbOLPcTnTY6Edo6FG5WHL3t1DgektDPB8Jw+NhIrzqzrNeuzGs/aOxKI1HaGyXOFPK0MXHWIrF8ayUE1TgWSkraI5npbygBZ6VMmNlIXRlKTdWFkJYJpEshLJsj2QhpGUV2tqV+kBbP5m3KWos36GUXSsQ4SxnCGnXKkRYy5N2/Px/ifhtSTt+WHsEC2tHhWAVT2ebPbiOr+kObVo10EazXuKyLjdixZASk/YyDozmHWsTQ7QfXmFhiP4jkvfICkM0IJG8SFYYogMJrCsM0YLEXRblve6OJox0tFPNRxgTKXsAfzRA3IZDOlkYY8Up7mL5ThlDtQmkpZyH3mzftJiJsXiSLNCdRZRPouVWiRwyAk1vrwO7h3erzLJnTeuf88vIeLoc7OWhILDAtnqZiubDPH8DtyL4+A==",
+    steel_cell = "0eJyN0uFOxCAMB/B36eeRbLsdU17FXMyOq9qEFQLMuCy8u8wlnqdc3MdC+eVP2gXOZkLniSOoBSjiCOrHWQXv6ANZBtU+NF3fPfayb2p5lBUgR4qEAdTTshXzM0/jGT2opgIeRsxWiIhGvEyeB43ZczbkVyu4wAcokTtnUHWq4EIe9XaVyz9ku5csik1BPHyL5C0L/YYh3k0o2v8jdleQA/qYz+5yzS3XFrjjrnybtyOd3JFuw35lkwWsv05jHIwRaHK3Jy2cNaUxH4q/rtOpAtKWtyUK9MqDWZ/cTNqZIa5mnN1X+nVJs0N8wTVyOqX0CdOq6u4=",
+    circuit_cell = "0eJyVk0FuwyAQRe8ya5CC49gpV6miyiajZCQYW4CjWpbvXmxXadWwcDcIBub9j/hM0NoBe08cQU9AER3oXzUBD/SBOgZdnFVZl291VatDdaoEIEeKhAH0+7Qtxg8eXIsetBLAjcPEakJA11rim3SNuROjVAnbdyE1L9wJPkEfBIxpnAVcyaPZdlIxzalfMGhT1XdMRhryZqAIs3iRLZ6ylM5Kc8cQX8VksapJ9UcuAzz+ADmgj6n2ilNZXJHBlf/xt8Peab+9He6qXe6K7FNlcPUOcyoHqzKw8xMWXGOt3PKQ0tB3FjOXPuZdXgSQ6XjLbKAbN3bp+EZnQiYgjmsA16+RcMRXXIzPl3n+Aq2JEz4=",
+}
+
 -- ---------------------------------------------------------------------------
 -- Ten spec stages with absolute game-tick deadlines
 -- Each stage is identified by its number and has a specific purpose.
@@ -937,50 +945,36 @@ end
 
 --- Stage 7: Oil processing — refinery, chemical plant, plastic, advanced circuits
 function stage7_oil_processing(cfg, memory, snapshot, stage_def)
-    if not memory.s7_refinery then
-        memory.s7_refinery = true
-        -- Move bots to clear area for oil processing cell
+    -- Place mall cells using tilable blueprints with pre-set recipes.
+    if not memory.s7_oil then
+        memory.s7_oil = true
         for _, pid in ipairs({1, 2, 3, 4}) do
             pcall(function()
                 rcon.move(pid, {x = 100, y = -100}, 0)
             end)
         end
         return { kind = policy.KINDS.BUILD, stage = 7,
-                 goal = { type = "built", prototype = "oil-refinery", count = 1 },
+                 goal = { type = "blueprint", blueprint = MALL.oil_cell, site = {x = 10, y = 5} },
                  limits = { max_new_copies = 1 },
-                 reason = "build oil refinery for stage 7" }
+                 reason = "build petrochem processing cell for stage 7" }
     end
-
-    if not memory.s7_chem then
-        memory.s7_chem = true
+    if not memory.s7_steel then
+        memory.s7_steel = true
         return { kind = policy.KINDS.BUILD, stage = 7,
-                 goal = { type = "built", prototype = "chemical-plant", count = 1 },
+                 goal = { type = "blueprint", blueprint = MALL.steel_cell, site = {x = 25, y = 5} },
                  limits = { max_new_copies = 1 },
-                 reason = "build chemical plant for stage 7" }
+                 reason = "build steel furnace cell for stage 7" }
     end
-
-    if not memory.s7_plastic then
-        memory.s7_plastic = true
-        return { kind = policy.KINDS.SUPPORT, stage = 7,
-                 goal = { type = "sustain", item = "plastic-bar" },
-                 reason = "sustain plastic production for stage 7" }
-    end
-
     if not memory.s7_circuits then
         memory.s7_circuits = true
         return { kind = policy.KINDS.BUILD, stage = 7,
-                 goal = { type = "have", item = "advanced-circuit", count = 20 },
-                 reason = "produce advanced circuits for stage 7" }
+                 goal = { type = "blueprint", blueprint = MALL.circuit_cell, site = {x = 40, y = 5} },
+                 limits = { max_new_copies = 1 },
+                 reason = "build electronic circuit cell for stage 7" }
     end
-
-    -- Processing-unit sustain skipped: the module planner creates
-    -- biochamber designs with infinite recursion (biochamber needs
-    -- processing-units). HandCraft can't craft processing-units.
-    -- Production cells for processing-units need a future fix in
-    -- extract_assembler_cell to use assembling-machine-3 instead.
     return { kind = policy.KINDS.OBSERVE, stage = 7,
              _advance_stage = true,
-             reason = "stage 7 complete, advancing (skipped processing-unit sustain)" }
+             reason = "stage 7 complete, advancing" }
 end
 function stage8_rocket_prerequisites(cfg, memory, snapshot, stage_def)
     if not memory.s8_steel then

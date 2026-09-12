@@ -58,6 +58,8 @@ function rocket_speedrun.goal_from_decision(decision)
         return nil
     elseif gtype == "observe" then
         return nil
+    elseif gtype == "blueprint" then
+        return goal.built(g.blueprint, g.site or {x = 50, y = -50})
     end
     return nil
 end

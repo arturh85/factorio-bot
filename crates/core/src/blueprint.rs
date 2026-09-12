@@ -101,6 +101,8 @@ pub struct BlueprintEntity {
     pub direction: u8,
     /// `Some` only for `underground-belt`; the blueprint names which half.
     pub underground_half: Option<UndergroundHalf>,
+    /// The recipe to set on this entity, if any (from blueprint extras).
+    pub recipe: Option<String>,
 }
 
 /// What a blueprint says about its own grid.
@@ -497,6 +499,9 @@ pub fn encode(entities: &[BlueprintEntity]) -> String {
                     }
                     .to_owned(),
                 );
+            }
+            if let Some(ref recipe) = e.recipe {
+                obj["recipe"] = Value::String(recipe.clone());
             }
             obj
         })
@@ -1078,14 +1083,20 @@ pub fn decode(text: &str) -> Result<Blueprint, BlueprintError> {
 
     let mut entities = Vec::with_capacity(doc.entities.len());
     for e in doc.entities {
-        if let Some(key) = e.extras.keys().next() {
-            return Err(BlueprintError::Unsupported(key.clone()));
+        let mut recipe: Option<String> = None;
+        for (key, value) in &e.extras {
+            if key == "recipe" {
+                recipe = value.as_str().map(|s| s.to_owned());
+            } else {
+                return Err(BlueprintError::Unsupported(key.clone()));
+            }
         }
         entities.push(BlueprintEntity {
             name: e.name,
             offset: e.offset,
             direction: e.direction,
             underground_half: e.underground_half,
+            recipe,
         });
     }
     Ok(Blueprint {

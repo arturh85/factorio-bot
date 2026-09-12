@@ -620,12 +620,16 @@ pub fn plan_with_session(
 
     // Compile placement steps for each (design, instance) pair.
     for (design, instance) in selection.designs.iter().zip(selection.instances.iter()) {
-        let mut all_steps: Vec<Step> = Vec::new();
-
-        // Add module placement steps.
-        all_steps.extend(compile_module_placement(design, instance, &mut ctx.ids));
-
-        if let Err(err) = run_steps(all_steps, &mut ctx, &mut net, registry, &mut promised) {
+        let mut cell_steps: Vec<Step> = Vec::new();
+        cell_steps.extend(compile_module_placement(design, instance, &mut ctx.ids));
+        // Wrap in Owned so all actions (craft subgoals, place, set recipe,
+        // insert, remove) stay on the same bot chain. This prevents
+        // inventory routing issues where items go to a different bot.
+        let owned = Step::Owned {
+            whose: crate::goal::Holder::Bot(ctx.chain_actor),
+            steps: cell_steps,
+        };
+        if let Err(err) = run_steps(vec![owned], &mut ctx, &mut net, registry, &mut promised) {
             return crate::request::PlanResult {
                 status: crate::request::PlanStatus::Infeasible,
                 incumbent: None,

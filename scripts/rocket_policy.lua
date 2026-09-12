@@ -252,11 +252,19 @@ policy.KINDS = {
 }
 
 -- Mall cell blueprints for rocket speedrun
--- Generated offline using Factorio blueprint format (zlib+base64)
+-- Factorio 2.1 exchange strings; all three use the common origin (10.5, 5.5).
+-- Seed 31337 shoreline: pump housing (46.5, -8.5), water source to its east.
+-- Oil cell is shoreline-specific; tile steel/circuit cells at x pitches 14/10.
+-- Supply crude oil at (21.5, 19.5); coal at (33.5, 2.5) and (3.5, 28.5).
+-- Acid iron input: (27.5, 28.5); sulfur transfers through the shared chest.
+-- Processing-unit input (21.5, 40.5): electronic + advanced circuits.
+-- Circuit input (3.5, 40.5): iron + copper cable; steel inputs (3.5/9.5, 49.5): iron + coal.
+-- These build goals place infrastructure; upstream milestones must supply inputs.
+-- Processing units require assembling-machine-2 for their sulfuric-acid input.
 local MALL = {
-    oil_cell = "0eJyVl+FuwiAQgN+F3yURaIvtqyxmwZZtl1DaQLvMmL77qK66bFTOP0YxfKfcfcf1TI5m0oMDO5L6TGDUHal/rWXkUzsPvSU137Nc5pUsJduVRZkRbUcYQXtSv5yvH06vduqO2pGaZcSqTgdWD4Y6/QZWu1PADb0PmxbemXyRepeRU3idM9KC0831m7AY3sOwbFftp7KNbunCGVzfaO/BvpM5+xeT32IOy96NWJT9CRYhCRyJp0k5jiTSpAJHytOkEkcq0iR5IzUfuoNGhRQZdSmbOLPcTnTY6Edo6FG5WHL3t1DgektDPB8Jw+NhIrzqzrNeuzGs/aOxKI1HaGyXOFPK0MXHWIrF8ayUE1TgWSkraI5npbygBZ6VMmNlIXRlKTdWFkJYJpEshLJsj2QhpGUV2tqV+kBbP5m3KWos36GUXSsQ4SxnCGnXKkRYy5N2/Px/ifhtSTt+WHsEC2tHhWAVT2ebPbiOr+kObVo10EazXuKyLjdixZASk/YyDozmHWsTQ7QfXmFhiP4jkvfICkM0IJG8SFYYogMJrCsM0YLEXRblve6OJox0tFPNRxgTKXsAfzRA3IZDOlkYY8Up7mL5ThlDtQmkpZyH3mzftJiJsXiSLNCdRZRPouVWiRwyAk1vrwO7h3erzLJnTeuf88vIeLoc7OWhILDAtnqZiubDPH8DtyL4+A==",
-    steel_cell = "0eJyN0uFOxCAMB/B36eeRbLsdU17FXMyOq9qEFQLMuCy8u8wlnqdc3MdC+eVP2gXOZkLniSOoBSjiCOrHWQXv6ANZBtU+NF3fPfayb2p5lBUgR4qEAdTTshXzM0/jGT2opgIeRsxWiIhGvEyeB43ZczbkVyu4wAcokTtnUHWq4EIe9XaVyz9ku5csik1BPHyL5C0L/YYh3k0o2v8jdleQA/qYz+5yzS3XFrjjrnybtyOd3JFuw35lkwWsv05jHIwRaHK3Jy2cNaUxH4q/rtOpAtKWtyUK9MqDWZ/cTNqZIa5mnN1X+nVJs0N8wTVyOqX0CdOq6u4=",
-    circuit_cell = "0eJyVk0FuwyAQRe8ya5CC49gpV6miyiajZCQYW4CjWpbvXmxXadWwcDcIBub9j/hM0NoBe08cQU9AER3oXzUBD/SBOgZdnFVZl291VatDdaoEIEeKhAH0+7Qtxg8eXIsetBLAjcPEakJA11rim3SNuROjVAnbdyE1L9wJPkEfBIxpnAVcyaPZdlIxzalfMGhT1XdMRhryZqAIs3iRLZ6ylM5Kc8cQX8VksapJ9UcuAzz+ADmgj6n2ilNZXJHBlf/xt8Peab+9He6qXe6K7FNlcPUOcyoHqzKw8xMWXGOt3PKQ0tB3FjOXPuZdXgSQ6XjLbKAbN3bp+EZnQiYgjmsA16+RcMRXXIzPl3n+Aq2JEz4=",
+    oil_cell = "0eJydmOuO6iAUhd+F3yURCr29yslkUisqSUubUidjjO9+0Fo9UZTF+eetH7hZa+3dnsi6Pahh1GYi1YnoSXWk+uezhPyo0erekIoXTOSizLOcrTKZJUSZSU9aWVL9Oc1vjt/m0K3VSCqWEFN3yrH67dbu+1HR4dANjjf01l11AZ7IL6koEwk5kkqeE7LRo2rm71bn5IXJ78xBD+o9SoRR6R217nXrPnkLS8MwEdxXiqLkHWUnVXdUmZ02XiRHkRmMXKHIPPiHGYoqHrvr6ralqnW/HnVDh779UEpALWUkuUS1c6nTom3d0lFtXT3H4ytyrufqiZgQ9/pStorUm5/aNGpDL5xh7BtlrTY74luUBWo+L0Y5sP+Qj24o4PRYiqGQqoZcdEMBJ88eLmr2qtNN7arb1tc080Oz92fkLrSTU826Hr3n8rCXHntD3YLWsw5N8d0/3KWNVePkTSfu5XEfL9JiN3IO7LQM5cCNxYBsX4VYKc4KeYUKnBVsOhJnhdyysAAT82DTkbCLuQRZgI15BrKQfp/DPl6oH4xsD+324PUwLzAPF/jOS8TDOezhdBXZzARs4jRoFomzULMUAAs1SwmwRLSQ2Ie2PSvJFb9u9MYnqFRGCQr5B1mEoEpAUHmkoLJbWYCYSws0MhFYsMcsMCA0RbDJLDBk6keNw4DYFHCbAdJHPKxTW6u6deuGStrVzd4NqpR9gH+ag+7jKT0YPflkL0SU7F9W8yFlhO6fgT7hC3BeKyLKDQ1suR/o3SPYj3hEHaGGlPqBme9GNbYjLRIDol+ySPZ86wakieSR5NuNLDKRyTSWjaNFJJrDjUXK/zrH5+7oI2eR5BweMmVs98rfJfFXQnTTm/kRltU7U7eXa5Yofsq8hEzHaxheH5M5ljYb9XtR3tf5/Be6DUpt",
+    steel_cell = "0eJyV0ttqwzAMBuB30bUNdZomnV9llOG62iZwlGA7oyHk3evMsK5rSrNL+fDx29IIR9dj54kj6BEoYgP615qAL/SBWgZd7FVZly91VatNtasEIEeKhAH065iL4Y375ogetBLApsFkhYjo5Hvv2VhMXteGdGsGRziDloWAAfRmEnAijzZvpfKOLNaSq8Xtj0i+ZWk/McSHCeX2OVheQQ7oY1p7yBW3XLHA7Vbly96KdNWKdBn7k61awOprNxrjnESXTnuysmvdUptVfrV6HnP/PznDd+5BANmW83AG+mDj5gs3E9Q5E2cxDt33r8zDnxziE87wdJimC+mnCI0=",
+    circuit_cell = "0eJyV09uKgzAQBuB3mesENLXa+ipLWTQd2oEkShKXivjuG3XpHsxCeiM6mm9+dTJBqwbsLRkP9QTkUUP9o8bgA62jzkAtTnlRFeeqrPKsPJYM0HjyhA7qt2m7GN/NoFu0UOcMTKMxWI1zqFtF5sZ1I+9kkOeB7TsXFi/uBA+oMwZjOM4MrmRRbndCMZxTvzCoQtV2hiSXZOVAHma2ayuebSk8y+Udnd8344e1Gxd/2kXAwzdoHFofantObFz+mxMRrnglX0K8Y3q8hHRlUrpD9FdFuCohnIhhZQQ7PTGnG6X4Ng9hGvpO4b8vnZDy/Boc/ZjZfGFAsjPbXnB0M41aFnzJkeFl4Md1sNctFzgyV3ws8mWePwFsQzDQ",
 }
 
 -- ---------------------------------------------------------------------------
@@ -948,27 +956,22 @@ function stage7_oil_processing(cfg, memory, snapshot, stage_def)
     -- Place mall cells using tilable blueprints with pre-set recipes.
     if not memory.s7_oil then
         memory.s7_oil = true
-        for _, pid in ipairs({1, 2, 3, 4}) do
-            pcall(function()
-                rcon.move(pid, {x = 100, y = -100}, 0)
-            end)
-        end
         return { kind = policy.KINDS.BUILD, stage = 7,
-                 goal = { type = "blueprint", blueprint = MALL.oil_cell, site = {x = 10, y = 5} },
+                 goal = { type = "blueprint", blueprint = MALL.oil_cell, site = {x = 10.5, y = 5.5} },
                  limits = { max_new_copies = 1 },
                  reason = "build petrochem processing cell for stage 7" }
     end
     if not memory.s7_steel then
         memory.s7_steel = true
         return { kind = policy.KINDS.BUILD, stage = 7,
-                 goal = { type = "blueprint", blueprint = MALL.steel_cell, site = {x = 25, y = 5} },
+                 goal = { type = "blueprint", blueprint = MALL.steel_cell, site = {x = 10.5, y = 5.5} },
                  limits = { max_new_copies = 1 },
                  reason = "build steel furnace cell for stage 7" }
     end
     if not memory.s7_circuits then
         memory.s7_circuits = true
         return { kind = policy.KINDS.BUILD, stage = 7,
-                 goal = { type = "blueprint", blueprint = MALL.circuit_cell, site = {x = 40, y = 5} },
+                 goal = { type = "blueprint", blueprint = MALL.circuit_cell, site = {x = 10.5, y = 5.5} },
                  limits = { max_new_copies = 1 },
                  reason = "build electronic circuit cell for stage 7" }
     end

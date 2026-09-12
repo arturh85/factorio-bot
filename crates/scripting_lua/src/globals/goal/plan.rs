@@ -1182,9 +1182,9 @@ async fn plan_rounds(
             Ok(result) => result,
             Err(err) => {
                 factorio_bot_core::tracing::warn!(
-                    "planner refused: {}. Returning empty plan.",
-                    err
+                    "planner refused for module-mode plan: {err}. Returning empty plan."
                 );
+                factorio_bot_core::paris::error!("planner refused: {err}");
                 return Ok((ActionNetwork::new(), factorio_bot_planner::Schedule::default()));
             }
         };

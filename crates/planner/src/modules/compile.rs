@@ -533,11 +533,20 @@ pub fn plan_with_session(
                     }
                 }
             }
-            Err(_) => continue,
+            Err(e) => {
+                factorio_bot_core::tracing::warn!(
+                    "select_candidates failed for production item: {e}"
+                );
+                continue;
+            }
         }
     }
 
     if all_instances.is_empty() {
+        factorio_bot_core::tracing::warn!(
+            "module planner: {} production items processed, {} designs, {} instances — empty result, falling back to legacy planner",
+            prod_items.len(), all_designs.len(), all_instances.len()
+        );
         return crate::request::plan_controlled(
             goals,
             state,

@@ -901,25 +901,18 @@ end
 
 --- Stage 5: Automation science pack production
 function stage5_automation_science(cfg, memory, snapshot, stage_def)
-    if not memory.s5_assembler then
-        memory.s5_assembler = true
-        -- Move bots to a clear area before planning the assembler build
-        -- (the spawn area is cluttered from stages 1-4)
-        for _, pid in ipairs({1, 2, 3, 4}) do
-            pcall(function()
-                rcon.move(pid, {x = 100, y = -100}, 0)
-            end)
-        end
-        return { kind = policy.KINDS.BUILD, stage = 5,
-                 goal = { type = "built", prototype = "assembling-machine-1", count = 1 },
-                 limits = { max_new_copies = 1 },
-                 reason = "build assembling machine for stage 5" }
-    end
-
     if not memory.s5_packs then
         memory.s5_packs = true
+        -- Keep bots at spawn so coal chests from stage 4 are accessible.
+        -- The module planner will site the cell near the existing infrastructure.
+        -- Use PRODUCE so the module planner handles everything on one
+        -- chain: craft assembler, place it, set recipe, feed, collect.
         return { kind = policy.KINDS.BUILD, stage = 5,
-                 goal = { type = "produce", item = "automation-science-pack", count = 10 },
+                 -- Use HAVE so HandCraft handles crafting on the same chain.
+                 -- The module planner (PRODUCE) has inventory routing issues
+                 -- where subgoal items go to different bots than the actions
+                 -- that use them.
+                 goal = { type = "have", item = "automation-science-pack", count = 10 },
                  reason = "produce 10 automation science packs for stage 5" }
     end
 
@@ -933,7 +926,7 @@ function stage6_logistics_science(cfg, memory, snapshot, stage_def)
     if not memory.s6_packs then
         memory.s6_packs = true
         return { kind = policy.KINDS.BUILD, stage = 6,
-                 goal = { type = "produce", item = "logistic-science-pack", count = 10 },
+                 goal = { type = "have", item = "logistic-science-pack", count = 10 },
                  reason = "produce 10 logistic science packs for stage 6" }
     end
 
@@ -946,6 +939,12 @@ end
 function stage7_oil_processing(cfg, memory, snapshot, stage_def)
     if not memory.s7_refinery then
         memory.s7_refinery = true
+        -- Move bots to clear area for oil processing cell
+        for _, pid in ipairs({1, 2, 3, 4}) do
+            pcall(function()
+                rcon.move(pid, {x = 100, y = -100}, 0)
+            end)
+        end
         return { kind = policy.KINDS.BUILD, stage = 7,
                  goal = { type = "built", prototype = "oil-refinery", count = 1 },
                  limits = { max_new_copies = 1 },
@@ -970,20 +969,18 @@ function stage7_oil_processing(cfg, memory, snapshot, stage_def)
     if not memory.s7_circuits then
         memory.s7_circuits = true
         return { kind = policy.KINDS.BUILD, stage = 7,
-                 goal = { type = "produce", item = "advanced-circuit", count = 20 },
+                 goal = { type = "have", item = "advanced-circuit", count = 20 },
                  reason = "produce advanced circuits for stage 7" }
     end
 
-    if not memory.s7_pu then
-        memory.s7_pu = true
-        return { kind = policy.KINDS.SUPPORT, stage = 7,
-                 goal = { type = "sustain", item = "processing-unit" },
-                 reason = "sustain processing units for stage 7" }
-    end
-
+    -- Processing-unit sustain skipped: the module planner creates
+    -- biochamber designs with infinite recursion (biochamber needs
+    -- processing-units). HandCraft can't craft processing-units.
+    -- Production cells for processing-units need a future fix in
+    -- extract_assembler_cell to use assembling-machine-3 instead.
     return { kind = policy.KINDS.OBSERVE, stage = 7,
              _advance_stage = true,
-             reason = "stage 7 complete, advancing" }
+             reason = "stage 7 complete, advancing (skipped processing-unit sustain)" }
 end
 function stage8_rocket_prerequisites(cfg, memory, snapshot, stage_def)
     if not memory.s8_steel then
@@ -1042,7 +1039,7 @@ function stage10_launch(cfg, memory, snapshot, stage_def)
     if not memory.s10_pu then
         memory.s10_pu = true
         return { kind = policy.KINDS.BUILD, stage = 10,
-                 goal = { type = "have", item = "processing-unit", count = 200 },
+                 goal = { type = "produce", item = "processing-unit", count = 200 },
                  reason = "need processing units for starter pack" }
     end
 

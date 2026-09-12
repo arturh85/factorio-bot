@@ -409,6 +409,14 @@ fn try_site_one(
                     direction = part.direction;
 
                     if !state.is_area_free_facing(&part.entity, &pos, dir) {
+                        // Diagnostic: log first rejected part for rings 0-3
+                        if ring <= 3 && _copy_index == 0 {
+                            let occupant = state.placement_occupant(&part.entity, &pos, dir);
+                            factorio_bot_core::tracing::warn!(
+                                "try_site_one: ring={ring} part={} entity={} pos=({},{}) occupant={:?}",
+                                part.role, part.entity, px, py, occupant
+                            );
+                        }
                         all_clear = false;
                         break;
                     }

@@ -1755,8 +1755,15 @@ fn fit(
         if !state.is_area_free_facing(part.name, &part.position, part.direction) {
             return None;
         }
+        // Refuse placement in uncharted territory -- the game will reject it.
+        if !state.is_charted(&part.position) {
+            return None;
+        }
     }
     for tile in &lane {
+        if !state.is_charted(tile) {
+            return None;
+        }
         if !state.is_position_free(tile) {
             return None;
         }

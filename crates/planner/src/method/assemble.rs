@@ -5106,6 +5106,41 @@ pub fn build_cells(
             carriers,
         } = cell_steps(ctx, &spec, &cells, coal, &boilers, &roster, &feeds)?;
         let mut steps = plant_steps_taken;
+        // Link each SetRecipe to the matching Place for the same entity name.
+        // This brute-force approach handles cases where entity graph staleness
+        // or bundling separates the Place from the SetRecipe action.
+        {
+            let mut entity_places: Vec<(String, ActionId)> = Vec::new();
+            let mut entity_recipes: Vec<(String, ActionId)> = Vec::new();
+            for s in &built {
+                if let Step::Act(a) = s {
+                    match &a.kind {
+                        ActionKind::Place { entity } => {
+                            entity_places.push((entity.name.clone(), a.id));
+                        }
+                        ActionKind::SetRecipe { entity, .. } => {
+                            entity_recipes.push((entity.clone(), a.id));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // For each SetRecipe, find the LAST Place with the same entity name.
+            // This correctly links the Product machine's Place to its SetRecipe
+            // even when both Intermediate and Product machines share a name.
+            for (ename, recipe_id) in &entity_recipes {
+                if let Some((_, place_id)) = entity_places.iter()
+                    .rev()
+                    .find(|(name, _)| name == ename)
+                {
+                    steps.push(Step::Link {
+                        from: *place_id,
+                        to: *recipe_id,
+                        lag: 0,
+                    });
+                }
+            }
+        }
         steps.extend(built);
         // Every id, not just the generator's: an engine with no steam produces
         // nothing and a boiler with no water makes no steam, so the cell waits

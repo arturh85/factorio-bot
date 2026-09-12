@@ -447,6 +447,16 @@ fn try_site_one(
     )))
 }
 
+/// Compute the union bounding box of a list of rectangles, or `None` for an
+/// empty list.
+pub fn merge_rects(rects: &[HalfRect]) -> Option<HalfRect> {
+    let left = rects.iter().map(|r| r.left).min()?;
+    let top = rects.iter().map(|r| r.top).min()?;
+    let right = rects.iter().map(|r| r.right).max()?;
+    let bottom = rects.iter().map(|r| r.bottom).max()?;
+    HalfRect::new(left, top, right, bottom).ok()
+}
+
 /// Compute the footprint rectangles for a module design.
 ///
 /// Returns a list of rectangles (in half-tile coordinates, relative to
@@ -463,34 +473,28 @@ pub fn module_footprint_rects(design: &ModuleDesign) -> Vec<HalfRect> {
         return rects;
     }
 
-    // Compute bounding box of all parts.
-    let min_hx = design
+    // Compute per-part rectangles from each part's collision-box half_size,
+    // then take the bounding box as their union. This replaces the old
+    // hardcoded ±2 half-tile margin with actual prototype collision dimensions.
+    let part_rects: Vec<HalfRect> = design
         .parts
         .iter()
-        .map(|p| p.offset.half_x)
-        .min()
-        .unwrap_or(0);
-    let max_hx = design
-        .parts
-        .iter()
-        .map(|p| p.offset.half_x)
-        .max()
-        .unwrap_or(0);
-    let min_hy = design
-        .parts
-        .iter()
-        .map(|p| p.offset.half_y)
-        .min()
-        .unwrap_or(0);
-    let max_hy = design
-        .parts
-        .iter()
-        .map(|p| p.offset.half_y)
-        .max()
-        .unwrap_or(0);
+        .filter_map(|p| {
+            let (sw, sh) = p
+                .half_size
+                .map(|hs| (hs.half_x, hs.half_y))
+                .unwrap_or((2, 2));
+            HalfRect::new(
+                p.offset.half_x - sw,
+                p.offset.half_y - sh,
+                p.offset.half_x + sw,
+                p.offset.half_y + sh,
+            )
+            .ok()
+        })
+        .collect();
 
-    // Add the part bounding box.
-    if let Ok(bbox) = HalfRect::new(min_hx - 2, min_hy - 2, max_hx + 2, max_hy + 2) {
+    if let Some(bbox) = merge_rects(&part_rects) {
         rects.push(bbox);
     }
 
@@ -1093,11 +1097,14 @@ mod tests {
 
         let rects = module_footprint_rects(&design);
         assert!(!rects.is_empty(), "should have at least one footprint rect");
-        // With parts at (0,0) and (0,4), bounding box is roughly [-2,-2] to [2,6].
-        assert!(rects[0].left <= -2);
-        assert!(rects[0].right >= 2);
-        assert!(rects[0].top <= -2);
-        assert!(rects[0].bottom >= 6);
+        // With parts that have no half_size, the fallback margin is (2,2).
+        // Part at (0,0): rect (-2,-2) to (2,2)
+        // Part at (0,4): rect (-2,2) to (2,6)
+        // Union: (-2,-2) to (2,6)
+        assert_eq!(rects[0].left, -2);
+        assert_eq!(rects[0].right, 2);
+        assert_eq!(rects[0].top, -2);
+        assert_eq!(rects[0].bottom, 6);
     }
 
     #[test]

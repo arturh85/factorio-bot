@@ -4477,6 +4477,262 @@ impl PlanState {
         &self.reserved_ground
     }
 
+    /// Reserve a 3-tile-wide corridor between two module bounding rectangles,
+    /// with a connected walking lane down the centre.
+    ///
+    /// The corridor keeps a minimum of 3 tiles clear between module boundaries.
+    /// The centre tile of each row/column is the walking lane. All tiles are
+    /// reserved through [`reserve_ground`](Self::reserve_ground) so that
+    /// [`is_area_free`](Self::is_area_free) refuses them to entity placement
+    /// (belt routes through the corridor remain possible — see
+    /// `method::connect`'s access rules).
+    ///
+    /// Returns a [`CorridorReservation`] that can be persisted in
+    /// [`ReplanMemory`](crate::memory::ReplanMemory) and restored across
+    /// plan calls.
+    ///
+    /// `keeper` is the reason string stored in each
+    /// [`Occupant::Reserved`](crate::state::Occupant::Reserved) entry.
+    ///
+    /// # Corridor geometry
+    ///
+    /// Given two axis-aligned bounding rectangles, the corridor is the
+    /// shortest connecting strip of tiles between them, 3 tiles wide:
+    ///
+    /// ```text
+    /// +-------+  +-------+
+    /// |  mod  |  |  mod  |
+    /// |   A   |  |   B   |
+    /// +-------+  +-------+
+    ///   <--->      <--->
+    ///   3-tile gap between module boundaries
+    ///   centre tile = walking lane
+    /// ```
+    ///
+    /// When the rectangles are adjacent on the same axis (x or y), the
+    /// corridor spans the overlapping extent perpendicular to the connecting
+    /// axis, keeping all tiles within the intersection of the two modules'
+    /// spans on that axis. When projections do not overlap, a 3x3
+    /// corner-corridor is reserved at the nearest corner instead.
+    pub fn reserve_corridor(
+        &mut self,
+        owner: u64,
+        rect_a: &Rect,
+        rect_b: &Rect,
+        width: u32,
+        keeper: &str,
+    ) -> crate::memory::CorridorReservation {
+        let width = width.max(3); // At least 3 tiles wide.
+        let half_width = (width as f64) / 2.0;
+
+        // Determine which edges of the two rectangles face each other.
+        let a_cx = rect_a.center().x();
+        let a_cy = rect_a.center().y();
+        let b_cx = rect_b.center().x();
+        let b_cy = rect_b.center().y();
+
+        let dx = (b_cx - a_cx).abs();
+        let dy = (b_cy - a_cy).abs();
+
+        // Decide whether the corridor runs horizontally or vertically.
+        let (tiles, from, to) = if dx >= dy {
+            // Horizontal corridor: connect along x, span y overlap.
+            let y_top = rect_a.left_top.y().max(rect_b.left_top.y());
+            let y_bottom = rect_a.right_bottom.y().min(rect_b.right_bottom.y());
+            let y_span = y_bottom - y_top;
+
+            // If y projections don't overlap, use a corner corridor.
+            if y_span <= 0.0 {
+                // Corner corridor: 3x3 at the nearest corners.
+                let corner_x = if b_cx > a_cx { rect_a.right_bottom.x() } else { rect_a.left_top.x() };
+                let corner_y = if b_cy > a_cy { rect_a.right_bottom.y() } else { rect_a.left_top.y() };
+                let from_pos = Position::new(corner_x, corner_y);
+                let to_pos = Position::new(
+                    if b_cx > a_cx { rect_b.left_top.x() } else { rect_b.right_bottom.x() },
+                    if b_cy > a_cy { rect_b.left_top.y() } else { rect_b.right_bottom.y() },
+                );
+                (self.corridor_tiles_between(&from_pos, &to_pos, width), from_pos, to_pos)
+            } else {
+                // Horizontal strip spanning y overlap.
+                let left_x = if b_cx > a_cx { rect_a.right_bottom.x() } else { rect_b.right_bottom.x() };
+                let right_x = if b_cx > a_cx { rect_b.left_top.x() } else { rect_a.left_top.x() };
+                let centre_y = (y_top + y_bottom) / 2.0;
+                self.corridor_tiles_horizontal(left_x, right_x, centre_y, width)
+            }
+        } else {
+            // Vertical corridor: connect along y, span x overlap.
+            let x_left = rect_a.left_top.x().max(rect_b.left_top.x());
+            let x_right = rect_a.right_bottom.x().min(rect_b.right_bottom.x());
+            let x_span = x_right - x_left;
+
+            if x_span <= 0.0 {
+                // Corner corridor.
+                let corner_x = if b_cx > a_cx { rect_a.right_bottom.x() } else { rect_a.left_top.x() };
+                let corner_y = if b_cy > a_cy { rect_a.right_bottom.y() } else { rect_a.left_top.y() };
+                let from_pos = Position::new(corner_x, corner_y);
+                let to_pos = Position::new(
+                    if b_cx > a_cx { rect_b.left_top.x() } else { rect_b.right_bottom.x() },
+                    if b_cy > a_cy { rect_b.left_top.y() } else { rect_b.right_bottom.y() },
+                );
+                (self.corridor_tiles_between(&from_pos, &to_pos, width), from_pos, to_pos)
+            } else {
+                // Vertical strip spanning x overlap.
+                let top_y = if b_cy > a_cy { rect_a.right_bottom.y() } else { rect_b.right_bottom.y() };
+                let bottom_y = if b_cy > a_cy { rect_b.left_top.y() } else { rect_a.left_top.y() };
+                let centre_x = (x_left + x_right) / 2.0;
+                self.corridor_tiles_vertical(top_y, bottom_y, centre_x, width)
+            }
+        };
+
+        // Reserve each tile through reserve_ground.
+        let tile_positions: Vec<Position> = tiles.iter().map(|t| {
+            Position::new(t.0 as f64 + 0.5, t.1 as f64 + 0.5)
+        }).collect();
+        self.reserve_ground(&tile_positions, keeper);
+
+        crate::memory::CorridorReservation {
+            owner,
+            surface: "nauvis".to_string(),
+            from,
+            to,
+            width,
+            tiles: tile_positions,
+            keeper: keeper.to_string(),
+        }
+    }
+
+    /// Compute tile positions for a horizontal corridor strip.
+    ///
+    /// `left_x`/`right_x` are the module-facing edge positions (floats).
+    /// `centre_y` is the midpoint of the overlapping y extent.
+    /// Returns (tile_positions, from_position, to_position).
+    fn corridor_tiles_horizontal(
+        &self,
+        left_x: f64,
+        right_x: f64,
+        centre_y: f64,
+        width: u32,
+    ) -> (Vec<Pos>, Position, Position) {
+        let from = Position::new(left_x, centre_y);
+        let to = Position::new(right_x, centre_y);
+        let half_w = (width as i32) / 2;
+        let mut tiles = Vec::new();
+
+        let tile_y0 = (centre_y - half_w as f64).floor() as i32;
+        let tile_y1 = (centre_y + half_w as f64).ceil() as i32 - 1;
+        let tile_x0 = left_x.floor() as i32;
+        let tile_x1 = right_x.floor() as i32;
+
+        // Ensure ordering.
+        let (x_start, x_end) = if tile_x0 <= tile_x1 { (tile_x0, tile_x1) } else { (tile_x1, tile_x0) };
+        let (y_start, y_end) = (tile_y0.min(tile_y1), tile_y0.max(tile_y1));
+
+        for x in x_start..=x_end {
+            for y in y_start..=y_end {
+                tiles.push(Pos(x, y));
+            }
+        }
+
+        (tiles, from, to)
+    }
+
+    /// Compute tile positions for a vertical corridor strip.
+    fn corridor_tiles_vertical(
+        &self,
+        top_y: f64,
+        bottom_y: f64,
+        centre_x: f64,
+        width: u32,
+    ) -> (Vec<Pos>, Position, Position) {
+        let from = Position::new(centre_x, top_y);
+        let to = Position::new(centre_x, bottom_y);
+        let half_w = (width as i32) / 2;
+        let mut tiles = Vec::new();
+
+        let tile_x0 = (centre_x - half_w as f64).floor() as i32;
+        let tile_x1 = (centre_x + half_w as f64).ceil() as i32 - 1;
+        let tile_y0 = top_y.floor() as i32;
+        let tile_y1 = bottom_y.floor() as i32;
+
+        let (y_start, y_end) = if tile_y0 <= tile_y1 { (tile_y0, tile_y1) } else { (tile_y1, tile_y0) };
+        let (x_start, x_end) = (tile_x0.min(tile_x1), tile_x0.max(tile_x1));
+
+        for y in y_start..=y_end {
+            for x in x_start..=x_end {
+                tiles.push(Pos(x, y));
+            }
+        }
+
+        (tiles, from, to)
+    }
+
+    /// Compute all tile positions along the straight line from `from` to
+    /// `to` that fall within a `width`-tile-wide strip.
+    fn corridor_tiles_between(
+        &self,
+        from: &Position,
+        to: &Position,
+        width: u32,
+    ) -> Vec<Pos> {
+        let half_w = (width as i32) / 2;
+        let dx = (to.x() - from.x()).abs();
+        let dy = (to.y() - from.y()).abs();
+        let mut tiles = Vec::new();
+
+        let x0 = from.x().floor() as i32;
+        let y0 = from.y().floor() as i32;
+        let x1 = to.x().floor() as i32;
+        let y1 = to.y().floor() as i32;
+
+        let (x_start, x_end) = if x0 <= x1 { (x0, x1) } else { (x1, x0) };
+        let (y_start, y_end) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
+
+        if dx >= dy {
+            // Step horizontally.
+            for x in x_start..=x_end {
+                let t = if x_end > x_start { (x - x_start) as f64 / (x_end - x_start) as f64 } else { 0.0 };
+                let centre_y = from.y() + t * (to.y() - from.y());
+                let y0_band = (centre_y - half_w as f64).floor() as i32;
+                let y1_band = (centre_y + half_w as f64).ceil() as i32 - 1;
+                for y in y0_band.min(y1_band)..=y0_band.max(y1_band) {
+                    tiles.push(Pos(x, y));
+                }
+            }
+        } else {
+            // Step vertically.
+            for y in y_start..=y_end {
+                let t = if y_end > y_start { (y - y_start) as f64 / (y_end - y_start) as f64 } else { 0.0 };
+                let centre_x = from.x() + t * (to.x() - from.x());
+                let x0_band = (centre_x - half_w as f64).floor() as i32;
+                let x1_band = (centre_x + half_w as f64).ceil() as i32 - 1;
+                for x in x0_band.min(x1_band)..=x0_band.max(x1_band) {
+                    tiles.push(Pos(x, y));
+                }
+            }
+        }
+
+        tiles
+    }
+
+    /// Restore corridor reservations from [`ReplanMemory`] into this
+    /// state's reserved ground.
+    ///
+    /// Called after constructing a [`PlanState`] from the world but before
+    /// planning, so that corridors reserved in previous milestones are not
+    /// built over. Each corridor's stored tile positions are re-reserved
+    /// through [`reserve_ground`](Self::reserve_ground).
+    ///
+    /// Corridors whose keeper matches entries already in `reserved_ground`
+    /// are skipped (deduplicated by exact tile position).
+    pub fn restore_corridors_from_memory(&mut self, memory: &crate::memory::ReplanMemory) {
+        for corridor in &memory.corridors {
+            // Re-reserve each tile. reserve_ground already deduplicates
+            // by position, so corridors that overlap existing reservations
+            // (e.g. from an earlier restore call) are safe.
+            self.reserve_ground(&corridor.tiles, &corridor.keeper);
+        }
+    }
+
     /// Whether the game has already refused this exact placement.
     ///
     /// Narrower than [`PlanState::is_area_free`], which answers "is anything

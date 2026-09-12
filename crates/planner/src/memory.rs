@@ -192,6 +192,37 @@ pub struct ChainIntent {
     pub belt_positions: Vec<Pos>,
 }
 
+/// A persistent corridor reservation between two module boundaries.
+///
+/// Carries the axis-aligned bounding rectangles of two adjacent modules (or
+/// a single module and a direction) and the width of the corridor reserved
+/// between them. The corridor is stored as a vec of tile positions so it
+/// can be restored into `PlanState::reserved_ground` on the next plan call
+/// without re-deriving the geometry.
+///
+/// The corridor is **3 tiles wide** with a connected walking lane down the
+/// middle (the centre tile on each row/column).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorridorReservation {
+    /// The instance id that owns this corridor.
+    pub owner: u64,
+    /// Surface name the corridor is on.
+    pub surface: String,
+    /// Starting position (anchor or bounding-box corner).
+    pub from: Position,
+    /// Ending position (anchor or bounding-box corner).
+    pub to: Position,
+    /// Width of the corridor in tiles (3 by convention).
+    pub width: u32,
+    /// Every tile centre position reserved as part of this corridor.
+    /// Stored explicitly so the corridor can be restored into
+    /// `PlanState::reserved_ground` without re-deriving geometry.
+    pub tiles: Vec<Position>,
+    /// Why this corridor was reserved (e.g. "corridor: between module 1
+    /// and module 2").
+    pub keeper: String,
+}
+
 /// What the LAST plan intended for the entities it placed, carried across
 /// replan boundaries as a recoverable claim rather than as ground truth.
 ///
@@ -219,6 +250,14 @@ pub struct ReplanMemory {
     /// bindings. Defaults to empty when deserializing old records.
     #[serde(default)]
     pub modules: InstanceMemory,
+    /// Persistent corridor reservations across replan boundaries.
+    ///
+    /// The corridors are restored into `PlanState::reserved_ground` on the
+    /// next plan call so that new module siting avoids building over the
+    /// walking lanes and gaps between existing modules.
+    /// Defaults to empty when deserializing old records.
+    #[serde(default)]
+    pub corridors: Vec<CorridorReservation>,
 }
 
 /// Walk the network and state to capture intent records for every action that
@@ -361,6 +400,7 @@ pub fn capture_intent(
         blocks: Vec::new(),
         recovery_overrides: BTreeSet::new(),
         modules: InstanceMemory::default(),
+        corridors: Vec::new(),
     }
 }
 
@@ -613,6 +653,7 @@ mod tests {
             blocks: vec![],
             recovery_overrides: BTreeSet::new(),
             modules: InstanceMemory::default(),
+            corridors: vec![],
         };
         assert_eq!(memory.plan_round, 1);
         assert_eq!(memory.entities.len(), 1);

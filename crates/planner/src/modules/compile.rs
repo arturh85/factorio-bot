@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use factorio_bot_core::types::{FactorioEntity, Position};
+use factorio_bot_core::types::{FactorioEntity, Position, Rect};
 
 use crate::action::{Action, ActionKind, Condition, Effect, InventorySlot};
 use crate::control::PlanControl;
@@ -346,6 +346,40 @@ fn is_burner_entity(name: &str) -> bool {
     )
 }
 
+/// Compute the tile-coordinate bounding rectangle for a placed module instance.
+///
+/// Uses the instance's half-tile placement anchor and the design's part
+/// offsets to compute the axis-aligned bounding box in world coordinates
+/// (tile units, one tile = 2 half-tiles).
+fn instance_bounding_rect(instance: &crate::modules::instance::ModuleInstance, design: &ModuleDesign) -> Rect {
+    let anchor_x = instance.placement.half_x as f64 * 0.5;
+    let anchor_y = instance.placement.half_y as f64 * 0.5;
+
+    let mut min_x = f64::MAX;
+    let mut min_y = f64::MAX;
+    let mut max_x = f64::MIN;
+    let mut max_y = f64::MIN;
+
+    for part in &design.parts {
+        let px = anchor_x + part.offset.half_x as f64 * 0.5;
+        let py = anchor_y + part.offset.half_y as f64 * 0.5;
+        // Use a default collision radius of 0.5 tiles for parts without
+        // a known collision box. This gives a conservative bounding rect.
+        let half = 0.5;
+        min_x = min_x.min(px - half);
+        min_y = min_y.min(py - half);
+        max_x = max_x.max(px + half);
+        max_y = max_y.max(py + half);
+    }
+
+    // Add a 2-tile margin around the bounding box for walking clearance.
+    let margin = 2.0;
+    Rect::new(
+        &Position::new(min_x - margin, min_y - margin),
+        &Position::new(max_x + margin, max_y + margin),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // plan_with_session — module-mode entry point
 // ---------------------------------------------------------------------------
@@ -489,6 +523,56 @@ pub fn plan_with_session(
 
     // Build ExpansionCtx and compile.
     let mut ctx = ExpansionCtx::new(state.clone(), chain_actor);
+
+    // --- Reserve corridors between adjacent module instances ---
+    //
+    // For each pair of placed module instances, compute the bounding
+    // rectangle in tile coordinates and reserve a 3-tile corridor
+    // between them. The corridor is stored in `ReplanMemory::corridors`
+    // so it persists across replan boundaries.
+    let mut corridor_reservations: Vec<crate::memory::CorridorReservation> = Vec::new();
+    for i in 0..selection.instances.len() {
+        for j in (i + 1)..selection.instances.len() {
+            let inst_a = &selection.instances[i];
+            let inst_b = &selection.instances[j];
+
+            // Check they are on the same surface.
+            if inst_a.placement.surface != inst_b.placement.surface {
+                continue;
+            }
+
+            // Compute bounding rectangles in tile coordinates.
+            let design_a = &selection.designs[i];
+            let design_b = &selection.designs[j];
+
+            let rect_a = instance_bounding_rect(inst_a, design_a);
+            let rect_b = instance_bounding_rect(inst_b, design_b);
+
+            // Only reserve corridors between instances that are close
+            // enough to be considered adjacent (within 20 tiles).
+            let dist = (rect_a.center().x - rect_b.center().x).abs()
+                .max((rect_a.center().y - rect_b.center().y).abs());
+            if dist > 20.0 {
+                continue;
+            }
+
+            let keeper = format!(
+                "corridor: {} <-> {}",
+                design_a.family.short_name(),
+                design_b.family.short_name(),
+            );
+
+            let corridor = ctx.state.reserve_corridor(
+                inst_a.id,
+                &rect_a,
+                &rect_b,
+                3,
+                &keeper,
+            );
+            corridor_reservations.push(corridor);
+        }
+    }
+
     let mut net = ActionNetwork::new();
     let mut promised = Vec::new();
 
@@ -716,6 +800,7 @@ pub fn plan_with_session(
         blocks: vec![],
         recovery_overrides: BTreeSet::new(),
         modules: InstanceMemory::default(),
+        corridors: corridor_reservations,
     };
     crate::request::PlanResult {
         status: crate::request::PlanStatus::Complete,

@@ -78,6 +78,23 @@ pub enum ModuleFamily {
     DrillArray,
 }
 
+impl ModuleFamily {
+    /// A short human-readable name for log/diagnostic messages.
+    pub fn short_name(&self) -> &'static str {
+        match self {
+            ModuleFamily::OreToPlate => "ore-to-plate",
+            ModuleFamily::RedScience => "red-science",
+            ModuleFamily::AssemblerCell => "assembler",
+            ModuleFamily::OilRefinery => "oil-refinery",
+            ModuleFamily::ChemicalPlant => "chemical-plant",
+            ModuleFamily::RocketSilo => "rocket-silo",
+            ModuleFamily::SpacePlatform => "space-platform",
+            ModuleFamily::SmelterArray => "smelter-array",
+            ModuleFamily::DrillArray => "drill-array",
+        }
+    }
+}
+
 /// How the design was obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum KnowledgeOrigin {

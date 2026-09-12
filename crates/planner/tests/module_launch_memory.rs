@@ -139,6 +139,7 @@ fn replan_memory_round_trip() {
         chains: vec![],
         blocks: vec![],
         recovery_overrides: BTreeSet::new(),
+        corridors: vec![],
         modules: {
             let mut m = InstanceMemory::default();
             let id = m.allocate_id().unwrap();

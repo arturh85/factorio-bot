@@ -2009,6 +2009,21 @@ fn reserve_in(state: &mut PlanState, cell: &Cell, spec: &AssemblySpec) -> Result
     for part in cell.missing() {
         state.create_entity(entity_for(state, part));
     }
+    // Reserve the cell's lane tiles (belt path) so future siting sees
+    // them as occupied.
+    if !cell.lane.is_empty() {
+        state.reserve_ground(&cell.lane, "cell lane");
+    }
+    // Reserve the mouth tiles (arm + belt landing) for each belted input.
+    for mouth in &cell.mouths {
+        state.reserve_ground(&[mouth.arm.clone(), mouth.belt.clone()], "cell mouth");
+    }
+    // Reserve the beacon flank tiles so no other cell places over them.
+    if let Some(flank) = beacon_flank(state, &cell.origin, cell.facing) {
+        if !flank.is_empty() {
+            state.reserve_ground(&flank, "cell beacon flank");
+        }
+    }
     // **Only machines that take one.** A furnace picks its recipe from what
     // is put into it and the game refuses `set_recipe` on one, so the model
     // must not carry a recipe the world could never hold -- see

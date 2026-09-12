@@ -21,3 +21,8 @@ mods/*/
 
 # Python bytecode from tools/
 __pycache__/
+
+
+# workspace (both file and directory forms)
+workspace
+workspace/

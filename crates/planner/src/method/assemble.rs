@@ -3399,6 +3399,26 @@ fn cell_steps(
                 }
             }
             let id = ctx.ids.next();
+            // Link this recipe after its machine's placement, so the recipe
+            // is never configured before the machine stands. The network's
+            // `infer_edges` should create the same edge from
+            // `Effect::CreateEntity` to `Condition::EntityAt`, but a cycle
+            // or a chain boundary can suppress the inference -- the explicit
+            // `Step::Link` is the reliable statement.
+            if role == Role::Product {
+                let product_item: ItemId = spec.machine.into();
+                if let Some((_, Step::Act(place_action))) = build
+                    .places
+                    .iter()
+                    .find(|(item, _)| *item == product_item)
+                {
+                    build.links.push(Step::Link {
+                        from: place_action.id,
+                        to: id,
+                        lag: 0,
+                    });
+                }
+            }
             build.recipes.push(Step::Act(Box::new(Action {
                 id,
                 kind: ActionKind::SetRecipe {

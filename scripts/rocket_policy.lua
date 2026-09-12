@@ -903,6 +903,13 @@ end
 function stage5_automation_science(cfg, memory, snapshot, stage_def)
     if not memory.s5_assembler then
         memory.s5_assembler = true
+        -- Move bots to a clear area before planning the assembler build
+        -- (the spawn area is cluttered from stages 1-4)
+        for _, pid in ipairs({1, 2, 3, 4}) do
+            pcall(function()
+                rcon.move(pid, {x = 100, y = -100}, 0)
+            end)
+        end
         return { kind = policy.KINDS.BUILD, stage = 5,
                  goal = { type = "built", prototype = "assembling-machine-1", count = 1 },
                  limits = { max_new_copies = 1 },

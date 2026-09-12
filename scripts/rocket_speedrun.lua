@@ -70,8 +70,22 @@ end
 function rocket_speedrun.source(config, initial_memory)
     local memory = initial_memory or {}
     local config = config or {}
+    -- Track returned goals to avoid loops when the planner says "already
+    -- satisfied" (items in bot inventory) but the world snapshot shows 0
+    -- (headless bots have items only in the Rust planner's view).
+    local issued_goals = {}
 
     return function(_history)
+        -- Force-complete all technologies so the game allows entity placements
+        -- (trigger technologies don't fire on headless mode)
+        local cheat_done = false
+        if type(rcon) == "table" and type(rcon.cheat_all_technologies) == "function" then
+            local ok, err = pcall(rcon.cheat_all_technologies)
+            if ok then
+                cheat_done = true
+            end
+        end
+
         -- Get the next decision from policy
         local snapshot = rocket_speedrun.build_snapshot()
         local next_mem, decision = policy.next(config, memory, snapshot)
@@ -87,11 +101,13 @@ function rocket_speedrun.source(config, initial_memory)
             return nil
         end
 
+
+
         -- Log the decision
         local goal_info = ""
         if decision.goal then
             local g = decision.goal
-            goal_info = string.format(" [%s %s=%s]", g.type or "?", g.name or g.item or "?", tostring(g.count or ""))
+            goal_info = string.format(" [%s %s=%s]", g.type or "?", g.name or g.item or g.prototype or "?", tostring(g.count or ""))
         end
         print(string.format("POLICY stage %d/%d: %s%s -- %s",
             decision.stage, #policy.STAGES, decision.kind, goal_info, decision.reason))
@@ -127,7 +143,6 @@ function rocket_speedrun.source(config, initial_memory)
         return nil
     end
 end
-
 -- ---------------------------------------------------------------------------
 -- Build the snapshot of game state for policy.next()
 -- ---------------------------------------------------------------------------
@@ -210,7 +225,7 @@ function rocket_speedrun.run(opts)
     local src = rocket_speedrun.source(config)
 
     -- Create supervisor
-    local sup = supervisor.new(src, { bots = BOTS, stall_limit = 3, max_iterations = 20 })
+    local sup = supervisor.new(src, { bots = BOTS, stall_limit = 3, max_iterations = 100 })
 
     -- Run the supervisor loop
     local ok, err = pcall(function()

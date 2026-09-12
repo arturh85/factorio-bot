@@ -186,6 +186,11 @@ fn compile_module_placement(
                 entity: Box::new(entity.clone()),
             },
             pre: vec![
+                Condition::HasItem {
+                    who: crate::action::Actor::Role,
+                    item: part.entity.clone(),
+                    count: 1,
+                },
                 Condition::AtPosition {
                     who: crate::action::Actor::Role,
                     pos: pos.clone(),
@@ -756,7 +761,8 @@ fn design_instances_needed(design: &ModuleDesign, per_minute: u32, support_ticks
 /// Extract a production item from a goal that the module system can handle.
 fn production_item_from_goal(goal: &Goal) -> Option<(String, u32)> {
     match goal {
-        Goal::Have { item, .. } => Some((item.clone(), 1)),
+        // Goal::Have is handled by the legacy hand-craft system.
+        // Only route explicit production goals to the module planner.
         Goal::Produced { item, count, .. } => Some((item.clone(), *count)),
         Goal::Producing { item, per_minute } => Some((item.clone(), *per_minute)),
         _ => None,

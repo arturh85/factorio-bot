@@ -125,7 +125,31 @@ pub fn seconds_to_ticks(seconds: f64) -> Ticks {
 /// lookup: keyed by product, one-to-many in both directions, and it refuses by
 /// name in three tiers instead of answering `None`.
 pub fn recipe_for(state: &PlanState, item: &str) -> Option<FactorioRecipe> {
-    state.base().globals.recipes.get(item).map(|r| r.clone())
+    let recipe = state.base().globals.recipes.get(item).map(|r| r.clone());
+    // Prefer recipes whose category is usable on Nauvis over Space Age recipes
+    // (biochamber, foundry, electromagnetic-plant, cryogenic-plant).
+    if let Some(ref r) = recipe {
+        if is_space_age_category(&r.category) {
+            // Look for an alternative recipe.
+            for entry in state.base().globals.recipes.iter() {
+                let (alt_name, alt) = entry.pair();
+                // Match by output: the key might be the recipe name or item name.
+                if alt_name == item && !is_space_age_category(&alt.category) {
+                    return Some(alt.clone());
+                }
+            }
+        }
+    }
+    recipe
+}
+
+/// Returns true if this crafting category is only available on a Space Age
+/// machine that may not exist on Nauvis.
+fn is_space_age_category(cat: &str) -> bool {
+    matches!(cat, "agriculture" | "organic" | "biochamber"
+        | "cryogenics" | "electromagnetics"
+        | "metallurgy" | "smelting-or-metallurgy"
+        | "chemistry-or-cryogenics")
 }
 
 /// A vanilla character's mining speed, used only when the world carries no

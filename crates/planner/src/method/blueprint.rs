@@ -137,31 +137,37 @@ fn entity_for(state: &PlanState, e: &BlueprintEntity, position: &Position) -> Fa
 /// Copied from `crates/planner/src/method/connect.rs`'s `place_step`: the
 /// same preconditions, the same effects, and the same overlay call so the
 /// next entity's `AreaFree` sees what this one took.
-fn place_step(ctx: &mut ExpansionCtx, entity: FactorioEntity, build: f64, note: &str) -> Step {
+fn place_step(ctx: &mut ExpansionCtx, entity: FactorioEntity, build: f64, note: &str,
+    powered: Option<Condition>) -> Step
+{
     let min_radius = ctx.state.placement_clearance(&entity.name).unwrap_or(0.0);
+    let mut pre = vec![
+        Condition::AtPosition {
+            who: Actor::Role,
+            pos: entity.position.clone(),
+            radius: build,
+            min_radius,
+        },
+        Condition::AreaFree {
+            pos: entity.position.clone(),
+            entity: entity.name.as_str().into(),
+            direction: entity.direction,
+        },
+        Condition::HasItem {
+            who: Actor::Role,
+            item: entity.name.as_str().into(),
+            count: 1,
+        },
+    ];
+    if let Some(p) = powered {
+        pre.push(p);
+    }
     let step = Step::Act(Box::new(Action {
         id: ctx.ids.next(),
         kind: ActionKind::Place {
             entity: Box::new(entity.clone()),
         },
-        pre: vec![
-            Condition::AtPosition {
-                who: Actor::Role,
-                pos: entity.position.clone(),
-                radius: build,
-                min_radius,
-            },
-            Condition::AreaFree {
-                pos: entity.position.clone(),
-                entity: entity.name.as_str().into(),
-                direction: entity.direction,
-            },
-            Condition::HasItem {
-                who: Actor::Role,
-                item: entity.name.as_str().into(),
-                count: 1,
-            },
-        ],
+        pre,
         eff: vec![
             Effect::LoseItem {
                 who: Actor::Role,
@@ -1794,7 +1800,12 @@ impl Method for BuildBlock {
                 .iter()
                 .map(|e| entity_for(&ctx.state, e, &anchor.add(&e.offset)))
                 .collect();
-            let kw = power.demand.kw;
+            // Net demand: the block's own generators cover part of the draw.
+            // `blueprint_power` already computed generation_kw from the
+            // blueprint's steam-engines/boilers, but ensure_powered only
+            // sees standing generators in the state. Subtracting generation
+            // from demand avoids building redundant power plants.
+            let kw = (power.demand.kw - power.generation_kw).max(0.0);
             let powering = crate::method::power::ensure_powered(
                 ctx,
                 &rep.name,
@@ -1811,11 +1822,12 @@ impl Method for BuildBlock {
                     rep.name
                 ),
             })?;
-            (powering.steps, powering.ids)
+            let powered = powering.powered;
+            (powering.steps, powering.ids, Some(powered))
         } else {
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), None)
         };
-        let (power_steps, power_ids) = power_steps_and_ids;
+        let (power_steps, power_ids, powered_condition) = power_steps_and_ids;
 
         // Would building this block seal one of the bots into a pocket?
         //
@@ -1962,7 +1974,7 @@ impl Method for BuildBlock {
                 let world = anchor.add(&e.offset);
                 let entity = entity_for(&ctx.state, e, &world);
                 let note = format!("block band {band}");
-                let step = place_step(ctx, entity.clone(), build, &note);
+                let step = place_step(ctx, entity.clone(), build, &note, powered_condition.clone());
                 if let Step::Act(action) = &step {
                     place_ids.push(action.id);
                     // If the entity has a recipe, emit SetRecipe after Place.

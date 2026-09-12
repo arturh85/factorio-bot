@@ -3224,7 +3224,7 @@ fn cell_steps(
     // roster of one emits them in the order it always did.
     let mut builds: Vec<CellBuild> = Vec::with_capacity(cells.len());
     for (index, cell) in cells.iter().enumerate() {
-        let mut build = CellBuild::default();
+        let mut build = CellBuild { product_place_id: None, ..Default::default() };
         let horizon = feeds
             .get(index)
             .map(|feed| feed.horizon)
@@ -3258,6 +3258,10 @@ fn cell_steps(
                 // the plant has to stand before it.
                 if ctx.state.consumer_draw_kw(part.name).is_some() {
                     needs_power.push(action.id);
+                }
+                // Remember the Product machine's Place ID for the recipe link.
+                if part.role == Role::Product {
+                    build.product_place_id = Some(action.id);
                 }
             }
             build.places.push((part.name.to_string(), step));
@@ -3407,20 +3411,12 @@ fn cell_steps(
             }
             let id = ctx.ids.next();
             // Link this recipe after its machine's placement, so the recipe
-            // is never configured before the machine stands. The network's
-            // `infer_edges` should create the same edge from
-            // `Effect::CreateEntity` to `Condition::EntityAt`, but a cycle
-            // or a chain boundary can suppress the inference -- the explicit
-            // `Step::Link` is the reliable statement.
+            // is never configured before the machine stands. The ID was
+            // recorded during place creation in the loop above.
             if role == Role::Product {
-                let product_item: ItemId = spec.machine.into();
-                if let Some((_, Step::Act(place_action))) = build
-                    .places
-                    .iter()
-                    .find(|(item, _)| *item == product_item)
-                {
+                if let Some(place_id) = build.product_place_id {
                     build.links.push(Step::Link {
-                        from: place_action.id,
+                        from: place_id,
                         to: id,
                         lag: 0,
                     });
@@ -3906,6 +3902,10 @@ struct CellBuild {
     recipes: Vec<Step>,
     /// Each chest charge, with the item and count the charger has to hold.
     charges: Vec<(ItemId, u32, Box<Action>)>,
+    /// The ActionId of the Product machine's Place step, stored during place
+    /// creation so the recipe loop can link to it without matching by name
+    /// (both Intermediate and Product machines have the same name).
+    product_place_id: Option<ActionId>,
 }
 
 /// The action a cell's ledger rides on -- see the ledger note in

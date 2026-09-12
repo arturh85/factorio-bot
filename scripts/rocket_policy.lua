@@ -265,6 +265,7 @@ local MALL = {
     oil_cell = "0eJydmOuO6iAUhd+F3yURCr29yslkUisqSUubUidjjO9+0Fo9UZTF+eetH7hZa+3dnsi6Pahh1GYi1YnoSXWk+uezhPyo0erekIoXTOSizLOcrTKZJUSZSU9aWVL9Oc1vjt/m0K3VSCqWEFN3yrH67dbu+1HR4dANjjf01l11AZ7IL6koEwk5kkqeE7LRo2rm71bn5IXJ78xBD+o9SoRR6R217nXrPnkLS8MwEdxXiqLkHWUnVXdUmZ02XiRHkRmMXKHIPPiHGYoqHrvr6ralqnW/HnVDh779UEpALWUkuUS1c6nTom3d0lFtXT3H4ytyrufqiZgQ9/pStorUm5/aNGpDL5xh7BtlrTY74luUBWo+L0Y5sP+Qj24o4PRYiqGQqoZcdEMBJ88eLmr2qtNN7arb1tc080Oz92fkLrSTU826Hr3n8rCXHntD3YLWsw5N8d0/3KWNVePkTSfu5XEfL9JiN3IO7LQM5cCNxYBsX4VYKc4KeYUKnBVsOhJnhdyysAAT82DTkbCLuQRZgI15BrKQfp/DPl6oH4xsD+324PUwLzAPF/jOS8TDOezhdBXZzARs4jRoFomzULMUAAs1SwmwRLSQ2Ie2PSvJFb9u9MYnqFRGCQr5B1mEoEpAUHmkoLJbWYCYSws0MhFYsMcsMCA0RbDJLDBk6keNw4DYFHCbAdJHPKxTW6u6deuGStrVzd4NqpR9gH+ag+7jKT0YPflkL0SU7F9W8yFlhO6fgT7hC3BeKyLKDQ1suR/o3SPYj3hEHaGGlPqBme9GNbYjLRIDol+ySPZ86wakieSR5NuNLDKRyTSWjaNFJJrDjUXK/zrH5+7oI2eR5BweMmVs98rfJfFXQnTTm/kRltU7U7eXa5Yofsq8hEzHaxheH5M5ljYb9XtR3tf5/Be6DUpt",
     steel_cell = "0eJyV0ttqwzAMBuB30bUNdZomnV9llOG62iZwlGA7oyHk3evMsK5rSrNL+fDx29IIR9dj54kj6BEoYgP615qAL/SBWgZd7FVZly91VatNtasEIEeKhAH065iL4Y375ogetBLApsFkhYjo5Hvv2VhMXteGdGsGRziDloWAAfRmEnAijzZvpfKOLNaSq8Xtj0i+ZWk/McSHCeX2OVheQQ7oY1p7yBW3XLHA7Vbly96KdNWKdBn7k61awOprNxrjnESXTnuysmvdUptVfrV6HnP/PznDd+5BANmW83AG+mDj5gs3E9Q5E2cxDt33r8zDnxziE87wdJimC+mnCI0=",
     circuit_cell = "0eJyV09uKgzAQBuB3mesENLXa+ipLWTQd2oEkShKXivjuG3XpHsxCeiM6mm9+dTJBqwbsLRkP9QTkUUP9o8bgA62jzkAtTnlRFeeqrPKsPJYM0HjyhA7qt2m7GN/NoFu0UOcMTKMxWI1zqFtF5sZ1I+9kkOeB7TsXFi/uBA+oMwZjOM4MrmRRbndCMZxTvzCoQtV2hiSXZOVAHma2ayuebSk8y+Udnd8344e1Gxd/2kXAwzdoHFofantObFz+mxMRrnglX0K8Y3q8hHRlUrpD9FdFuCohnIhhZQQ7PTGnG6X4Ng9hGvpO4b8vnZDy/Boc/ZjZfGFAsjPbXnB0M41aFnzJkeFl4Md1sNctFzgyV3ws8mWePwFsQzDQ",
+    silo_cell = "0eJyd1OFugjAQB/B3uc9tQhGK8iqLMYiX7bLSkrYuI4R3XxXjnHax+MVgob/70xw3wl4dsbekPdQjkMcO6ps1Bl9oHRkNdb4WRVVsKlmJTJaSAWpPntBB/TbOf4adPnZ7tFALBrrpMFjWtJ/ouSNlgtYbF/acuBG+oc4YDOF3YnAgi+18JyyGa+pvdveN9TCxhzL5tQxZo3n7gc4/VuHyXIYXd3Ui4OoX1A6tD2uPXBnl8ghXLMl3fwwRr0yPlz1PJ5ekSzi8Kj1dwtmtk9LNHcSr5+k2CekumvyryYgmsivnukYpjio8bqnlvVEYee8quQeFeIlOaB+RvySnZF4tlC/fUJlAFwvpPLklRLmMFv/IWwbUGj1PQkfvulGnHdEJ6IfzYDtP2uCQPuBJnrbT9AP+A9U0",
 }
 
 -- ---------------------------------------------------------------------------
@@ -980,301 +981,64 @@ function stage7_oil_processing(cfg, memory, snapshot, stage_def)
              reason = "stage 7 complete, advancing" }
 end
 function stage8_rocket_prerequisites(cfg, memory, snapshot, stage_def)
+    -- Mall produces steel, circuits, PU. Use goal.have for everything.
     if not memory.s8_steel then
         memory.s8_steel = true
         return { kind = policy.KINDS.BUILD, stage = 8,
-                 goal = { type = "produce", item = "steel-plate", count = 200 },
-                 reason = "produce steel plates for stage 8" }
+                 goal = { type = "have", item = "steel-plate", count = 200 },
+                 reason = "get steel plates for rocket prerequisites" }
     end
-
     if not memory.s8_lds then
         memory.s8_lds = true
         return { kind = policy.KINDS.BUILD, stage = 8,
-                 goal = { type = "produce", item = "low-density-structure", count = 10 },
-                 reason = "produce LDS for stage 8" }
+                 goal = { type = "have", item = "low-density-structure", count = 10 },
+                 reason = "get LDS for rocket parts" }
     end
-
     if not memory.s8_fuel then
         memory.s8_fuel = true
         return { kind = policy.KINDS.BUILD, stage = 8,
-                 goal = { type = "produce", item = "rocket-fuel", count = 10 },
-                 reason = "produce rocket fuel for stage 8" }
+                 goal = { type = "have", item = "rocket-fuel", count = 10 },
+                 reason = "get rocket fuel for rocket" }
     end
-
     return { kind = policy.KINDS.OBSERVE, stage = 8,
              _advance_stage = true,
-             reason = "stage 8 complete, advancing" }
+             reason = "stage 8 complete, advancing to silo" }
 end
+
 function stage9_rocket_silo(cfg, memory, snapshot, stage_def)
     if not memory.s9_silo then
         memory.s9_silo = true
         return { kind = policy.KINDS.BUILD, stage = 9,
-                 goal = { type = "built", prototype = "rocket-silo", count = 1 },
+                 goal = { type = "blueprint", blueprint = MALL.silo_cell,
+                          site = {x = 40.5, y = 5.5} },
                  limits = { max_new_copies = 1 },
                  reason = "build rocket silo for stage 9" }
     end
-
-    if not memory.s9_parts then
-        memory.s9_parts = true
-        return { kind = policy.KINDS.BUILD, stage = 9,
-                 goal = { type = "produce", item = "rocket-part", count = 50 },
-                 reason = "produce 50 rocket parts for stage 9" }
+    -- Wait for 50 rocket parts to be produced by the silo
+    local parts = (snapshot.accessible_stock or {})["rocket-part"] or 0
+    if parts >= 50 then
+        return { kind = policy.KINDS.OBSERVE, stage = 9,
+                 _advance_stage = true,
+                 reason = "stage 9 complete, have " .. parts .. " rocket parts" }
     end
-
     return { kind = policy.KINDS.OBSERVE, stage = 9,
-             _advance_stage = true,
-             reason = "stage 9 complete, advancing" }
+             reason = "waiting for rocket parts: have " .. parts .. "/50" }
 end
+
 function stage10_launch(cfg, memory, snapshot, stage_def)
-    if not memory.s10_steel then
-        memory.s10_steel = true
-        return { kind = policy.KINDS.BUILD, stage = 10,
-                 goal = { type = "have", item = "steel-plate", count = 200 },
-                 reason = "need steel for starter pack" }
+    local parts = (snapshot.accessible_stock or {})["rocket-part"] or 0
+    if parts < 50 then
+        return { kind = policy.KINDS.OBSERVE, stage = 10,
+                 reason = "need 50 rocket parts, have " .. parts }
     end
-
-    if not memory.s10_pu then
-        memory.s10_pu = true
-        return { kind = policy.KINDS.BUILD, stage = 10,
-                 goal = { type = "produce", item = "processing-unit", count = 200 },
-                 reason = "need processing units for starter pack" }
+    if not memory.s10_launch then
+        memory.s10_launch = true
+        -- Request a rocket launch through the Lua rocket API
+        rocket.request{key="speedrun", payload="space-platform-starter-pack", planet="nauvis"}
+        return { kind = policy.KINDS.OBSERVE, stage = 10,
+                 reason = "rocket launch requested" }
     end
-
-    -- After all prerequisites, request launch
-    return { kind = policy.KINDS.LAUNCH, stage = 10,
-             goal = { type = "launch", payload = "space-platform-starter-pack" },
-             reason = "all prerequisites met; initiate launch" }
-end
-
--- ============================================================================
--- Task 10: policy.oil_access() — Fund safe oil access and static defenses
--- ============================================================================
---
--- Pure policy helper: evaluates whether safe oil access is feasible given
--- the current snapshot. Unknown values are explicit `nil` (not inferred).
---
--- Called as a subroutine inside policy.next() for stage 7, or independently
--- by the speedrun driver. Returns a decision table.
---
--- Snapshot fields consulted:
---   oil_charted               — true | false | nil (unknown)
---   safe_route                — true | false | nil (unknown)
---   defense_stock_ready       — true | false | nil (unknown)
---   defense_supported         — true | false | nil (unknown)
---   survey_budget_remaining   — integer remaining rings, or nil
---   threats                   — { nests_nearby, worms_nearby } or nil
---   accessible_stock          — { [item] = count }
---
--- Decision kinds (reused from Task 9):
---   policy.KINDS.OBSERVE   — unknown terrain; needs a survey first
---   policy.KINDS.BUILD     — build turrets/ammo/supplies or place pumpjack
---   policy.KINDS.SUPPORT   — restock ammo or fuel for a defended node
---   policy.KINDS.BLOCKED   — unsafe corridor, no budget remaining
---
-
---- Evaluate oil access and return a decision.
---
--- @param config   config table (may carry defense node positions)
--- @param snapshot game snapshot with oil_access fields
--- @return { kind, stage, goal=nil, limits=nil, reason } or nil if OK
-function policy.oil_access(config, snapshot)
-    local cfg = config or {}
-    local sn = snapshot or {}
-
-    local oil_charted = sn.oil_charted
-    local safe_route = sn.safe_route
-    local defense_stock_ready = sn.defense_stock_ready
-    local defense_supported = sn.defense_supported
-    local budget = sn.survey_budget_remaining
-    local threats = sn.threats
-
-    -- 1. Unknown terrain: need a survey
-    if oil_charted == nil then
-        return {
-            kind = policy.KINDS.OBSERVE,
-            stage = 7,
-            goal = { type = "observe", target = "oil-charting" },
-            reason = "oil terrain not yet charted; survey needed",
-        }
-    end
-
-    -- 2. Oil not found / not charted --- may still be being surveyed
-    if oil_charted == false then
-        return {
-            kind = policy.KINDS.OBSERVE,
-            stage = 7,
-            goal = { type = "charted", radius = 896 },
-            reason = "oil not yet charted; continuing ring survey",
-        }
-    end
-
-    -- 3. Oil IS charted --- check the route safety
-    if safe_route == nil then
-        return {
-            kind = policy.KINDS.OBSERVE,
-            stage = 7,
-            goal = { type = "observe", target = "route-safety" },
-            reason = "oil charted but route safety unknown; observing",
-        }
-    end
-
-    if safe_route == false then
-        -- Route is not safe. Check if we can make it safe.
-        if defense_stock_ready == nil or defense_stock_ready == false then
-            -- Need to build defense stocks first
-            return {
-                kind = policy.KINDS.BUILD,
-                stage = 7,
-                goal = { type = "built", prototype = "gun-turret", count = 4 },
-                limits = { max_new_copies = 4 },
-                reason = "unsafe route needs gun turrets for corridor defense",
-            }
-        end
-
-        if defense_supported == nil or defense_supported == false then
-            -- Stocks are built but need to check ammo supply
-            local ammo = sn.accessible_stock and sn.accessible_stock["firearm-magazine"] or 0
-            if ammo < 80 then
-                return {
-                    kind = policy.KINDS.SUPPORT,
-                    stage = 7,
-                    goal = { type = "sustain", item = "firearm-magazine" },
-                    reason = string.format("defense stocks need ammo; have %d, need 80", ammo),
-                }
-            end
-
-            -- Also ensure we have repair packs and fuel for turret generators
-            local repair_packs = sn.accessible_stock and sn.accessible_stock["repair-pack"] or 0
-            if repair_packs < 10 then
-                return {
-                    kind = policy.KINDS.SUPPORT,
-                    stage = 7,
-                    goal = { type = "sustain", item = "repair-pack" },
-                    reason = string.format("need repair packs for turret maintenance; have %d", repair_packs),
-                }
-            end
-
-            -- Defense stocks ready but not yet supported at position
-            -- Ask to deploy them
-            return {
-                kind = policy.KINDS.BUILD,
-                stage = 7,
-                goal = { type = "built", prototype = "gun-turret", count = 6 },
-                reason = "deploy turrets to secure oil corridor",
-            }
-        end
-
-        -- If we've tried both defense stock and support, check budget
-        if budget ~= nil and budget <= 0 then
-            return {
-                kind = policy.KINDS.BLOCKED,
-                stage = 7,
-                reason = "unsafe_oil_corridor",
-            }
-        end
-
-        -- Budget remaining but still unsafe; keep trying
-        return {
-            kind = policy.KINDS.OBSERVE,
-            stage = 7,
-            reason = "oil corridor still unsafe; survey budget remaining: " .. tostring(budget),
-        }
-    end
-
-    -- 4. Route IS safe. Verify we have the pumpjack and connecting pipe.
-    local pumpjacks = (sn.instances or {})["pumpjack"] or 0
-    if pumpjacks < 1 then
-        return {
-            kind = policy.KINDS.BUILD,
-            stage = 7,
-            goal = { type = "built", prototype = "pumpjack", count = 1 },
-            limits = { max_new_copies = 1 },
-            reason = "safe route confirmed; place pumpjack at oil field",
-        }
-    end
-
-    -- 5. Access is established --- need pipe to transport
-    local refineries = (sn.instances or {})["oil-refinery"] or 0
-    if refineries < 1 then
-        return {
-            kind = policy.KINDS.BUILD,
-            stage = 7,
-            goal = { type = "built", prototype = "oil-refinery", count = 1 },
-            limits = { max_new_copies = 1 },
-            reason = "need oil refinery connected to pumpjack",
-        }
-    end
-
-    -- Verification: check we have pumpjack flow / oil flow evidence
-    if not policy.has_flow(sn, "crude-oil") then
-        return {
-            kind = policy.KINDS.OBSERVE,
-            stage = 7,
-            reason = "pumpjack placed but crude oil flow not yet observed",
-        }
-    end
-
-    -- All clear
-    return nil
-end
-
-
--- Export internal helpers for testing
-policy.accessible = accessible
-policy.researched = researched
-policy.recipe_enabled = recipe_enabled
-policy.count_instances = count_instances
-policy.has_flow = has_flow
-policy.research_service_time = research_service_time
-policy.required_pack_rate = required_pack_rate
-policy.deadline_infeasible = deadline_infeasible
-policy.stage1_burner_start = stage1_burner_start
-policy.stage2_burner_expansion_iron = stage2_burner_expansion_iron
-policy.stage3_burner_expansion_copper = stage3_burner_expansion_copper
-policy.stage4_coal_power = stage4_coal_power
-policy.stage5_automation_science = stage5_automation_science
-policy.stage6_logistics_science = stage6_logistics_science
-policy.stage7_oil_processing = stage7_oil_processing
-policy.stage8_rocket_prerequisites = stage8_rocket_prerequisites
-policy.stage9_rocket_silo = stage9_rocket_silo
-policy.stage10_launch = stage10_launch
-
--- Initialise stage helper: generate the 10-stage milestone source
--- from policy. Returns an array of milestone descriptions the driver uses.
-function policy.milestones()
-    local ms = {}
-    for _, stage in ipairs(policy.STAGES) do
-        ms[#ms + 1] = {
-            kind = "stage",
-            stage_id = stage.id,
-            name = stage.name,
-            label = stage.label,
-            description = stage.description,
-            deadline_ticks = stage.deadline_ticks,
-            iron_target = stage.iron_target,
-            copper_target = stage.copper_target,
-            prerequisites = stage.prerequisites,
-        }
-    end
-    return ms
-end
-
--- Hash all policy definitions for the experiment manifest.
-function policy.hash()
-    local h = {}
-    for _, stage in ipairs(policy.STAGES) do
-        h[stage.name] = {
-            id = stage.id,
-            iron_target = stage.iron_target,
-            copper_target = stage.copper_target,
-            deadline_ticks = stage.deadline_ticks,
-            prerequisites = stage.prerequisites,
-        }
-    end
-    h.rocket_parts_required = policy.PINNED.rocket_parts_required
-    h.starter_pack = policy.PINNED.starter_pack
-    h.foundation_cost = policy.PINNED.foundation_cost
-    h.total_payload_steel = policy.PINNED.total_payload_steel
-    h.total_payload_cable = policy.PINNED.total_payload_cable
-    return h
+    return { kind = policy.KINDS.OBSERVE, stage = 10,
+             _advance_stage = true,
+             reason = "stage 10 complete, rocket launched" }
 end

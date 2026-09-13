@@ -4150,22 +4150,6 @@ impl PlanState {
                 });
             }
         }
-        // **ORE tiles block placement** in Factorio 2.0/Space Age: the
-        // game refuses `can_place_entity said 'no' (in the footprint: iron-ore)`.
-        // Resources are stored separately from blocked_tree, so we check every
-        // tile in the placement area for resources.
-        let min_x = area.left_top.x().floor() as i32;
-        let max_x = area.right_bottom.x().ceil() as i32;
-        let min_y = area.left_top.y().floor() as i32;
-        let max_y = area.right_bottom.y().ceil() as i32;
-        for x in min_x..=max_x {
-            for y in min_y..=max_y {
-                let pos = factorio_bot_core::types::Pos(x, y);
-                if self.base.entity_graph.any_resource_at(&pos) {
-                    return Some(Occupant::Terrain { minable: true });
-                }
-            }
-        }
         // Ore is deliberately NOT a sixth source: a resource collides on the
         // `resource` layer alone and nothing buildable carries it, so the game
         // builds straight over a patch. See this function's doc.

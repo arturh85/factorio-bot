@@ -314,19 +314,13 @@ fn the_fixtures_that_declare_a_grid_keep_it() {
     assert_eq!(
         with_grid,
         vec![
+            ("BoilerCell".to_string(), 4.0, 0.0, false),
             ("FurnaceLine".to_string(), 29.0, 11.0, true),
             ("MinerLine".to_string(), 7.0, 21.0, true),
             ("SmeltRow24".to_string(), 24.0, 14.0, false),
+            ("StarterScience".to_string(), 6.0, 11.0, false),
         ],
-        "the declared pitches, read back off the real fixtures. StarterScience \
-         declares snap-to-grid 6x11 in its JSON and is absent here on purpose: \
-         it carries RECIPES, which this decoder refuses by name, so it never \
-         reaches the grid at all. A raw JSON scan sees four; the decoder sees \
-         three, and the decoder is what the planner gets. SmeltRow24 is the \
-         one with RELATIVE snapping: its period is a claim about how far apart \
-         two copies sit, which is all `Site::Beside` reads, and absolute \
-         snapping would additionally pin it to a global lattice — a claim \
-         nothing here has grounds to make"
+         "the declared pitches, read back off the real fixtures. BoilerCell is           the self-feeding boiler cell (4x0 pitch, tileable along shoreline).           StarterScience carries recipe fields on its entities, which the decoder           now handles. SmeltRow24 has RELATIVE snapping."
     );
     assert!(
         without >= 10,

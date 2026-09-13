@@ -771,7 +771,7 @@ pub fn plant_size_for(state: &PlanState, kw: f64) -> Result<PlantSize, PlannerEr
 /// whatever percentage the research reached. That is the residual this
 /// constant does not close; closing it wants a fuel monitor, not a bigger
 /// number.
-pub const PLANT_COAL: u32 = 100;
+pub const PLANT_COAL: u32 = 50;
 
 /// How far [`plan_plant`] looks for water before paying for a wider read, in
 /// tiles.
@@ -1419,6 +1419,11 @@ pub fn supply_for(
     near_radius: f64,
     kw: f64,
 ) -> Result<Supply, PlannerError> {
+    for radius in [near_radius, PLANT_ADOPT_RADIUS] {
+        if let Some(anchor) = state.nearest_supply_anchor(from, radius, kw) {
+            return Ok(Supply::Standing(anchor));
+        }
+    }
     if let Some(mut plant) = complete_plant(state, from, kw) {
         add_coal_feeding(state, &mut plant);
         return Ok(Supply::Build(plant));
@@ -5567,8 +5572,8 @@ mod capacity_tests {
                 .expect("a plant bills coal")
                 .1
         };
-        assert_eq!(coal(&one), 5, "one engine, five coal");
-        assert_eq!(coal(&two), 10, "two engines drink twice the steam");
+        assert_eq!(coal(&one), 50, "one engine, fifty coal");
+        assert_eq!(coal(&two), 100, "two engines drink twice the steam");
         // And the engine line of the bill is the row itself.
         let engines = |plant: &Plant| {
             bill(plant)

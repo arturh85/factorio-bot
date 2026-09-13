@@ -4714,7 +4714,7 @@ impl Method for Researched {
                             ctx.chain_actor,
                             block_bill_ticks(&ctx.state, ctx.chain_actor, &built, &mut covered),
                         );
-                        steps.extend(built);
+                        steps.extend(built.to_vec());
                         power_links = links;
                         anchor
                     }

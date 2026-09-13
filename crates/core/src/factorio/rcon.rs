@@ -24,6 +24,7 @@ use crate::types::{
     InventoryResponse, PlayerId, Pos, Position, Rect, RequestEntity,
 };
 use miette::{Context, IntoDiagnostic, Report, Result, miette};
+use crate::constants::BOT_FORCE;
 use parking_lot::RwLock;
 use rcon::Connection;
 use serde::{Deserialize, Serialize};
@@ -4224,13 +4225,64 @@ impl FactorioRcon {
                 ActionTicks::at(dispatched),
             ));
         }
-        self.sleep_for_action_result_until(
-            world,
-            action_id,
-            dispatched,
-            Self::sized_deadline(expected_ticks),
-        )
-        .await
+        // Wait loop that ALSO checks if the technology was researched.
+        // The mod's on_research_finished writes to world.actions; if that
+        // signal is missed (lab had no power, RCON reply lost), the
+        // technology_researched check catches it and returns early instead
+        // of hanging until sized_deadline.
+        let wait_start = Instant::now();
+        let deadline = Self::sized_deadline(expected_ticks);
+        let force_name = BOT_FORCE;
+        loop {
+            sleep(Duration::from_millis(500)).await;
+            
+            // Check if the action completed (mod wrote action_completed)
+            if let Some((_, outcome)) = world.globals.actions.remove(&action_id) {
+                if let Some(dispatched_tick) = dispatched
+                    && outcome.tick < dispatched_tick
+                {
+                    warn!(
+                        action_id,
+                        outcome_tick = outcome.tick,
+                        dispatched_tick,
+                        result = %outcome.result,
+                        "discarding a stale action outcome: stamped before dispatch"
+                    );
+                    continue;
+                }
+                let ticks = ActionTicks::new(dispatched, Some(outcome.tick));
+                if outcome.is_ok() {
+                    return Ok(ticks);
+                }
+                return Err(ActionFailure::refused(
+                    RconError {
+                        message: outcome.result,
+                    }
+                    .into(),
+                    ticks,
+                ));
+            }
+            
+            // NEW: Check if the technology was already researched
+            // (e.g., the mod's on_research_finished fired but the action
+            // result was missed or the lab completed the research anyway)
+            if let Some(force) = world.globals.forces.get(force_name) {
+                if let Some(tech) = force.technologies.get(technology_name) {
+                    if tech.researched {
+                        let last_tick = self.last_tick.load(std::sync::atomic::Ordering::Relaxed);
+                        let ticks = ActionTicks::new(dispatched, Some(last_tick));
+                        return Ok(ticks);
+                    }
+                }
+            }
+            
+            if wait_start.elapsed() > deadline {
+                return Err(ActionFailure::no_verdict(
+                    RconTimeout {}.into(),
+                    ActionTicks::new(dispatched, None),
+                ));
+            }
+        }
     }
 
     /// Cheats in an Item in given quantity to given player
@@ -4521,7 +4573,7 @@ impl FactorioRcon {
     ) -> Result<ActionTicks, ActionFailure> {
         let wait_start = Instant::now();
         loop {
-            sleep(Duration::from_millis(50)).await;
+            sleep(Duration::from_millis(500)).await;
             // Take the reply in one operation. Looking it up with `get` and
             // then calling `remove` holds the shard's read guard across a call
             // that needs the same shard's write guard, which self-deadlocks the
@@ -4609,7 +4661,7 @@ impl FactorioRcon {
     ) -> Result<Vec<PathWaypoint>> {
         let wait_start = Instant::now();
         loop {
-            sleep(Duration::from_millis(50)).await;
+            sleep(Duration::from_millis(500)).await;
             // Take the reply in one operation -- see sleep_for_action_result.
             if let Some((_, mut result)) = world.globals.path_requests.remove(&request_id) {
                 if result == "{}" {

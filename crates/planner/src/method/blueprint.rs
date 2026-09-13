@@ -2111,6 +2111,7 @@ mod tests {
             offset: Position::new(x, 0.0),
             direction: 4,
             underground_half: None::<UndergroundHalf>,
+            recipe: None,
         }
     }
 
@@ -2130,6 +2131,7 @@ mod tests {
             offset: Position::new(x, y),
             direction: 0,
             underground_half: None::<UndergroundHalf>,
+            recipe: None,
         }
     }
 

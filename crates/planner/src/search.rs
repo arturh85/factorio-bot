@@ -211,6 +211,7 @@ fn bp(name: &str, x: f64, y: f64, direction: u8) -> BlueprintEntity {
         offset: Position::new(x, y),
         direction,
         underground_half: None,
+        recipe: None,
     }
 }
 

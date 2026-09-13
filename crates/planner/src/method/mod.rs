@@ -766,6 +766,10 @@ fn expand_goal(
 ) -> Result<(), PlannerError> {
     factorio_bot_core::plan_work::count(|c| c.goals_expanded += 1);
     if ctx.depth >= MAX_EXPANSION_DEPTH {
+        factorio_bot_core::tracing::warn!(
+            "expansion too deep: depth={} goal={:?}",
+            ctx.depth, goal
+        );
         return Err(PlannerError::ExpansionTooDeep {
             goal: goal.to_string(),
             depth: MAX_EXPANSION_DEPTH,

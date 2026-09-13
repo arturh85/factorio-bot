@@ -3073,7 +3073,7 @@ impl PlanState {
         *bot.inventory.entry(item.to_string()).or_insert(0) += count;
     }
 
-    pub fn lose(&mut self, id: BotId, item: &str, count: u32) -> Result<(), PlannerError> {
+        pub fn lose(&mut self, id: BotId, item: &str, count: u32) -> Result<(), PlannerError> {
         let available = self.inventory_count(id, item);
         if available < count {
             return Err(PlannerError::InsufficientItems {

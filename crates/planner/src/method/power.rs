@@ -323,6 +323,12 @@ pub const PIPE: &str = "pipe";
 pub const BOILER: &str = "boiler";
 pub const ENGINE: &str = "steam-engine";
 pub const POLE: &str = "small-electric-pole";
+pub const MINER: &str = "burner-mining-drill";
+pub const BELT: &str = "transport-belt";
+pub const FUEL_INS: &str = "burner-inserter";
+pub const COAL_SEARCH_RADIUS: f64 = 28.0;
+pub const MAX_COAL_BELTS: u32 = 15;
+pub const PRIME_COAL: u32 = 2;
 
 /// How many pipes a **one-boiler** plant lays. Derived by [`layout`], asserted
 /// by a test — this is the bill, not the design.
@@ -765,7 +771,7 @@ pub fn plant_size_for(state: &PlanState, kw: f64) -> Result<PlantSize, PlannerEr
 /// whatever percentage the research reached. That is the residual this
 /// constant does not close; closing it wants a fuel monitor, not a bigger
 /// number.
-pub const PLANT_COAL: u32 = 5;
+pub const PLANT_COAL: u32 = 100;
 
 /// How far [`plan_plant`] looks for water before paying for a wider read, in
 /// tiles.
@@ -1413,12 +1419,8 @@ pub fn supply_for(
     near_radius: f64,
     kw: f64,
 ) -> Result<Supply, PlannerError> {
-    for radius in [near_radius, PLANT_ADOPT_RADIUS] {
-        if let Some(anchor) = state.nearest_supply_anchor(from, radius, kw) {
-            return Ok(Supply::Standing(anchor));
-        }
-    }
-    if let Some(plant) = complete_plant(state, from, kw) {
+    if let Some(mut plant) = complete_plant(state, from, kw) {
+        add_coal_feeding(state, &mut plant);
         return Ok(Supply::Build(plant));
     }
     // The tier that used to ignore `kw` entirely, and the whole of roadmap
@@ -1972,7 +1974,8 @@ pub fn plan_plant_for(state: &PlanState, from: &Position, kw: f64) -> Result<Pla
     let distance = calculate_distance(&tile_centre(&anchor), from);
 
     for (tile, facing) in shore_candidates(state, &anchor) {
-        if let Some(plant) = fit(state, &tile, facing, size) {
+        if let Some(mut plant) = fit(state, &tile, facing, size) {
+            add_coal_feeding(state, &mut plant);
             return Ok(plant);
         }
     }
@@ -2256,6 +2259,114 @@ pub(crate) fn entity_for(state: &PlanState, part: &PlantPart) -> FactorioEntity 
     }
 }
 
+/// Find a coal tile near the plant and add a self-feeding miner + belt + inserter.
+/// Best-effort: if no coal is found within COAL_SEARCH_RADIUS or the belt run
+/// is too long (> MAX_COAL_BELTS tiles), quietly does nothing -- the plant
+/// relies on its initial PLANT_COAL charge instead.
+fn add_coal_feeding(state: &PlanState, plant: &mut Plant) {
+    let boiler = match plant.boilers.first() {
+        Some(b) => b.clone(),
+        None => return,
+    };
+    let search_radius = COAL_SEARCH_RADIUS as i32;
+    let bx = boiler.x().floor() as i32;
+    let by = boiler.y().floor() as i32;
+    let mut coal_positions: Vec<Position> = Vec::new();
+    for dx in -search_radius..=search_radius {
+        for dy in -search_radius..=search_radius {
+            let d = ((dx * dx + dy * dy) as f64).sqrt();
+            if d > COAL_SEARCH_RADIUS { continue; }
+            let pos = Position::new((bx as f64) + (dx as f64) + 0.5, (by as f64) + (dy as f64) + 0.5);
+            if state.resource_available(&pos, "coal") > 0 {
+                coal_positions.push(pos);
+            }
+        }
+    }
+    if coal_positions.is_empty() { return; }
+    let coal_centre = coal_positions.into_iter()
+        .min_by(|a, b| calculate_distance(a, &boiler).partial_cmp(&calculate_distance(b, &boiler)).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap();
+    let dx = boiler.x() - coal_centre.x();
+    let dy = boiler.y() - coal_centre.y();
+    let abs_dx = dx.abs();
+    let abs_dy = dy.abs();
+    // Drill faces away from boiler so output goes toward boiler
+    let drill_dir = if abs_dx > abs_dy {
+        if dx > 0.0 { Direction::West } else { Direction::East }
+    } else {
+        if dy > 0.0 { Direction::North } else { Direction::South }
+    };
+    // Belt toward boiler: L-shaped route (dominant axis first, then other)
+    let (step_first, step_second) = if abs_dx > abs_dy {
+        ((dx.signum(), 0.0), (0.0, dy.signum()))
+    } else {
+        ((0.0, dy.signum()), (dx.signum(), 0.0))
+    };
+    let (step_first_x, step_first_y) = step_first;
+    let (step_second_x, step_second_y) = step_second;
+    let mut belt_positions: Vec<Position> = Vec::new();
+    // Start from drill output
+    let start_x = coal_centre.x() + if drill_dir == Direction::East { -1.0 } else if drill_dir == Direction::West { 1.0 } else { 0.0 };
+    let start_y = coal_centre.y() + if drill_dir == Direction::South { -1.0 } else if drill_dir == Direction::North { 1.0 } else { 0.0 };
+    let mut cx = start_x;
+    let mut cy = start_y;
+    // First leg: dominant axis
+    let mut belt_count = 0u32;
+    loop {
+        // Check if we need to turn
+        let dist_to_boiler = calculate_distance(&Position::new(cx, cy), &boiler);
+        if dist_to_boiler <= 2.5 { break; }
+        // Try moving on first axis
+        let next_x = cx + step_first_x;
+        let next_y = cy + step_first_y;
+        let dist_first = calculate_distance(&Position::new(next_x, next_y), &boiler);
+        if dist_first < dist_to_boiler {
+            cx = next_x; cy = next_y;
+        } else {
+            // Switch to second axis
+            let next_x = cx + step_second_x;
+            let next_y = cy + step_second_y;
+            let dist_second = calculate_distance(&Position::new(next_x, next_y), &boiler);
+            if dist_second < dist_to_boiler {
+                cx = next_x; cy = next_y;
+            } else { break; }
+        }
+        belt_positions.push(Position::new(cx, cy));
+        belt_count += 1;
+        if belt_count > MAX_COAL_BELTS { return; }
+    }
+    if belt_positions.is_empty() { return; }
+    // Inserter at the last belt tile + one step toward the boiler
+    let last = belt_positions.last().unwrap();
+    let inserter_pos = Position::new(last.x() + dx.signum(), last.y() + dy.signum());
+    let inserter_dir = if abs_dx > abs_dy {
+        if dx > 0.0 { Direction::West } else { Direction::East }
+    } else {
+        if dy > 0.0 { Direction::North } else { Direction::South }
+    };
+    // Check belt and inserter placement
+    if !state.is_area_free_facing(FUEL_INS, &inserter_pos, inserter_dir) { return; }
+    for bp in &belt_positions {
+        if !state.is_area_free_facing(BELT, bp, belt_dir(dx.signum(), dy.signum())) { return; }
+    }
+    // Add all parts
+    plant.parts.push(PlantPart { name: MINER, position: coal_centre, direction: drill_dir });
+    for bp in belt_positions {
+        plant.parts.push(PlantPart { name: BELT, position: bp, direction: belt_dir(dx.signum(), dy.signum()) });
+    }
+    plant.parts.push(PlantPart { name: FUEL_INS, position: inserter_pos, direction: inserter_dir });
+}
+
+fn belt_dir(sign_x: f64, sign_y: f64) -> Direction {
+    if sign_x.abs() > sign_y.abs() {
+        if sign_x > 0.0 { Direction::East } else { Direction::West }
+    } else {
+        if sign_y > 0.0 { Direction::South } else { Direction::North }
+    }
+}
+
+
+
 /// Is `part.position` on the build grid its own prototype gives it?
 ///
 /// Only a test asks, but it asks of all four facings, which is the claim that
@@ -2499,6 +2610,53 @@ pub fn plant_steps(ctx: &mut ExpansionCtx, plant: &Plant) -> (Vec<Step>, Vec<Act
             duration: crate::method::have::TRANSFER_TICKS,
             pinned: None,
             label: format!("fuel the boiler with {} coal", count),
+        })));
+    }
+
+
+    // Prime the burner miner and inserter with PRIME_COAL each.
+    for part in &plant.parts {
+        let (entity, fuel_count) = match part.name {
+            MINER => (MINER, PRIME_COAL),
+            FUEL_INS => (FUEL_INS, PRIME_COAL),
+            _ => continue,
+        };
+        let fuel = ctx.ids.next();
+        order_research_after.push(fuel);
+        steps.push(Step::Act(Box::new(Action {
+            id: fuel,
+            kind: ActionKind::Insert {
+                pos: part.position.clone(),
+                entity: entity.into(),
+                slot: InventorySlot::Fuel,
+                item: "coal".into(),
+                count: fuel_count,
+            },
+            pre: vec![
+                Condition::AtPosition {
+                    who: Actor::Role,
+                    pos: part.position.clone(),
+                    radius: reach,
+                    min_radius: 0.0,
+                },
+                Condition::EntityAt {
+                    pos: part.position.clone(),
+                    name: entity.into(),
+                },
+                Condition::HasItem {
+                    who: Actor::Role,
+                    item: "coal".into(),
+                    count: fuel_count,
+                },
+            ],
+            eff: vec![Effect::LoseItem {
+                who: Actor::Role,
+                item: "coal".into(),
+                count: fuel_count,
+            }],
+            duration: crate::method::have::TRANSFER_TICKS,
+            pinned: None,
+            label: format!("fuel the {} with {} coal", entity, fuel_count),
         })));
     }
 

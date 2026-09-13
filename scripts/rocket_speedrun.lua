@@ -58,6 +58,10 @@ function rocket_speedrun.goal_from_decision(decision)
         return nil
     elseif gtype == "observe" then
         return nil
+    elseif gtype == "charted" then
+        local cx = (g.centre and g.centre.x) or 0
+        local cy = (g.centre and g.centre.y) or 0
+        return goal.charted(cx, cy, g.radius or 256)
     elseif gtype == "blueprint" then
         return goal.built(g.blueprint, g.site or {x = 50, y = -50})
     end
@@ -78,16 +82,6 @@ function rocket_speedrun.source(config, initial_memory)
     local issued_goals = {}
 
     return function(_history)
-        -- Force-complete all technologies so the game allows entity placements
-        -- (trigger technologies don't fire on headless mode)
-        local cheat_done = false
-        if type(rcon) == "table" and type(rcon.cheat_all_technologies) == "function" then
-            local ok, err = pcall(rcon.cheat_all_technologies)
-            if ok then
-                cheat_done = true
-            end
-        end
-
         -- Get the next decision from policy
         local snapshot = rocket_speedrun.build_snapshot()
         local next_mem, decision = policy.next(config, memory, snapshot)

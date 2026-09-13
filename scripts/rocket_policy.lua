@@ -355,10 +355,9 @@ policy.STAGES = {
     {
         id = 6,
         name = "logistics-science",
-        label = "Logistic science pack production; research logistic-science-pack",
-        deadline_ticks = 216000,  -- ~40 minutes
-        prerequisites = { "logistics", "logistic-science-pack" },
-        description = "Logistic science to unlock belts and inserter upgrades",
+        label = "Research logistic-science-pack technology",
+        deadline_ticks = 360000,  -- ~60 minutes
+        description = "Research logistic science pack via lab; unlock belts and inserter upgrades",
     },
     {
         id = 7,
@@ -370,20 +369,32 @@ policy.STAGES = {
     },
     {
         id = 8,
+        name = "chemical-science-research",
+        label = "Research chemical-science-pack technology",
+        description = "Research chemical science pack using lab with advanced packs",
+    },
+    {
+        id = 9,
+        name = "lds-prerequisite-research",
+        label = "Research low-density-structure and rocket-fuel technologies",
+        description = "Complete the technology chain needed for LDS and rocket-fuel production",
+    },
+    {
+        id = 10,
         name = "rocket-prerequisites",
         label = "Rocket fuel + low density structure production loops",
         prerequisites = { "advanced-material-processing-2", "rocket-fuel", "low-density-structure" },
         description = "Establish rocket fuel cracking and LDS casting",
     },
     {
-        id = 9,
+        id = 11,
         name = "rocket-silo",
         label = "Rocket silo construction; payload (50 parts) production",
         prerequisites = { "rocket-silo" },
         description = "Build rocket silo; produce 50 rocket parts",
     },
     {
-        id = 10,
+        id = 12,
         name = "launch",
         label = "Starter pack launch; manifest complete",
         description = "Launch rocket with space-platform-starter-pack payload",
@@ -702,11 +713,15 @@ function policy.next(config, memory, snapshot)
     elseif stage_id == 7 then
         decision = stage7_oil_processing(cfg, next_mem, snapshot, stage_def)
     elseif stage_id == 8 then
-        decision = stage8_rocket_prerequisites(cfg, next_mem, snapshot, stage_def)
+        decision = stage8_chemical_science_research(cfg, next_mem, snapshot, stage_def)
     elseif stage_id == 9 then
-        decision = stage9_rocket_silo(cfg, next_mem, snapshot, stage_def)
+        decision = stage9_lds_prerequisite_research(cfg, next_mem, snapshot, stage_def)
     elseif stage_id == 10 then
-        decision = stage10_launch(cfg, next_mem, snapshot, stage_def)
+        decision = stage10_rocket_prerequisites(cfg, next_mem, snapshot, stage_def)
+    elseif stage_id == 11 then
+        decision = stage11_rocket_silo(cfg, next_mem, snapshot, stage_def)
+    elseif stage_id == 12 then
+        decision = stage12_launch(cfg, next_mem, snapshot, stage_def)
     else
         next_mem.state = "complete"
         return next_mem, { kind = policy.KINDS.COMPLETE, stage = stage_id, reason = "all stages complete" }
@@ -918,19 +933,18 @@ end
 
 --- Stage 5: Automation science pack production
 function stage5_automation_science(cfg, memory, snapshot, stage_def)
+    -- Craft a lab to trigger automation-science-pack tech (unlocks the pack recipe)
+    if not memory.s5_lab then
+        memory.s5_lab = true
+        return { kind = policy.KINDS.BUILD, stage = 5,
+                 goal = { type = "have", item = "lab", count = 1 },
+                 reason = "craft lab to trigger automation-science-pack technology" }
+    end
     if not memory.s5_packs then
         memory.s5_packs = true
-        -- Keep bots at spawn so coal chests from stage 4 are accessible.
-        -- The module planner will site the cell near the existing infrastructure.
-        -- Use PRODUCE so the module planner handles everything on one
-        -- chain: craft assembler, place it, set recipe, feed, collect.
         return { kind = policy.KINDS.BUILD, stage = 5,
-                 -- Use HAVE so HandCraft handles crafting on the same chain.
-                 -- The module planner (PRODUCE) has inventory routing issues
-                 -- where subgoal items go to different bots than the actions
-                 -- that use them.
                  goal = { type = "have", item = "automation-science-pack", count = 10 },
-                 reason = "produce 10 automation science packs for stage 5" }
+                 reason = "produce 10 automation science packs" }
     end
 
     return { kind = policy.KINDS.OBSERVE, stage = 5,
@@ -940,11 +954,13 @@ end
 
 --- Stage 6: Logistic science packs
 function stage6_logistics_science(cfg, memory, snapshot, stage_def)
-    if not memory.s6_packs then
-        memory.s6_packs = true
+    -- Research logistic-science-pack technology via lab.
+    -- The planner handles lab setup, science pack production, and research time.
+    if not memory.s6_research then
+        memory.s6_research = true
         return { kind = policy.KINDS.BUILD, stage = 6,
-                 goal = { type = "have", item = "logistic-science-pack", count = 10 },
-                 reason = "produce 10 logistic science packs for stage 6" }
+                 goal = { type = "researched", name = "logistic-science-pack" },
+                 reason = "research logistic-science-pack technology" }
     end
 
     return { kind = policy.KINDS.OBSERVE, stage = 6,
@@ -954,91 +970,146 @@ end
 
 --- Stage 7: Oil processing — refinery, chemical plant, plastic, advanced circuits
 function stage7_oil_processing(cfg, memory, snapshot, stage_def)
-    -- Place mall cells using tilable blueprints with pre-set recipes.
+    -- Chart a large area first to find crude oil (seed 31337 has oil at ~372 tiles)
+    if not memory.s7_charted then
+        memory.s7_charted = true
+        return { kind = policy.KINDS.BUILD, stage = 7,
+                 goal = { type = "charted", radius = 384, centre = { x = 0, y = 0 } },
+                 reason = "chart area for crude oil (searching 384 tiles)" }
+    end
     if not memory.s7_oil then
         memory.s7_oil = true
         return { kind = policy.KINDS.BUILD, stage = 7,
-                 goal = { type = "blueprint", blueprint = MALL.oil_cell, site = {x = 10.5, y = 5.5} },
-                 limits = { max_new_copies = 1 },
-                 reason = "build petrochem processing cell for stage 7" }
+                 goal = { type = "have", item = "oil-refinery", count = 1 },
+                 reason = "build oil refinery" }
+    end
+    if not memory.s7_chem_plastic then
+        memory.s7_chem_plastic = true
+        return { kind = policy.KINDS.BUILD, stage = 7,
+                 goal = { type = "have", item = "chemical-plant", count = 1 },
+                 reason = "build chem plant for plastic" }
+    end
+    if not memory.s7_chem_sulfur then
+        memory.s7_chem_sulfur = true
+        return { kind = policy.KINDS.BUILD, stage = 7,
+                 goal = { type = "have", item = "chemical-plant", count = 1 },
+                 reason = "build chem plant for sulfur" }
     end
     if not memory.s7_steel then
         memory.s7_steel = true
         return { kind = policy.KINDS.BUILD, stage = 7,
-                 goal = { type = "blueprint", blueprint = MALL.steel_cell, site = {x = 10.5, y = 5.5} },
-                 limits = { max_new_copies = 1 },
-                 reason = "build steel furnace cell for stage 7" }
+                 goal = { type = "have", item = "steel-furnace", count = 1 },
+                 reason = "build steel furnace" }
     end
     if not memory.s7_circuits then
         memory.s7_circuits = true
         return { kind = policy.KINDS.BUILD, stage = 7,
-                 goal = { type = "blueprint", blueprint = MALL.circuit_cell, site = {x = 10.5, y = 5.5} },
-                 limits = { max_new_copies = 1 },
-                 reason = "build electronic circuit cell for stage 7" }
+                 goal = { type = "have", item = "assembling-machine-1", count = 1 },
+                 reason = "build assembler for circuits" }
     end
     return { kind = policy.KINDS.OBSERVE, stage = 7,
              _advance_stage = true,
              reason = "stage 7 complete, advancing" }
 end
-function stage8_rocket_prerequisites(cfg, memory, snapshot, stage_def)
-    -- Mall produces steel, circuits, PU. Use goal.have for everything.
-    if not memory.s8_steel then
-        memory.s8_steel = true
+function stage8_chemical_science_research(cfg, memory, snapshot, stage_def)
+    -- Research chemical-science-pack technology.
+    -- Requires oil processing (stage 7) to be established first.
+    if not memory.s8_research then
+        memory.s8_research = true
         return { kind = policy.KINDS.BUILD, stage = 8,
+                 goal = { type = "researched", name = "chemical-science-pack" },
+                 reason = "research chemical-science-pack technology" }
+    end
+
+    return { kind = policy.KINDS.OBSERVE, stage = 8,
+             _advance_stage = true,
+             reason = "stage 8 complete, advancing to LDS prerequisite research" }
+end
+
+
+function stage9_lds_prerequisite_research(cfg, memory, snapshot, stage_def)
+    -- Research the technologies needed for rocket prerequisites.
+    -- LDS tech: needs advanced-material-processing + chemical-science-pack
+    -- Rocket-fuel tech: needs flammables + advanced-oil-processing
+    -- The planner handles prerequisite chains and pack production.
+    if not memory.s9_lds_tech then
+        memory.s9_lds_tech = true
+        return { kind = policy.KINDS.BUILD, stage = 9,
+                 goal = { type = "researched", name = "low-density-structure" },
+                 reason = "research low-density-structure technology" }
+    end
+    if not memory.s9_rocket_fuel_tech then
+        memory.s9_rocket_fuel_tech = true
+        return { kind = policy.KINDS.BUILD, stage = 9,
+                 goal = { type = "researched", name = "rocket-fuel" },
+                 reason = "research rocket-fuel technology" }
+    end
+
+    return { kind = policy.KINDS.OBSERVE, stage = 9,
+             _advance_stage = true,
+             reason = "stage 9 complete, LDS and rocket-fuel researched, advancing to rocket prerequisites" }
+end
+
+
+function stage10_rocket_prerequisites(cfg, memory, snapshot, stage_def)
+    -- Mall produces steel, circuits, PU. Use goal.have for everything.
+    if not memory.s10_steel then
+        memory.s10_steel = true
+        return { kind = policy.KINDS.BUILD, stage = 10,
                  goal = { type = "have", item = "steel-plate", count = 200 },
                  reason = "get steel plates for rocket prerequisites" }
     end
-    if not memory.s8_lds then
-        memory.s8_lds = true
-        return { kind = policy.KINDS.BUILD, stage = 8,
+    if not memory.s10_lds then
+        memory.s10_lds = true
+        return { kind = policy.KINDS.BUILD, stage = 10,
                  goal = { type = "have", item = "low-density-structure", count = 10 },
                  reason = "get LDS for rocket parts" }
     end
-    if not memory.s8_fuel then
-        memory.s8_fuel = true
-        return { kind = policy.KINDS.BUILD, stage = 8,
+    if not memory.s10_fuel then
+        memory.s10_fuel = true
+        return { kind = policy.KINDS.BUILD, stage = 10,
                  goal = { type = "have", item = "rocket-fuel", count = 10 },
                  reason = "get rocket fuel for rocket" }
     end
-    return { kind = policy.KINDS.OBSERVE, stage = 8,
+    return { kind = policy.KINDS.OBSERVE, stage = 10,
              _advance_stage = true,
-             reason = "stage 8 complete, advancing to silo" }
+             reason = "stage 10 complete, advancing to silo" }
 end
 
-function stage9_rocket_silo(cfg, memory, snapshot, stage_def)
-    if not memory.s9_silo then
-        memory.s9_silo = true
-        return { kind = policy.KINDS.BUILD, stage = 9,
+function stage11_rocket_silo(cfg, memory, snapshot, stage_def)
+    if not memory.s11_silo then
+        memory.s11_silo = true
+        return { kind = policy.KINDS.BUILD, stage = 11,
                  goal = { type = "blueprint", blueprint = MALL.silo_cell,
                           site = {x = 40.5, y = 5.5} },
                  limits = { max_new_copies = 1 },
-                 reason = "build rocket silo for stage 9" }
+                 reason = "build rocket silo for stage 11" }
     end
     -- Wait for 50 rocket parts to be produced by the silo
     local parts = (snapshot.accessible_stock or {})["rocket-part"] or 0
     if parts >= 50 then
-        return { kind = policy.KINDS.OBSERVE, stage = 9,
+        return { kind = policy.KINDS.OBSERVE, stage = 11,
                  _advance_stage = true,
-                 reason = "stage 9 complete, have " .. parts .. " rocket parts" }
+                 reason = "stage 11 complete, have " .. parts .. " rocket parts" }
     end
-    return { kind = policy.KINDS.OBSERVE, stage = 9,
+    return { kind = policy.KINDS.OBSERVE, stage = 11,
              reason = "waiting for rocket parts: have " .. parts .. "/50" }
 end
 
-function stage10_launch(cfg, memory, snapshot, stage_def)
+function stage12_launch(cfg, memory, snapshot, stage_def)
     local parts = (snapshot.accessible_stock or {})["rocket-part"] or 0
     if parts < 50 then
-        return { kind = policy.KINDS.OBSERVE, stage = 10,
+        return { kind = policy.KINDS.OBSERVE, stage = 12,
                  reason = "need 50 rocket parts, have " .. parts }
     end
-    if not memory.s10_launch then
-        memory.s10_launch = true
+    if not memory.s12_launch then
+        memory.s12_launch = true
         -- Request a rocket launch through the Lua rocket API
         rocket.request{key="speedrun", payload="space-platform-starter-pack", planet="nauvis"}
-        return { kind = policy.KINDS.OBSERVE, stage = 10,
+        return { kind = policy.KINDS.OBSERVE, stage = 12,
                  reason = "rocket launch requested" }
     end
-    return { kind = policy.KINDS.OBSERVE, stage = 10,
+    return { kind = policy.KINDS.OBSERVE, stage = 12,
              _advance_stage = true,
-             reason = "stage 10 complete, rocket launched" }
+             reason = "stage 12 complete, rocket launched" }
 end

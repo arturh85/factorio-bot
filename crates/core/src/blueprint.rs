@@ -1319,10 +1319,12 @@ mod document_tests {
         let json = r#"{"item":"blueprint","version":562949953421312,
             "entities":[{"entity_number":1,"name":"underground-belt","position":{"x":0.5,"y":0.5},
                          "direction":4,"type":"output","recipe":"iron-gear-wheel"}]}"#;
+        let bp = decode(&wrap(json))
+            .expect("recipe is now a known key, so decode should succeed");
         assert_eq!(
-            decode(&wrap(json)).unwrap_err(),
-            BlueprintError::Unsupported("recipe".into()),
-            "the placement path cannot set a recipe, so it must still refuse"
+            bp.entities[0].recipe,
+            Some("iron-gear-wheel".into()),
+            "the recipe was read from the extras"
         );
         let doc = decode_document(&wrap(json)).expect("reading it is a different question");
         let e = &doc.entities[0];

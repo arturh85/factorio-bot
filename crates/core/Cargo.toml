@@ -55,7 +55,7 @@ alphanumeric-sort = "1.5"
 flate2 = "1.0"
 tar = "0.4"
 liblzma = "0.4"
-zip = "8.6"
+zip = "9.0"
 toml = "1.1"
 regex = "1.11"
 # Deliberately WITHOUT `preserve_order`. In schemars 0.8 that feature ordered

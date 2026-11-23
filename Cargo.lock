@@ -2434,6 +2434,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "maybe-dangling"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59dbb09ed53f8e4f314e353dc6c1853ae5b4c480a668a422657804a544ea9f65"
+
+[[package]]
 name = "maybe-rayon"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2535,9 +2541,9 @@ dependencies = [
 
 [[package]]
 name = "mlua"
-version = "0.12.0"
+version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad72ffa037cf5970c9860674f32f703fda25d86cf217475fe7a79c5f9961bcaa"
+checksum = "b9d9ed6deb2d17dbd89b71140f7fb8c6a3e5d897cd1bbc82ffaec1658bed6983"
 dependencies = [
  "bstr",
  "either",
@@ -2545,6 +2551,7 @@ dependencies = [
  "futures-util",
  "inventory",
  "libc",
+ "maybe-dangling",
  "mlua-sys",
  "mlua_derive",
  "num-traits",
@@ -2556,9 +2563,9 @@ dependencies = [
 
 [[package]]
 name = "mlua-sys"
-version = "0.11.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92136787b906d4e55cfe96cd6c62e010bb1a56889d0d6cf83eb016dbad07576b"
+checksum = "8db86de232224cf3909104dd1a2b46eaf94f0f31e137dd15f1ff185a1e54a31f"
 dependencies = [
  "cc",
  "cfg-if",
@@ -2568,9 +2575,9 @@ dependencies = [
 
 [[package]]
 name = "mlua_derive"
-version = "0.12.0"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0232231813b214d44b57c7678e7dbbcfaac35bd1a01acef0dad7c5dfdc1b1973"
+checksum = "9c4070bd35dad9477c94311c4668145bae8991b8accacf7201a77b14cab8a9e3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4222,7 +4229,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
